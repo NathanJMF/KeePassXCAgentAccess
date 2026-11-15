@@ -237,17 +237,33 @@ button.keeper-delete {
     border-radius: 9px;
     padding: 9px 12px;
 }
+.keeper-dialog.csd {
+    border-radius: 0 0 15px 15px;
+}
+.keeper-dialog.csd > decoration {
+    border-radius: 15px;
+}
+.keeper-dialog.csd > .titlebar {
+    border-radius: 15px 15px 0 0;
+}
 #keeper-settings {
     background-color: @keeper_surface;
 }
 #keeper-settings .keeper-settings-nav {
-    background-color: @keeper_canvas;
-    border: 1px solid @keeper_line;
-    border-radius: 11px;
+    background-color: transparent;
+}
+#keeper-settings .keeper-settings-nav,
+#keeper-settings .keeper-settings-nav list {
+    border-style: none;
+    box-shadow: none;
 }
 #keeper-settings .keeper-settings-nav list {
-    padding: 7px;
+    padding: 20px 8px 20px 20px;
     background-color: transparent;
+}
+#keeper-settings .keeper-settings-divider {
+    min-width: 1px;
+    background-color: @keeper_line;
 }
 #keeper-settings .keeper-settings-nav row {
     padding: 7px 9px;
@@ -468,7 +484,6 @@ def styled(widget, *classes):
 
 
 def install_style(window):
-    window.set_name("keeper-workspace")
     provider = Gtk.CssProvider()
     provider.load_from_data(CSS)
     Gtk.StyleContext.add_provider_for_screen(window.get_screen(), provider, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)

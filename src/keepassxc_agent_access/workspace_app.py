@@ -131,6 +131,7 @@ class WorkspaceApplication(Gtk.Application):
         self.window.set_default_size(1120, 700)
         self.window.connect("delete-event", self._window_closed)
         self.window.connect("key-press-event", self._keyboard)
+        self.window.set_name("keeper-workspace")
         self.style = install_style(self.window)
         self._build_header()
 
@@ -177,13 +178,17 @@ class WorkspaceApplication(Gtk.Application):
         brand.pack_start(badge, False, False, 0)
         brand.pack_start(Gtk.Label(label=APP_TITLE, xalign=0), False, False, 0)
         header.pack_start(brand)
-        add = styled(Gtk.Button(label="Add vault…", always_show_image=True), "keeper-control")
-        add.set_image(Gtk.Image.new_from_icon_name("list-add-symbolic", Gtk.IconSize.BUTTON))
-        add.connect("clicked", lambda *_: self._configure())
-        header.pack_start(add)
-        self.vault_lock_button = styled(Gtk.Button(always_show_image=True), "keeper-control")
-        self.vault_lock_icon = Gtk.Image()
-        self.vault_lock_button.set_image(self.vault_lock_icon)
+        self.add_vault_button = styled(Gtk.Button(), "keeper-control")
+        add_icon = Gtk.Image.new_from_icon_name("list-add-symbolic", Gtk.IconSize.BUTTON)
+        self._set_toolbar_content(self.add_vault_button, Gtk.Label(label="Add vault…"), add_icon)
+        self.add_vault_button.get_accessible().set_name("Add vault…")
+        self.add_vault_button.connect("clicked", lambda *_: self._configure())
+        header.pack_start(self.add_vault_button)
+        self.vault_lock_button = styled(Gtk.Button(), "keeper-control")
+        self.vault_lock_icon = Gtk.Image.new_from_icon_name("changes-prevent-symbolic", Gtk.IconSize.BUTTON)
+        self.vault_lock_labels = self._toolbar_labels(
+            self.vault_lock_button, ("Lock all vaults", "Unlock all vaults"), icon=self.vault_lock_icon,
+        )
         self.vault_lock_button.connect("clicked", self._toggle_all_vaults)
         header.pack_start(self.vault_lock_button)
         self.settings_button = styled(Gtk.Button(), "keeper-control", "keeper-quiet")
@@ -205,21 +210,28 @@ class WorkspaceApplication(Gtk.Application):
         header.pack_end(self.usage_button)
         header.show_all()
 
-    @staticmethod
-    def _toolbar_labels(button, labels, *, icon=None):
+    @classmethod
+    def _toolbar_labels(cls, button, labels, *, icon=None):
         stack = Gtk.Stack(hhomogeneous=True, vhomogeneous=True)
         for text in labels:
-            stack.add_named(Gtk.Label(label=text, xalign=0), text)
+            stack.add_named(Gtk.Label(label=text), text)
         stack.show_all()
         button.get_accessible().set_name(labels[0])
-        if icon is None:
-            button.add(stack)
-        else:
-            content = Gtk.Box(spacing=6)
-            content.pack_start(icon, False, False, 0)
-            content.pack_start(stack, False, False, 0)
-            button.add(content)
+        cls._set_toolbar_content(button, stack, icon)
         return stack
+
+    @staticmethod
+    def _set_toolbar_content(button, label, icon):
+        if icon is None:
+            button.add(label)
+            return
+        content = Gtk.Box(spacing=6)
+        icon.set_pixel_size(16)
+        # Balance the leading icon so the text itself sits at the button's midpoint.
+        content.pack_start(icon, False, False, 0)
+        content.pack_start(label, True, True, 0)
+        content.pack_end(Gtk.Box(width_request=16), False, False, 0)
+        button.add(content)
 
     @staticmethod
     def _show_toolbar_label(button, stack, label):
@@ -760,8 +772,8 @@ class WorkspaceApplication(Gtk.Application):
 
     def confirm(self, title, detail, *, delete=False):
         buttons = Gtk.ButtonsType.NONE if delete else Gtk.ButtonsType.OK_CANCEL
-        dialog = Gtk.MessageDialog(transient_for=self.window, modal=True, text=title,
-                                   secondary_text=detail, buttons=buttons)
+        dialog = styled(Gtk.MessageDialog(transient_for=self.window, modal=True, text=title,
+                                          secondary_text=detail, buttons=buttons), "keeper-dialog")
         if delete:
             dialog.add_buttons("Cancel", Gtk.ResponseType.CANCEL, "Delete", Gtk.ResponseType.OK)
             styled(dialog.get_widget_for_response(Gtk.ResponseType.OK), "destructive-action")
@@ -896,8 +908,8 @@ class WorkspaceApplication(Gtk.Application):
     def _refresh_vault_lock(self):
         unlocked = self._any_vault_unlocked()
         label = "Lock all vaults" if unlocked else "Unlock all vaults"
-        if self.vault_lock_button.get_label() != label:
-            self.vault_lock_button.set_label(label)
+        if self.vault_lock_labels.get_visible_child_name() != label:
+            self._show_toolbar_label(self.vault_lock_button, self.vault_lock_labels, label)
             icon = "changes-prevent-symbolic" if unlocked else "changes-allow-symbolic"
             self.vault_lock_icon.set_from_icon_name(icon, Gtk.IconSize.BUTTON)
         self.vault_lock_button.set_sensitive(bool(self.workspace and self.workspace.registrations
@@ -993,13 +1005,20 @@ class WorkspaceApplication(Gtk.Application):
         dialog, body = _dialog(self, "Keeper settings", 700, 490)
         dialog.set_name("keeper-settings")
         dialog.set_modal(True)
-        body.set_border_width(20)
-        panel = Gtk.Box(spacing=20)
-        stack = Gtk.Stack(hexpand=True, vexpand=True, hhomogeneous=False, vhomogeneous=False)
+        body.set_border_width(0)
+        body.set_spacing(0)
+        # This window uses only the title-bar close button.
+        action_box = dialog.get_action_area().get_parent()
+        action_box.set_no_show_all(True)
+        action_box.hide()
+        panel = Gtk.Box()
+        stack = Gtk.Stack(hexpand=True, vexpand=True, hhomogeneous=False, vhomogeneous=False, margin=20)
         stack.set_name("keeper-settings-pages")
         sidebar = styled(Gtk.StackSidebar(stack=stack), "keeper-settings-nav")
-        sidebar.set_size_request(160, -1)
+        sidebar.set_size_request(180, -1)
         panel.pack_start(sidebar, False, False, 0)
+        divider = styled(Gtk.Separator(orientation=Gtk.Orientation.VERTICAL), "keeper-settings-divider")
+        panel.pack_start(divider, False, False, 0)
         panel.pack_start(stack, True, True, 0)
         body.pack_start(panel, True, True, 0)
 

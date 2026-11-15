@@ -25,6 +25,7 @@ from .protocol import ListingError
 from .settings import SettingsError, SettingsStore
 from .setup import VaultSetup
 from .vault import UnlockCancelled, VaultError, VaultTarget
+from .workspace_style import install_style, styled
 
 
 APP_ID = "io.github.keepassxcagentaccess.Tray"
@@ -50,6 +51,7 @@ def password_entry():
 class SetupDialog(Gtk.Dialog):
     def __init__(self, window, target):
         super().__init__(title="Set up a KeePass database", transient_for=window, modal=True)
+        styled(self, "keeper-dialog")
         self.add_buttons("Cancel", Gtk.ResponseType.CANCEL, "Verify and save", Gtk.ResponseType.OK)
         self.set_default_response(Gtk.ResponseType.OK)
         self.database = Gtk.FileChooserButton(title="Choose a KeePass database")
@@ -152,6 +154,7 @@ class VaultApplication(Gtk.Application):
     def _build_window(self):
         self.window = Gtk.ApplicationWindow(application=self, title=APP_TITLE)
         self.window.set_default_size(480, 270)
+        install_style(self.window)
         self.window.connect("delete-event", self._window_closed)
         body = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12, margin=20)
         self.window.add(body)
@@ -373,7 +376,7 @@ class VaultApplication(Gtk.Application):
     def _manual_unlock(self, *_):
         if not self._ready():
             return
-        dialog = Gtk.Dialog(title="Unlock KeePass", transient_for=self.window, modal=True)
+        dialog = styled(Gtk.Dialog(title="Unlock KeePass", transient_for=self.window, modal=True), "keeper-dialog")
         dialog.add_buttons("Cancel", Gtk.ResponseType.CANCEL, "Unlock", Gtk.ResponseType.OK)
         dialog.set_default_response(Gtk.ResponseType.OK)
         entry = password_entry()

@@ -11,6 +11,7 @@ from .access_settings import AccessMode, Action
 from .activity import ActivityError
 from .protocol import ListingError, decode
 from .settings import SettingsError
+from .workspace_style import styled
 
 
 def _label(text):
@@ -39,7 +40,7 @@ def _table(model, titles):
 
 
 def _dialog(app, title, width=680, height=460):
-    dialog = Gtk.Dialog(title=title, transient_for=app.window, destroy_with_parent=True)
+    dialog = styled(Gtk.Dialog(title=title, transient_for=app.window, destroy_with_parent=True), "keeper-dialog")
     dialog.set_default_size(width, height)
     content = dialog.get_content_area()
     content.set_border_width(14)
