@@ -68,6 +68,11 @@ def row(label):
     return None
 
 
+def tray_labels():
+    _, _, rows = menu()
+    return tuple(label for label, (_, props) in rows.items() if props.get("visible", True))
+
+
 def click(label):
     name, path, (item, props) = wait_for(lambda: row(label))
     assert props.get("enabled", True)
@@ -131,16 +136,16 @@ def main(root):
     assert launcher.launch([], None)
     second = wait_for(app_pid)
     try:
-        wait_for(lambda: row("Resume agent access"))
+        wait_for(lambda: tray_labels() == ("Open Keeper", "Resume agent access", "Quit"))
         wait_for(endpoint.exists)
         subprocess.run(["setfacl", "-m", f"u:{uid}:rw", endpoint], check=True)
         result = invoke(root, endpoint)
         assert result.returncode != 0 and not result.stdout
         assert b"approved access token" in result.stderr
         click("Resume agent access")
-        wait_for(lambda: row("Pause agent access"))
+        wait_for(lambda: tray_labels() == ("Open Keeper", "Pause agent access", "Quit"))
         click("Pause agent access")
-        wait_for(lambda: row("Resume agent access"))
+        wait_for(lambda: tray_labels() == ("Open Keeper", "Resume agent access", "Quit"))
     finally:
         stop(second)
     assert not endpoint.exists()

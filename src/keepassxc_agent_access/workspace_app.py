@@ -355,8 +355,6 @@ class WorkspaceApplication(Gtk.Application):
         for key, name, callback in (
             ("open", f"Open {APP_TITLE}", self._present),
             ("pause", "Resume agent access", self._toggle_pause),
-            ("lock", "Lock all vaults", self._lock_all),
-            ("access", "Access", lambda *_: self._tray_access()),
             ("quit", "Quit", self._quit),
         ):
             item = Gtk.MenuItem(label=name)
@@ -372,11 +370,6 @@ class WorkspaceApplication(Gtk.Application):
         self.tray_connected = connected
         if not connected:
             self._present()
-
-    def _tray_access(self):
-        self._present()
-        if not self.desktop.locked:
-            self._view("access")
 
     def _window_closed(self, *_):
         if self.tray_connected:
@@ -425,7 +418,6 @@ class WorkspaceApplication(Gtk.Application):
             if self.indicator:
                 self.tray_items["pause"].set_label(pause_label)
                 self.tray_items["pause"].set_sensitive(self.pause_button.get_sensitive())
-                self.tray_items["access"].set_label(access_label)
                 self.indicator.set_icon_full(
                     TRAY_PAUSED_ICON if paused else TRAY_ACTIVE_ICON,
                     "Agent access paused" if paused else "Agent access active",
