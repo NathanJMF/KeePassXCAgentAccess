@@ -254,6 +254,42 @@ CSS = b"""
 #keeper-edit-review .keeper-review-blocker image {
     color: @keeper_warning;
 }
+#keeper-activity-detail .keeper-event-title {
+    font-size: 1.45em;
+    font-weight: 800;
+}
+#keeper-activity-detail .keeper-event-caption {
+    color: @keeper_muted;
+}
+#keeper-activity-detail .keeper-event-section {
+    border-radius: 9px;
+    border: 1px solid @keeper_line;
+    background-color: @keeper_canvas;
+    padding: 10px 12px;
+}
+#keeper-activity-detail .keeper-event-section-title {
+    font-weight: 800;
+}
+#keeper-activity-detail .keeper-event-badge {
+    border-radius: 7px;
+    border: 1px solid @keeper_line;
+    background-color: @keeper_canvas;
+    padding: 4px 7px;
+    font-weight: 700;
+}
+#keeper-activity-detail .keeper-event-badge.keeper-success {
+    color: @keeper_success;
+}
+#keeper-activity-detail .keeper-event-badge.keeper-failure {
+    color: @keeper_failure;
+}
+#keeper-activity-detail .keeper-event-badge.keeper-warning {
+    color: @keeper_warning;
+}
+#keeper-activity-detail .keeper-event-badge.keeper-accent {
+    color: @keeper_accent;
+}
+
 """
 
 

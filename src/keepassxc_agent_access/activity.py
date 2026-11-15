@@ -28,6 +28,25 @@ class Attribution:
         return cls(**{key: label(value) for key, value in payload.items()})
 
 
+def folder_label(parts):
+    return " / ".join(part or "(Untitled folder)" for part in parts) or "Root"
+
+
+def entry_label(title):
+    return title or "(Untitled entry)"
+
+
+def entry_target_labels(entries, identifier):
+    matches = [row for row in entries if row["id"] == identifier]
+    if len(matches) != 1:
+        return None, None
+    entry = matches[0]
+    path, title = entry.get("group_path"), entry.get("title")
+    if not isinstance(path, (list, tuple)) or not all(isinstance(part, str) for part in path):
+        return None, None
+    return folder_label(path), entry_label(title) if isinstance(title, str) else None
+
+
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS sessions (
     id INTEGER PRIMARY KEY,
@@ -45,6 +64,8 @@ CREATE TABLE IF NOT EXISTS activity (
     chat TEXT,
     action TEXT NOT NULL,
     entry TEXT,
+    folder TEXT,
+    entry_title TEXT,
     destination TEXT,
     decision TEXT,
     outcome TEXT NOT NULL,
@@ -81,7 +102,7 @@ class ActivityStore:
         with self.connection() as db:
             db.executescript(SCHEMA)
             columns = {column["name"] for column in db.execute("PRAGMA table_info(activity)")}
-            for name in ("entry", "vault", "vault_id", "token", "agent", "project", "scope"):
+            for name in ("entry", "vault", "vault_id", "token", "agent", "project", "scope", "folder", "entry_title"):
                 if name not in columns:
                     db.execute(f"ALTER TABLE activity ADD COLUMN {name} TEXT")
             db.execute(
@@ -99,7 +120,7 @@ class ActivityStore:
             db.execute("DELETE FROM sessions WHERE id NOT IN (SELECT session FROM activity)")
 
     def begin(self, uid, context, action, destination, entry=None, *, vault=None, vault_id=None,
-              token=None, agent=None, project=None, scope=None):
+              token=None, agent=None, project=None, scope=None, folder=None, entry_title=None):
         with self.connection() as db:
             chat_id = context.chat_id or ""
             db.execute("INSERT OR IGNORE INTO sessions(uid, chat_id) VALUES (?, ?)", (uid, chat_id))
@@ -108,10 +129,10 @@ class ActivityStore:
             ).fetchone()[0]
             cursor = db.execute(
                 """INSERT INTO activity(session, requested, model, chat, action, destination, entry,
-                                         vault, vault_id, token, agent, project, scope, outcome)
-                VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'Pending')""",
+                                         vault, vault_id, token, agent, project, scope, folder, entry_title, outcome)
+                VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'Pending')""",
                 (session, time(), context.model, context.chat, action, destination, entry,
-                 vault, vault_id, token, agent, project, scope),
+                 vault, vault_id, token, agent, project, scope, folder, entry_title),
             )
             return cursor.lastrowid
 
@@ -132,12 +153,12 @@ class ActivityStore:
             if changed != 1:
                 raise ActivityError()
 
-    def finish(self, event, outcome, status=None):
+    def finish(self, event, outcome, status=None, *, entry=None):
         now = time()
         with self.connection() as db:
             db.execute(
-                """UPDATE activity SET decided=coalesce(decided, ?), completed=?, outcome=?, status=?
-                WHERE id=?""", (now, now, outcome, status, event),
+                """UPDATE activity SET decided=coalesce(decided, ?), completed=?, outcome=?, status=?,
+                    entry=coalesce(entry, ?) WHERE id=?""", (now, now, outcome, status, entry, event),
             )
 
     def rows(self, *, model="", chat="", action="", outcome="", vault="", agent=""):

@@ -48,7 +48,7 @@ Use the global lock to stop agent discovery and protected work across all vaults
 
 Replace the standalone Actions dialog with a small binding editor on the selected entry. Start with the existing HTTPS Basic-auth GET adapter as a built-in type. Preserve existing binding identifiers and owner destinations. Scope each binding by vault and entry. Pin the security-relevant action revision in the token authorization, so changing the type or destination needs fresh approval. Keep TLS verification, fixed routing, bounded status results, and credential confinement in the existing HTTPS worker path.
 
-Keep the two bottom-right buttons and swap only the main pane. Access shows pending and approved rows in one table, including disabled tokens in the approved group. Double-click opens either request review or token management. Activity preserves the agreed five columns. Store token and vault references, decision context, and display snapshots in the local audit store so older rows remain readable after removals or renames. Keep the existing durable recording gate before protected work.
+Keep the two bottom-right buttons and swap only the main pane. Access shows pending and approved rows in one table, including disabled tokens in the approved group. Double-click opens either request review or token management. Activity shows Time, Model, Chat, Action, Vault, Target, and Outcome. Row details lead with the event and human-readable context, with technical identifiers in a collapsed section. Store token and vault references, decision context, and display snapshots in the local audit store so older rows remain readable after removals or renames. Keep the existing durable recording gate before protected work.
 
 ## Risks / Trade-offs
 

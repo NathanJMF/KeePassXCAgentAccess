@@ -363,6 +363,11 @@ def main(root):
             assert rows and all(row.get("token") for row in rows)
             outcomes = {row["outcome"].lower() for row in rows}
             assert "denied" in outcomes and "stale" in outcomes and {"applied", "succeeded"} & outcomes
+            assert any(row["outcome"] == "Denied" and row["folder"] == "Approved group"
+                       and row["entry_title"] == "Agent fixture" for row in rows)
+            assert any(row["outcome"] == "Succeeded" and row["entry"] == entry
+                       and row["folder"] == "Approved group" and row["entry_title"] == "Agent fixture"
+                       for row in rows)
             app.activity_button.clicked()
             app.activity_view.filters["chat"].set_text("Edit acceptance")
             app.activity_view.refresh()
@@ -580,9 +585,32 @@ def main(root):
                 app.activity_view.refresh()
                 assert len(app.activity_view.table.get_model()) > 0
                 assert all(row["agent"] == "Agent beta" for row in app.activity_view.rows.values())
-                assert old_activity.rows(vault="second", action="Use password")
-                assert old_activity.rows(action="Remove token")[0]["token"] == alpha_record.id
-                assert old_activity.rows(action="Legacy fixture")[0]["vault"] is None
+                access = next(row for row in old_activity.rows(vault="second", action="Use password")
+                              if row["entry"] == first_entry and row["entry_title"])
+                assert access["folder"] == "Root" and access["entry_title"] == fixture[0]["title"]
+                token_event = old_activity.rows(action="Remove token")[0]
+                assert token_event["token"] == alpha_record.id and token_event["entry_title"] == fixture[0]["title"]
+                legacy, = old_activity.rows(action="Legacy fixture")
+                assert legacy["vault"] is None and legacy["folder"] is None and legacy["entry_title"] is None
+
+                app.activity_view.filters["agent"].set_text("")
+                app.activity_view.refresh()
+                activity_table = app.activity_view.table
+                model = activity_table.get_model()
+                path = next(row.path for row in model if row[app.activity_view.RECORD_ID] == str(access["id"]))
+                row = model[path]
+                assert row[app.activity_view.TITLES.index("Vault")] == "second"
+                assert row[app.activity_view.TITLES.index("Target")] == "Root / " + fixture[0]["title"]
+                activity_table.get_selection().select_path(path)
+
+                def read_activity(dialog):
+                    labels = {child.get_text() for child in descendants(dialog) if isinstance(child, Gtk.Label)}
+                    assert {"Target", "Vault", "Folder", "Entry", "second", "Root", fixture[0]["title"]} <= labels
+                    expander = next(child for child in descendants(dialog) if isinstance(child, Gtk.Expander))
+                    assert expander.get_label() == "Technical details" and not expander.get_expanded()
+                    dialog.response(Gtk.ResponseType.CLOSE)
+
+                drive_dialog(lambda: activity_table.row_activated(path, activity_table.get_column(0)), read_activity)
                 check_agent_edits(first, second)
                 app.tray_items["pause"].activate()
                 assert app.workspace.paused and app.workspace.session(second)

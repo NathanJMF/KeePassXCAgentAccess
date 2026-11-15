@@ -313,8 +313,147 @@ class AccessView(Gtk.Box):
             self.app.owner_operation(lambda: self.app.grants.transition(grant.id, status))
 
 
+def activity_target(row):
+    parts = (row.get("folder"), row.get("entry_title"))
+    return " / ".join(part for part in parts if part) or "—"
+
+
+def activity_location(row, workspace):
+    """Prefer event-time labels and use exact current references for older rows."""
+    fields = (("vault", "Vault"), ("folder", "Folder"), ("entry_title", "Entry"))
+    values = {key: row.get(key) for key, _ in fields}
+    vault_id, entry_id = row.get("vault_id"), row.get("entry")
+    if workspace is not None and vault_id:
+        with workspace.mutex:
+            record = workspace.registrations.get(vault_id)
+            if not values["vault"] and record:
+                values["vault"] = f"{record.name} (current)"
+            if record and entry_id and not (values["entry_title"] and values["folder"]):
+                session = workspace.owner_session(vault_id)
+                if session:
+                    entry = next((item for item in session.entries if item["id"] == entry_id), None)
+                    if entry:
+                        path = " / ".join(name or "(Untitled folder)" for name in entry["group_path"]) or "Root"
+                        values["folder"] = values["folder"] or f"{path} (current)"
+                        title = entry["title"] or "(Untitled entry)"
+                        values["entry_title"] = values["entry_title"] or f"{title} (current)"
+    return tuple((caption, values[key]) for key, caption in fields)
+
+
+def activity_facts(pairs):
+    fields = tuple((caption, value) for caption, value in pairs if value is not None and value != "")
+    if not fields:
+        return None
+    grid = Gtk.Grid(column_spacing=18, row_spacing=7)
+    for index, (caption, value) in enumerate(fields):
+        label = styled(Gtk.Label(label=caption, xalign=0, valign=Gtk.Align.START), "keeper-event-caption")
+        label.set_width_chars(14)
+        content = _label(str(value))
+        content.set_line_wrap_mode(Pango.WrapMode.WORD_CHAR)
+        content.set_max_width_chars(56)
+        content.set_hexpand(True)
+        grid.attach(label, 0, index, 1, 1)
+        grid.attach(content, 1, index, 1, 1)
+    return grid
+
+
+def add_activity_section(container, heading, pairs):
+    facts = activity_facts(pairs)
+    if facts is None:
+        return
+    section = styled(Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8), "keeper-event-section")
+    section.pack_start(styled(Gtk.Label(label=heading, xalign=0), "keeper-event-section-title"), False, False, 0)
+    section.pack_start(facts, False, False, 0)
+    container.pack_start(section, False, False, 0)
+
+
+EDIT_FIELD_LABELS = {"title": "Title", "username": "Username", "url": "URL", "name": "Name"}
+
+
+def activity_edit_fields(row):
+    stage = row["action"].partition(" · ")[0]
+    if stage not in ("Request edit", "Apply edit", "Deny edit", "Cancel edit"):
+        return None
+    for part in (row.get("scope") or "").split(" · "):
+        if part.startswith("Fields "):
+            fields = part.removeprefix("Fields ").split(",")
+            labels = [EDIT_FIELD_LABELS[field.strip()] for field in fields if field.strip() in EDIT_FIELD_LABELS]
+            if labels:
+                caption = "Changed fields" if stage == "Apply edit" and row["outcome"] == "Succeeded" else "Proposed fields"
+                return caption, ", ".join(dict.fromkeys(labels))
+    return None
+
+
+def activity_execution(row):
+    requested, decided, completed = (_time(row[key]) if row.get(key) else None
+                                      for key in ("requested", "decided", "completed"))
+    fields = activity_edit_fields(row)
+    facts = (
+        ("Destination", row.get("destination")), ("Authorization", row.get("decision")),
+        ("HTTP status", row.get("status")), ("Decided", decided if decided not in (requested, completed) else None),
+        ("Completed", completed if completed != requested else None),
+    )
+    return (fields, *facts) if fields else facts
+
+
+def activity_dialog(app, row):
+    dialog, body = _dialog(app, "Activity details", 640, -1)
+    dialog.set_name("keeper-activity-detail")
+    dialog.set_modal(True)
+    dialog.add_button("Close", Gtk.ResponseType.CLOSE)
+    dialog.set_default_response(Gtk.ResponseType.CLOSE)
+    body.set_border_width(18)
+    body.set_spacing(14)
+
+    action = styled(_label(row["action"]), "keeper-event-title")
+    action.set_line_wrap_mode(Pango.WrapMode.WORD_CHAR)
+    action.set_max_width_chars(52)
+    body.pack_start(action, False, False, 0)
+    timestamp = styled(_label(_time(row["requested"])), "keeper-event-caption")
+    symbol, tone = ACTIVITY_STATES.get(row["outcome"], ("dialog-information-symbolic", "keeper_muted"))
+    badge = styled(Gtk.Box(spacing=5), "keeper-event-badge", tone.replace("_", "-"))
+    badge.pack_start(Gtk.Image.new_from_icon_name(symbol, Gtk.IconSize.BUTTON), False, False, 0)
+    badge.pack_start(_label(row["outcome"]), False, False, 0)
+    summary = Gtk.Box(spacing=10)
+    summary.pack_start(badge, False, False, 0)
+    summary.pack_start(timestamp, True, True, 0)
+    body.pack_start(summary, False, False, 0)
+
+    details = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=9, margin_end=6)
+    scroll = _scroll(details)
+    scroll.set_shadow_type(Gtk.ShadowType.NONE)
+    scroll.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+    scroll.set_propagate_natural_height(True)
+    scroll.set_max_content_height(480)
+    body.pack_start(scroll, True, True, 0)
+
+    add_activity_section(details, "Target", activity_location(row, app.workspace))
+    add_activity_section(details, "Request", (
+        (caption, reported(row[key]) if row.get(key) else None)
+        for key, caption in (("agent", "Agent"), ("project", "Project"), ("model", "Model"), ("chat", "Chat"))
+    ))
+    add_activity_section(details, "Execution", activity_execution(row))
+    technical = activity_facts((
+        ("Linux UID (verified)", row.get("uid")), ("Chat ID", row.get("chat_id")), ("Vault ID", row.get("vault_id")),
+        ("Entry ID", row.get("entry")), ("Token record", row.get("token")), ("Recorded scope", row.get("scope")),
+    ))
+    if technical is not None:
+        technical.set_margin_start(10)
+        technical.set_margin_top(8)
+        disclosure = Gtk.Expander(label="Technical details")
+        disclosure.set_margin_top(3)
+        disclosure.add(technical)
+        technical.show_all()
+        technical.set_no_show_all(True)
+        technical.hide()
+        disclosure.connect("notify::expanded", lambda control, _: technical.set_visible(control.get_expanded()))
+        details.pack_start(disclosure, False, False, 0)
+    return dialog
+
+
 class ActivityView(Gtk.Box):
-    TITLES = ("Time", "Model", "Chat", "Action", "Outcome")
+    TITLES = ("Time", "Model", "Chat", "Action", "Vault", "Target", "Outcome")
+    RECORD_ID = len(TITLES)
 
     def __init__(self, app):
         super().__init__(orientation=Gtk.Orientation.VERTICAL, spacing=18)
@@ -339,9 +478,9 @@ class ActivityView(Gtk.Box):
         button(tools, "Filters", self._toggle_filters, icon="system-search-symbolic")
         self.pack_start(header, False, False, 0)
         self.pack_start(self.filter_panel, False, False, 0)
-        self.table, scroll = pane_table(Gtk.ListStore(str, str, str, str, str, str), self.TITLES,
-                                       (138, 110, 106, 140, 145), status=(4, ACTIVITY_STATES),
-                                       expand_columns=(1, 2, 3), muted_columns=(0,))
+        self.table, scroll = pane_table(Gtk.ListStore(*([str] * (self.RECORD_ID + 1))), self.TITLES,
+                                       (140, 70, 68, 104, 75, 174, 147), status=(6, ACTIVITY_STATES),
+                                       expand_columns=(1, 2, 3, 4, 5), muted_columns=(0,))
         self.table.connect("row-activated", self._details)
         self.empty, self.empty_label, _ = empty_state("document-open-recent-symbolic", "No activity recorded")
         self.pack_start(table_card(scroll, self.empty), True, True, 0)
@@ -363,31 +502,19 @@ class ActivityView(Gtk.Box):
         except ActivityError:
             rows = []
         self.rows = {str(row["id"]): row for row in rows}
-        fill_table(self.table, [(table_time(row["requested"]), reported(row["model"]), reported(row["chat"]),
-                                 row["action"], row["outcome"], str(row["id"])) for row in rows], 5)
+        fill_table(self.table, [
+            (table_time(row["requested"]), reported(row["model"]), reported(row["chat"]), row["action"],
+             row.get("vault") or "—", activity_target(row), row["outcome"], str(row["id"]))
+            for row in rows
+        ], self.RECORD_ID)
         filtered = any(field.get_text() for field in self.filters.values())
         self.empty_label.set_text("No activity matches these filters" if filtered else "No activity recorded")
         self.empty.set_visible(not rows)
 
     def _details(self, *_):
-        row = self.rows.get(selected_key(self.table, 5))
-        if not row or self.app.desktop.locked:
-            return
-        dialog, body = _dialog(self.app, "Activity details", 660, 460)
-        dialog.add_button("Close", Gtk.ResponseType.CLOSE)
-        details = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6, margin=8)
-        body.pack_start(_scroll(details), True, True, 0)
-        for title, value in (
-            ("Action", row["action"]), ("Outcome", row["outcome"]), ("OS UID (verified)", row["uid"]),
-            ("Model", reported(row["model"])), ("Chat", reported(row["chat"])), ("Chat ID", reported(row["chat_id"])),
-            ("Agent", reported(row["agent"])), ("Project", reported(row["project"])),
-            ("Vault", row["vault"]), ("Vault ID", row["vault_id"]), ("Token record", row["token"]),
-            ("Entry", row["entry"]), ("Destination", row["destination"]), ("Requested", _time(row["requested"])),
-            ("Authorization", row["decision"]), ("Decided", _time(row["decided"])),
-            ("Completed", _time(row["completed"])), ("HTTP status", row["status"]), ("Scope", row["scope"]),
-        ):
-            add_label(details, f"{title}  {value if value is not None else '—'}")
-        self.app.run_dialog(dialog)
+        row = self.rows.get(selected_key(self.table, self.RECORD_ID))
+        if row and not self.app.desktop.locked:
+            self.app.run_dialog(activity_dialog(self.app, row))
 
 
 EDIT_ENTRY_RESPONSE = 1

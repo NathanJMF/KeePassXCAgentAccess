@@ -84,6 +84,31 @@ class AccessStorageTests(TestCase):
             store.prune(30)
         self.assertEqual(store.rows(), [])
 
+    def test_activity_target_columns_migrate_and_preserve_historical_labels(self):
+        store = ActivityStore(self.root / "activity.sqlite")
+        store.recover(30)
+        vault_id, entry = str(uuid4()), str(uuid4())
+        legacy = store.begin(123, Attribution(), "Legacy use", None, entry, vault="Previous vault", vault_id=vault_id)
+        store.finish(legacy, "Succeeded")
+        with store.connection() as db:
+            db.execute("ALTER TABLE activity DROP COLUMN folder")
+            db.execute("ALTER TABLE activity DROP COLUMN entry_title")
+
+        reopened = ActivityStore(store.path)
+        reopened.recover(30)
+        legacy_row, = reopened.rows()
+        self.assertEqual((legacy_row["vault"], legacy_row["vault_id"], legacy_row["entry"]),
+                         ("Previous vault", vault_id, entry))
+        self.assertIsNone(legacy_row["folder"])
+        self.assertIsNone(legacy_row["entry_title"])
+
+        event = reopened.begin(123, Attribution(), "Create entry", "Root", vault="Example vault",
+                               vault_id=vault_id, folder="Root", entry_title="At review")
+        reopened.finish(event, "Succeeded", entry=entry)
+        current, _ = ActivityStore(store.path).rows()
+        self.assertEqual((current["vault"], current["folder"], current["entry_title"], current["entry"]),
+                         ("Example vault", "Root", "At review", entry))
+
     def test_activity_rejects_claimed_provenance_and_unprotected_database(self):
         with self.assertRaises(ValueError):
             Attribution.parse({"model": "Fixture model", "verified": True})

@@ -5,7 +5,7 @@ from hashlib import sha256
 from time import time
 
 from .access_settings import uuid_text
-from .activity import ActivityError, Attribution
+from .activity import ActivityError, Attribution, entry_label, folder_label
 from .protocol import ListingError, decode, encode
 from .settings import SettingsError
 from .vault import VaultChanged, VaultError
@@ -191,7 +191,7 @@ class EditRequests:
             if changed != 1:
                 raise ActivityError()
 
-    def _event(self, token, request, label, vault_name=None, context=None):
+    def _event(self, token, request, label, context=None, preview=None):
         scope = [f"Edit request {request.id}"]
         if request.group:
             scope.append(f"Group {request.group}")
@@ -201,14 +201,16 @@ class EditRequests:
             scope.append("Fields " + ", ".join(name for name, _ in request.fields))
         if request.password_source:
             scope.append(f"Replacement source {request.password_source}")
+        folder, title, destination = _reviewed_target(preview) if preview is not None else (None, None, None)
         return self.activity.begin(
-            token.uid, context or token.context, f"{label} · {request.title}", None, entry=request.entry,
-            vault=vault_name, vault_id=request.vault, token=token.id, agent=token.identity,
-            project=token.project, scope=" · ".join(scope),
+            token.uid, context or token.context, f"{label} · {request.title}", destination, entry=request.entry,
+            vault=preview.vault_name if preview else None, vault_id=request.vault,
+            token=token.id, agent=token.identity, project=token.project, scope=" · ".join(scope),
+            folder=folder, entry_title=title,
         )
 
-    def _stale(self, record, token, vault_name=None, *, label="Apply edit"):
-        event = (self._event(token, record.request, label, vault_name, record.context)
+    def _stale(self, record, token, preview=None, *, label="Apply edit"):
+        event = (self._event(token, record.request, label, record.context, preview)
                  if token is not None else None)
         self._status(record, "pending", "stale")
         if event is not None:
@@ -303,13 +305,15 @@ class EditRequests:
                 raise VaultError("Unlock the requested vault before reviewing this edit.")
             return _preview(record, registration.name, session)
 
-    def deny(self, token_id, request_id):
+    def deny(self, token_id, request_id, *, preview=None):
         with self.workspace.mutex:
             record = self._pending(token_id, request_id)
             token = self.grants.records.get(token_id)
             if token is None:
                 raise VaultError("The requesting token is unavailable.")
-            event = self._event(token, record.request, "Deny edit", context=record.context)
+            if preview is not None and preview.record != record:
+                raise VaultError("The review belongs to a different edit request.")
+            event = self._event(token, record.request, "Deny edit", record.context, preview)
             self._status(record, "pending", "denied")
             self.activity.finish(event, "Denied")
 
@@ -327,7 +331,7 @@ class EditRequests:
             pending = self._pending(record.token_id, record.id)
             token = self.grants.records.get(record.token_id)
             if token is None or token.status != "active" or token.generation != pending.token_generation:
-                self._stale(pending, token, preview.vault_name)
+                self._stale(pending, token, preview)
                 raise VaultError("The requesting token changed. Ask the agent to submit a fresh request.")
             if self.workspace.paused:
                 raise VaultError("Resume agent access before approving this edit.")
@@ -336,10 +340,10 @@ class EditRequests:
                 if checked != preview or checked._session is not preview._session:
                     raise VaultError("The review is stale.")
             except VaultError:
-                self._stale(pending, token, preview.vault_name)
+                self._stale(pending, token, preview)
                 raise VaultError("The vault changed. Ask the agent to submit a fresh request.") from None
             generation = self.workspace.generation
-            event = self._event(token, request, "Apply edit", checked.vault_name, record.context)
+            event = self._event(token, request, "Apply edit", record.context, checked)
             self.activity.authorize(event, "Approved in edit review")
             self._status(record, "pending", "applying")
 
@@ -377,9 +381,29 @@ class EditRequests:
         result = identifier if request.operation in ("create_entry", "create_group") else None
         with self.workspace.mutex:
             self._status(record, "dispatched", "applied", result)
-            self.activity.finish(event, "Succeeded")
+            self.activity.finish(event, "Succeeded", entry=result if request.operation == "create_entry" else None)
             self.grants.used(token)
         return {"id": record.id, "status": "applied", **({"result": result} if result else {})}
+
+
+def _reviewed_target(preview):
+    request = preview.record.request
+    destination = None
+    parts = ()
+    if preview.destination_path is not None:
+        parts = preview.destination_path[1:]
+        if request.operation in ("recycle_entry", "recycle_group") and not parts:
+            # A session without recorded recycle-bin metadata uses the logical bin name.
+            parts = preview.destination_path
+        destination = folder_label(parts)
+    if request.entry:
+        return folder_label(preview.target_path[1:-1]), entry_label(preview.target_path[-1]), destination
+    if request.group:
+        return folder_label(preview.target_path[1:]), None, destination
+    proposed = dict(preview.new)
+    if request.operation == "create_entry":
+        return folder_label(parts), entry_label(proposed["title"]), destination
+    return folder_label((*parts, proposed["name"])), None, destination
 
 
 def _unique(rows, identifier):

@@ -133,6 +133,50 @@ class ScopedBrokerTests(unittest.TestCase):
         self.assert_code("ineligible", "use_password", vault=one, entry=self.entry, action="check")
         self.assertTrue(self.invoke("list_entries", vault=two)["entries"])
 
+    def test_credential_audit_snapshots_only_known_target_labels(self):
+        vault = self.vaults[0]
+        self.approve([{"vault": vault, "entry": self.entry, "action": "check"}])
+        self.assertEqual(self.invoke("use_password", vault=vault, entry=self.entry, action="check"),
+                         {"outcome": "succeeded", "http_status": 200})
+        self.assert_code("ineligible", "use_password", vault=vault, entry=self.entry, action="unknown")
+        denied, use = self.activity.rows(action="Use password")
+        self.assertEqual((use["vault"], use["folder"], use["entry_title"], use["entry"]),
+                         ("0", "Example group", "Example entry", self.entry))
+        self.assertIsNone(denied["entry_title"])
+        self.assertIsNone(denied["folder"])
+        self.assertNotIn("fixture-password", repr(use))
+
+        session = self.workspace.session(vault)
+        changed = {**session.entries[0], "title": "", "group_path": []}
+        self.workspace.sessions[vault] = Unlocked(session.worker, session.groups, (changed,))
+        self.invoke("use_password", vault=vault, entry=self.entry, action="check")
+        new, _, previous = self.activity.rows(action="Use password")
+        self.assertEqual((new["folder"], new["entry_title"]), ("Root", "(Untitled entry)"))
+        self.assertEqual((previous["folder"], previous["entry_title"]), ("Example group", "Example entry"))
+
+    def test_token_lifecycle_only_snapshots_a_single_approved_target(self):
+        vault, other = self.vaults
+        identifier = self.approve([
+            {"vault": vault, "entry": self.entry, "metadata": True},
+            {"vault": vault, "entry": self.entry, "action": "check"},
+        ])
+        self.grants.transition(identifier, "disabled")
+        self.grants.transition(identifier, "active")
+        self.grants.transition(identifier, "removed")
+        for action in ("Approve token", "Disable token", "Re-enable token", "Remove token"):
+            actual, = self.activity.rows(action=action)
+            self.assertEqual((actual["vault"], actual["vault_id"], actual["folder"], actual["entry_title"]),
+                             ("0", vault, "Example group", "Example entry"))
+        enrollment, = self.activity.rows(action="Request token")
+        self.assertEqual((enrollment["vault"], enrollment["folder"], enrollment["entry_title"]), (None, None, None))
+
+        self.approve([
+            {"vault": vault, "entry": self.entry, "metadata": True},
+            {"vault": other, "entry": self.entry, "metadata": True},
+        ], 1)
+        latest = self.activity.rows(action="Approve token")[0]
+        self.assertEqual((latest["vault"], latest["folder"], latest["entry_title"]), (None, None, None))
+
     def test_revoke_at_delivery_and_dispatch(self):
         vault = self.vaults[0]
         item = {"vault": vault, "entry": self.entry, "metadata": True, "action": "check"}

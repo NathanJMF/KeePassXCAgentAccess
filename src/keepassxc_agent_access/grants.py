@@ -8,7 +8,7 @@ import re
 from time import time
 
 from .access_settings import ActionType, action_id, label, uuid_text
-from .activity import Attribution
+from .activity import Attribution, entry_target_labels
 from .protocol import ListingError
 from .settings import SettingsError, write_private_json
 from .workspace import new_id
@@ -233,12 +233,29 @@ class Grants:
             row = replace(record, status=status, generation=record.generation + 1)
             if status == "removed":
                 row = replace(row, scope=(), items=())
-            self._change(row, action, status.capitalize())
+            self._change(row, action, status.capitalize(), target_scope=record.scope)
 
-    def _change(self, record, action, outcome):
+    def _target(self, scope):
+        vault_ids = {item.vault for item in scope}
+        if len(vault_ids) != 1:
+            return {}
+        vault_id, = vault_ids
+        vault = self.workspace.registrations.get(vault_id)
+        target = {"vault_id": vault_id, "vault": vault.name if vault else None}
+        entry_ids = {item.entry for item in scope}
+        if len(entry_ids) != 1:
+            return target
+        entry_id, = entry_ids
+        session = self.workspace.session(vault_id)
+        folder, title = entry_target_labels(session.entries, entry_id) if session else (None, None)
+        target.update(entry=entry_id, folder=folder, entry_title=title)
+        return target
+
+    def _change(self, record, action, outcome, *, target_scope=None):
         scope = ", ".join(item.audit_summary() for item in record.scope)
+        target = self._target(record.scope if target_scope is None else target_scope)
         event = self.activity.begin(record.uid, record.context, action, None, token=record.id,
-                                    agent=record.identity, project=record.project, scope=scope or None)
+                                    agent=record.identity, project=record.project, scope=scope or None, **target)
         if action == "Approve token":
             self.activity.authorize(event, "Approved in Access")
         self._put(record)

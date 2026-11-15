@@ -252,6 +252,34 @@ class EditRequestsTests(unittest.TestCase):
         success = self.activity.rows(chat=context["chat"], action="Apply edit", outcome="Succeeded")[0]
         self.assertIn(f"Destination group {self.root_id}", success["scope"])
 
+    def test_activity_snapshots_reviewed_titles_folders_and_destinations(self):
+        request = self._submit("update_entry", entry=self.entry_id, fields={"title": "Approved new title"})
+        queued, = self.activity.rows(action="Request edit")
+        self.assertEqual((queued["vault"], queued["folder"], queued["entry_title"]), (None, None, None))
+        preview = self.edits.preview(self.token.id, request["id"])
+        self.edits.approve(preview)
+        updated, = self.activity.rows(action="Apply edit · Update entry", outcome="Succeeded")
+        self.assertEqual((updated["vault"], updated["folder"], updated["entry_title"], updated["entry"]),
+                         (preview.vault_name, "First folder", "Scoped entry", self.entry_id))
+        self.assertNotIn("Approved new title", repr(updated))
+
+        _, result = self._apply("create_entry", parent=self.root_id, fields={"title": "Approved creation"})
+        created, = self.activity.rows(action="Apply edit · Create entry", outcome="Succeeded")
+        self.assertEqual((created["folder"], created["entry_title"], created["entry"], created["destination"]),
+                         ("Root", "Approved creation", result["result"], "Root"))
+
+        self._apply("move_entry", entry=self.entry_id, parent=self.root_id)
+        moved, = self.activity.rows(action="Apply edit · Move entry", outcome="Succeeded")
+        self.assertEqual((moved["folder"], moved["entry_title"], moved["destination"]),
+                         ("First folder", "Approved new title", "Root"))
+
+        request = self._submit("recycle_group", group=self.group_id)
+        review = self.edits.preview(self.token.id, request["id"])
+        self.edits.deny(self.token.id, request["id"], preview=review)
+        denied, = self.activity.rows(action="Deny edit", outcome="Denied")
+        self.assertEqual((denied["folder"], denied["entry_title"], denied["destination"]),
+                         ("First folder", None, "Recycle Bin"))
+
     def test_reenabled_token_cannot_apply_an_earlier_pending_edit(self):
         request = self._submit("create_group", parent=self.root_id, fields={"name": "Revoked"})
         self.grants.transition(self.token.id, "disabled")

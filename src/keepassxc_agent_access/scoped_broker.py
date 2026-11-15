@@ -1,7 +1,7 @@
 """Authorize scoped requests and recheck their state before releasing data."""
 
 from .access_settings import action_id, uuid_text
-from .activity import ActivityError, Attribution
+from .activity import ActivityError, Attribution, entry_target_labels
 from .grants import OPTIONAL_METADATA_FIELDS
 from .protocol import RESPONSE_LIMIT, ListingError, encode
 from .settings import SettingsError
@@ -89,11 +89,12 @@ class ScopedBroker:
                 any((s.vault, s.entry, s.action, s.revision) == (chosen, entry, binding_id, binding.revision)
                     for s in token.scope)
             )
+            folder, title = entry_target_labels(session.entries, entry) if permitted and session else (None, None)
             event = self.activity.begin(
                 uid, context, name + (f" · {binding.action.name}" if permitted else ""),
                 binding.action.url if permitted else None, entry if permitted else None,
                 vault=registration.name if registration else None, vault_id=chosen if registration else None,
-                token=token.id, agent=token.identity, project=token.project,
+                token=token.id, agent=token.identity, project=token.project, folder=folder, entry_title=title,
                 scope=f"Requested entry fields · {', '.join(fields)}" if fields else None,
             )
 

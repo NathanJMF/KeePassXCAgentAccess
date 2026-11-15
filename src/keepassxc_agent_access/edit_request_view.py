@@ -174,6 +174,6 @@ def review_edit(app, record):
         if owner_password is not None:
             owner_password.set_text("")
     if response == Gtk.ResponseType.REJECT:
-        app.owner_operation(lambda: app.edit_requests.deny(record.token_id, record.id))
+        app.owner_operation(lambda: app.edit_requests.deny(record.token_id, record.id, preview=preview))
     elif response == Gtk.ResponseType.ACCEPT and preview is not None:
         app._background(lambda: app.edit_requests.approve(preview, value))
