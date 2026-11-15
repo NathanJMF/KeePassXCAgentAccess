@@ -7,7 +7,10 @@ from pathlib import Path
 from select import select
 import subprocess
 import sys
-from threading import Event
+from threading import Event, Lock
+from time import monotonic
+
+from .protocol import ListingError, RESPONSE_LIMIT, WORKER_TIMEOUT, read_frame, remaining
 
 
 class VaultError(Exception):
@@ -27,9 +30,12 @@ class VaultTarget:
 class VaultSession:
     def __init__(self, process):
         self._process = process
+        self._state = Lock()
+        self._requests = Lock()
 
     def close(self):
-        process, self._process = self._process, None
+        with self._state:
+            process, self._process = self._process, None
         if process is None:
             return
         # Discard the worker's entire address space, including decrypted data.
@@ -37,6 +43,42 @@ class VaultSession:
         process.wait()
         process.stdin.close()
         process.stdout.close()
+
+    @property
+    def available(self):
+        with self._state:
+            return self._process is not None and self._process.poll() is None
+
+    def list_entries(self):
+        deadline = monotonic() + WORKER_TIMEOUT
+        if not self._requests.acquire(timeout=WORKER_TIMEOUT):
+            raise ListingError()
+        read_fd = None
+        try:
+            remaining(deadline)
+            with self._state:
+                process = self._process
+                if process is None:
+                    raise ListingError()
+                read_fd = os.dup(process.stdout.fileno())
+                process.stdin.write(b"list_entries\n")
+                process.stdin.flush()
+
+            def read(size):
+                readable, _, _ = select([read_fd], [], [], remaining(deadline))
+                if not readable:
+                    raise TimeoutError
+                return os.read(read_fd, size)
+
+            return read_frame(read, RESPONSE_LIMIT)
+        except (OSError, EOFError, ValueError, ListingError):
+            # A failed exchange can leave unread bytes in the worker pipe.
+            self.close()
+            raise ListingError() from None
+        finally:
+            if read_fd is not None:
+                os.close(read_fd)
+            self._requests.release()
 
     def __enter__(self):
         return self

@@ -6,6 +6,8 @@ import os
 import signal
 import sys
 
+from .entry_projection import entry_listing
+
 
 def load_vault():
     from pykeepass import PyKeePass
@@ -23,8 +25,10 @@ def load_vault():
         request.pop("password", None)
     vault.password = None
     print("ready", flush=True)
-    # Hold the decrypted session only for the lifetime of the parent connection.
-    sys.stdin.buffer.read(1)
+    # The pipe is private to the owning desktop process.
+    while sys.stdin.buffer.readline(64) == b"list_entries\n":
+        sys.stdout.buffer.write(entry_listing(vault))
+        sys.stdout.buffer.flush()
 
 
 def main():

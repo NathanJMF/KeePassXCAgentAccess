@@ -2,8 +2,8 @@
 
 ## 1. Owner-side entry listing
 
-- [ ] 1.1 Extend the worker and session API with a bounded, read-only listing operation. Verify stable IDs, nested and root group paths, duplicate titles, empty vaults, recycle-bin exclusion, and omission of credential fields with synthetic databases.
-- [ ] 1.2 Add a Unix socket broker with an authorized UID, strict request validation, size and time limits, and short diagnostics. Verify an allowed UID succeeds, another UID is rejected even if it can connect, and invalid or oversized requests leave the broker available.
+- [x] 1.1 Extend the worker and session API with a bounded, read-only listing operation. Verify stable IDs, nested and root group paths, duplicate titles, empty vaults, recycle-bin exclusion, and omission of credential fields with synthetic databases.
+- [x] 1.2 Add a Unix socket broker with an authorized UID, strict request validation, size and time limits, and short diagnostics. Verify an allowed UID succeeds, another UID is rejected even if it can connect, and invalid or oversized requests leave the broker available.
 - [ ] 1.3 Wire the broker to the tray's current unlocked session and add the listing controls. Verify startup is disabled, explicit enable works, and disable, lock, vault change, and exit revoke access. Exercise revocation during a pending response and verify restart stays disabled.
 
 ## 2. Agent-facing command and skill
