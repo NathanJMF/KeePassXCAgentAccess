@@ -1,5 +1,6 @@
 """Read-only access to a KeePass database in a disposable worker process."""
 
+from contextlib import contextmanager
 import json
 import os
 from dataclasses import dataclass
@@ -10,7 +11,7 @@ import sys
 from threading import Event, Lock
 from time import monotonic
 
-from .protocol import ListingError, RESPONSE_LIMIT, WORKER_TIMEOUT, read_frame, remaining
+from .protocol import ListingError, RESPONSE_LIMIT, WORKER_TIMEOUT, decode, encode, read_frame, remaining
 
 
 class VaultError(Exception):
@@ -30,6 +31,7 @@ class VaultTarget:
 class VaultSession:
     def __init__(self, process):
         self._process = process
+        self.identity = None
         self._state = Lock()
         self._requests = Lock()
 
@@ -49,20 +51,18 @@ class VaultSession:
         with self._state:
             return self._process is not None and self._process.poll() is None
 
-    def list_entries(self):
-        deadline = monotonic() + WORKER_TIMEOUT
+    @contextmanager
+    def _exchange(self, request, timeout):
+        deadline = monotonic() + timeout
         if not self._requests.acquire(timeout=WORKER_TIMEOUT):
-            raise ListingError()
+            raise ListingError("busy")
         read_fd = None
         try:
-            remaining(deadline)
             with self._state:
-                process = self._process
-                if process is None:
+                if self._process is None:
                     raise ListingError()
-                read_fd = os.dup(process.stdout.fileno())
-                process.stdin.write(b"list_entries\n")
-                process.stdin.flush()
+                read_fd = os.dup(self._process.stdout.fileno())
+            self._send(request)
 
             def read(size):
                 readable, _, _ = select([read_fd], [], [], remaining(deadline))
@@ -70,15 +70,51 @@ class VaultSession:
                     raise TimeoutError
                 return os.read(read_fd, size)
 
-            return read_frame(read, RESPONSE_LIMIT)
-        except (OSError, EOFError, ValueError, ListingError):
-            # A failed exchange can leave unread bytes in the worker pipe.
+            yield lambda: read_frame(read, RESPONSE_LIMIT)
+        except (OSError, EOFError, ValueError):
+            # The worker exchange cannot be resumed after a transport error.
             self.close()
             raise ListingError() from None
         finally:
             if read_fd is not None:
                 os.close(read_fd)
             self._requests.release()
+
+    def _send(self, request):
+        with self._state:
+            if self._process is None:
+                raise ListingError("revoked")
+            self._process.stdin.write(request)
+            self._process.stdin.flush()
+
+    def list_entries(self):
+        with self._exchange(b"list_entries\n", WORKER_TIMEOUT) as read:
+            return read()
+
+    def entry(self, identifier):
+        request = encode({"operation": "entry", "entry": identifier})
+        with self._exchange(request, WORKER_TIMEOUT) as read:
+            return decode(read())["entry"]
+
+    def use(self, action, gate):
+        request = encode({"operation": "use_password", "entry": action.entry, "url": action.url})
+        with self._exchange(request, 12) as read:
+            response = decode(read())
+            if response != {"ready": True}:
+                return response
+            dispatched = False
+            try:
+                dispatched = gate(lambda: self._send(b"dispatch\n"))
+            finally:
+                if not dispatched:
+                    try:
+                        self._send(b"abort\n")
+                        read()
+                    except (OSError, EOFError, ValueError, ListingError):
+                        self.close()
+            if not dispatched:
+                raise ListingError("revoked")
+            return decode(read())
 
     def __enter__(self):
         return self
@@ -118,9 +154,10 @@ def open_vault(target: VaultTarget, password: str, cancelled: Event) -> VaultSes
             readable, _, _ = select([process.stdout], [], [], 0.05)
             if readable:
                 response = process.stdout.readline(64)
-                if response == b"ready\n":
+                if response.startswith(b"ready "):
                     if cancelled.is_set():
                         break
+                    session.identity = response[6:].strip().decode("ascii")
                     return session
                 if response == b"credentials\n":
                     raise VaultError("The database rejected the password or key file.")

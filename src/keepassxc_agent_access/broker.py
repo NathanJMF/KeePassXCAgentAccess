@@ -1,6 +1,6 @@
 """Serve metadata to one authorized OS account over a local pathname socket."""
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import os
 from pathlib import Path
 from select import select
@@ -11,7 +11,7 @@ from threading import Lock, Thread
 from time import monotonic
 
 from .protocol import (
-    LIST_REQUEST, ListingError, REQUEST_LIMIT, REQUEST_TIMEOUT,
+    CLIENT_TIMEOUT, ListingError, REQUEST_LIMIT, REQUEST_TIMEOUT,
     decode, encode, receive, remaining,
 )
 
@@ -57,13 +57,17 @@ class _Listener:
     server: socket.socket
     session: object
     inode: tuple[int, int]
-    client: socket.socket | None = None
+    path: Path
+    uid: int
+    clients: set[socket.socket] = field(default_factory=set)
+    revision: int = 0
 
 
 class ListingBroker:
-    def __init__(self, config, current_session):
+    def __init__(self, config, current_session, handler):
         self.config = config
         self.current_session = current_session
+        self.handler = handler
         self._mutex = Lock()
         self._listener = None
 
@@ -76,7 +80,8 @@ class ListingBroker:
     def start(self):
         with self._mutex:
             session = self.current_session()
-            if self.config is None or session is None:
+            config = self.config
+            if config is None or session is None:
                 raise ListingError()
             if self._listener is not None:
                 if self._listener.session is session:
@@ -86,20 +91,20 @@ class ListingBroker:
             server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
             inode = None
             try:
-                self.config.validate()
-                server.bind(str(self.config.path))
-                info = self.config.path.lstat()
+                config.validate()
+                server.bind(str(config.path))
+                info = config.path.lstat()
                 inode = (info.st_dev, info.st_ino)
-                self.config.path.chmod(0o660)
-                server.listen(4)
+                config.path.chmod(0o660)
+                server.listen(8)
                 server.settimeout(0.2)
             except (OSError, RuntimeError, ValueError, ListingError):
                 server.close()
                 if inode is not None:
-                    self._unlink(inode)
+                    self._unlink(config.path, inode)
                 raise ListingError() from None
 
-            listener = _Listener(server, session, inode)
+            listener = _Listener(server, session, inode, config.path, config.agent_uid)
             self._listener = listener
             Thread(target=self._serve, args=(listener,), daemon=True).start()
 
@@ -107,80 +112,127 @@ class ListingBroker:
         with self._mutex:
             self._stop_locked()
 
-    def _stop_locked(self):
-        listener, self._listener = self._listener, None
-        if listener is None:
-            return
-        if listener.client is not None:
+    def update(self, save, config):
+        """Publish settings and invalidate requests in one authorization transition."""
+        with self._mutex:
+            save()
+            if config != self.config:
+                self._stop_locked()
+                self.config = config
+            elif self._listener is not None:
+                self._interrupt(self._listener)
+
+    @staticmethod
+    def _interrupt(listener):
+        listener.revision += 1
+        for client in listener.clients:
             try:
-                listener.client.shutdown(socket.SHUT_RDWR)
+                client.shutdown(socket.SHUT_RDWR)
             except OSError:
                 pass
-            listener.client.close()
-        listener.server.close()
-        self._unlink(listener.inode)
+            client.close()
+        listener.clients.clear()
 
-    def _unlink(self, inode):
+    def _stop_locked(self):
+        listener, self._listener = self._listener, None
+        if listener is not None:
+            self._interrupt(listener)
+            listener.server.close()
+            self._unlink(listener.path, listener.inode)
+
+    @staticmethod
+    def _unlink(path, inode):
         try:
-            info = self.config.path.lstat()
+            info = path.lstat()
             if stat.S_ISSOCK(info.st_mode) and (info.st_dev, info.st_ino) == inode:
-                self.config.path.unlink()
+                path.unlink()
         except OSError:
             pass
 
     def _serve(self, listener):
         while True:
-            with self._mutex:
-                if self._listener is not listener:
-                    return
             try:
                 connection, _ = listener.server.accept()
             except TimeoutError:
-                continue
-            except OSError:
-                return
-
-            with connection:
                 with self._mutex:
                     if self._listener is not listener:
                         return
-                    listener.client = connection
-                try:
-                    if peer_uid(connection) == self.config.agent_uid:
-                        self._handle(listener, connection)
-                except (OSError, ValueError):
-                    pass
-                finally:
-                    with self._mutex:
-                        listener.client = None
-
-    def _handle(self, listener, connection):
-        deadline = monotonic() + REQUEST_TIMEOUT
-        try:
-            request = decode(receive(connection, REQUEST_LIMIT, deadline))
-            if request != LIST_REQUEST or type(request["version"]) is not int:
-                raise ListingError("invalid_request")
-            if self.current_session() is not listener.session:
-                return
-            reply = listener.session.list_entries()
-        except (EOFError, ValueError, RecursionError, TimeoutError):
-            reply = encode({"error": "invalid_request"})
-        except ListingError as error:
-            reply = encode({"error": error.code})
-
-        connection.setblocking(False)
-        payload = memoryview(reply)
-        while payload:
-            _, writable, _ = select([], [connection], [], remaining(deadline))
-            if not writable:
+                continue
+            except OSError:
                 return
             with self._mutex:
-                if self._listener is not listener or self.current_session() is not listener.session:
-                    return
                 try:
-                    sent = connection.send(payload)
-                except BlockingIOError:
+                    allowed = (
+                        self._listener is listener and len(listener.clients) < 8
+                        and peer_uid(connection) == listener.uid
+                    )
+                except OSError:
+                    allowed = False
+                if not allowed:
+                    connection.close()
                     continue
-            if sent == 0:
-                return
-            payload = payload[sent:]
+                listener.clients.add(connection)
+                revision = listener.revision
+            Thread(target=self._client, args=(listener, connection, revision), daemon=True).start()
+
+    def _client(self, listener, connection, revision):
+        deadline = monotonic() + CLIENT_TIMEOUT
+
+        def guarded(effect=lambda: None):
+            with self._mutex:
+                if (
+                    self._listener is not listener or revision != listener.revision
+                    or self.current_session() is not listener.session
+                ):
+                    return False
+                # A waiting client sending more bytes or closing its connection revokes work.
+                if select([connection], [], [], 0)[0]:
+                    return False
+                effect()
+                return True
+
+        def deliver(reply):
+            try:
+                connection.setblocking(False)
+                payload = memoryview(reply)
+                while payload:
+                    _, writable, _ = select([], [connection], [], remaining(deadline))
+                    if not writable:
+                        return False
+                    sent = None
+
+                    def send():
+                        nonlocal sent
+                        try:
+                            sent = connection.send(payload)
+                        except BlockingIOError:
+                            pass
+
+                    if not guarded(send) or sent == 0:
+                        return False
+                    if sent:
+                        payload = payload[sent:]
+                return True
+            except (OSError, ValueError):
+                return False
+
+        with connection:
+            try:
+                try:
+                    request = decode(receive(connection, REQUEST_LIMIT, monotonic() + REQUEST_TIMEOUT))
+                except (EOFError, ValueError, RecursionError, TimeoutError):
+                    raise ListingError("invalid_request") from None
+                if guarded():
+                    response = self.handler(request, listener.uid, listener.session, guarded, guarded, deliver)
+                    if response is not None:
+                        deliver(response)
+            except ListingError as error:
+                try:
+                    deliver(encode({"error": error.code}))
+                except (OSError, ValueError):
+                    pass
+            except (OSError, ValueError):
+                pass
+            finally:
+                with self._mutex:
+                    listener.clients.discard(connection)

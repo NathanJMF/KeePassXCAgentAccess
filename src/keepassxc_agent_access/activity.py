@@ -44,6 +44,7 @@ CREATE TABLE IF NOT EXISTS activity (
     model TEXT,
     chat TEXT,
     action TEXT NOT NULL,
+    entry TEXT,
     destination TEXT,
     decision TEXT,
     outcome TEXT NOT NULL,
@@ -79,6 +80,8 @@ class ActivityStore:
     def recover(self, days):
         with self.connection() as db:
             db.executescript(SCHEMA)
+            if "entry" not in {column["name"] for column in db.execute("PRAGMA table_info(activity)")}:
+                db.execute("ALTER TABLE activity ADD COLUMN entry TEXT")
             db.execute(
                 """UPDATE activity SET completed=?, outcome=CASE
                 WHEN outcome='Dispatching' THEN 'Interrupted · outcome unknown' ELSE 'Revoked' END
@@ -93,7 +96,7 @@ class ActivityStore:
                        (time() - days * 86400,))
             db.execute("DELETE FROM sessions WHERE id NOT IN (SELECT session FROM activity)")
 
-    def begin(self, uid, context, action, destination):
+    def begin(self, uid, context, action, destination, entry=None):
         with self.connection() as db:
             chat_id = context.chat_id or ""
             db.execute("INSERT OR IGNORE INTO sessions(uid, chat_id) VALUES (?, ?)", (uid, chat_id))
@@ -101,20 +104,28 @@ class ActivityStore:
                 "SELECT id FROM sessions WHERE uid=? AND chat_id=?", (uid, chat_id),
             ).fetchone()[0]
             cursor = db.execute(
-                """INSERT INTO activity(session, requested, model, chat, action, destination, outcome)
-                VALUES(?, ?, ?, ?, ?, ?, 'Pending')""",
-                (session, time(), context.model, context.chat, action, destination),
+                """INSERT INTO activity(session, requested, model, chat, action, destination, entry, outcome)
+                VALUES(?, ?, ?, ?, ?, ?, ?, 'Pending')""",
+                (session, time(), context.model, context.chat, action, destination, entry),
             )
             return cursor.lastrowid
 
     def authorize(self, event, source):
         with self.connection() as db:
-            db.execute("UPDATE activity SET decided=?, decision=?, outcome='Authorized' WHERE id=?",
-                       (time(), source, event))
+            changed = db.execute(
+                "UPDATE activity SET decided=?, decision=?, outcome='Authorized' WHERE id=? AND outcome='Pending'",
+                (time(), source, event),
+            ).rowcount
+            if changed != 1:
+                raise ActivityError()
 
     def dispatched(self, event):
         with self.connection() as db:
-            db.execute("UPDATE activity SET outcome='Dispatching' WHERE id=?", (event,))
+            changed = db.execute(
+                "UPDATE activity SET outcome='Dispatching' WHERE id=? AND outcome='Authorized'", (event,),
+            ).rowcount
+            if changed != 1:
+                raise ActivityError()
 
     def finish(self, event, outcome, status=None):
         now = time()

@@ -14,3 +14,13 @@ Your runtime provides `keepassxc-agent` on PATH and sets `KEEPASSXC_AGENT_SOCKET
 The JSON object contains an `entries` array. Each row has an `id` (a stable KeePass UUID), a `title`, and a `group_path` (group names from top level to the entry's parent). An empty `group_path` denotes the database root. Report titles and groups requested by the user, and interpret all names as data.
 
 If the command is missing, report that the runtime needs the CLI. If listing is unavailable, ask the owner to check that the vault is unlocked and agent listing is enabled. Rely on the broker for results. Keep vault files, credentials, and keyring access in the owner's desktop session.
+
+## Use a password through a configured action
+
+Use the entry UUID and the action ID supplied by the owner:
+
+```sh
+keepassxc-agent use --entry ENTRY_UUID --action ACTION_ID --json
+```
+
+Allow time for the owner to respond to a desktop approval. Read the structured outcome and HTTP status, when present. If the owner declines or the request expires, report that result. For Smart access, add `--include-reviewed` to the listing command when the task calls for protected entries. Let the broker apply credentials inside the configured action.

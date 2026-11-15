@@ -3,6 +3,7 @@
 import ctypes
 from pathlib import Path
 import signal
+import sys
 from threading import Thread
 
 import gi
@@ -10,10 +11,15 @@ import gi
 gi.require_version("Gtk", "3.0")
 from gi.repository import Gio, GLib, Gtk
 
+from .access import AccessEngine
+from .access_settings import AccessStore
+from .activity import ActivityError, ActivityStore
+from .approvals import ApprovalQueue
 from .broker import BrokerConfig, ListingBroker
 from .controller import VaultController, VaultState
 from .desktop import DesktopSession
 from .keyring import KeyringError, SystemKeyring
+from .owner_views import ApprovalPresenter, OwnerViews
 from .protocol import ListingError
 from .settings import SettingsError, SettingsStore
 from .setup import VaultSetup
@@ -80,23 +86,45 @@ class SetupDialog(Gtk.Dialog):
 
 
 class VaultApplication(Gtk.Application):
-    def __init__(self, setup=None, desktop_factory=DesktopSession):
+    def __init__(self, setup=None, desktop_factory=DesktopSession, show_window=False):
         super().__init__(application_id=APP_ID, flags=Gio.ApplicationFlags.FLAGS_NONE)
         self.setup = setup or VaultSetup(SettingsStore(), SystemKeyring(), VaultController())
-        self.broker = ListingBroker(BrokerConfig.from_environment(), self.setup.controller.current_session)
+        directory = self.setup.store.path.parent
+        self.access_store = AccessStore(directory / "access.json")
+        self.activity_store = ActivityStore(directory / "activity.sqlite")
+        self.approvals = ApprovalQueue()
+        self.approval_ui = ApprovalPresenter(self, self.approvals)
+        self.owner_views = OwnerViews(self)
+        self.fallback_config = BrokerConfig.from_environment()
+        self.message = ""
+        try:
+            settings = self.access_store.read()
+            config = settings.broker_config(self.fallback_config)
+        except SettingsError as error:
+            config = None
+            self.message = str(error)
+        handler = AccessEngine(self.access_store, self.activity_store, self.approvals,
+                               lambda: not (self.exiting or self.desktop.locked))
+        self.broker = ListingBroker(config, self.setup.controller.current_session, handler)
         self.desktop_factory = desktop_factory
+        self.show_window = show_window
         self.window = None
         self.dialog = None
         self.indicator = None
         self.tray_connected = False
         self.busy = False
         self.exiting = False
-        self.message = ""
 
     def do_startup(self):
         Gtk.Application.do_startup(self)
         self.hold()
         self.desktop = self.desktop_factory(self._desktop_lock, self._quit)
+        try:
+            self.activity_store.recover(self.access_store.read().retention_days)
+        except (SettingsError, ActivityError):
+            self.message = "Local activity could not be initialized."
+        self.approval_poll = GLib.timeout_add(125, self.approval_ui.poll)
+        self.activity_prune = GLib.timeout_add_seconds(3600, self._prune_activity)
         for signum in (signal.SIGINT, signal.SIGTERM):
             GLib.unix_signal_add(GLib.PRIORITY_DEFAULT, signum, self._quit)
 
@@ -105,7 +133,7 @@ class VaultApplication(Gtk.Application):
             self._build_window()
             self._build_tray()
             self._refresh()
-            if self.setup.controller.state(self._target() is not None) is VaultState.SETUP:
+            if self.show_window or self.setup.controller.state(self._target() is not None) is VaultState.SETUP:
                 self._present()
             else:
                 GLib.timeout_add(600, self._show_without_tray)
@@ -131,8 +159,11 @@ class VaultApplication(Gtk.Application):
             ("unlock", "Unlock", self._unlock),
             ("manual", "Enter password…", self._manual_unlock),
             ("lock", "Lock now", self._lock),
-            ("enable_listing", "Enable agent listing", self._enable_listing),
-            ("stop_listing", "Stop agent listing", self._stop_listing),
+            ("enable_listing", "Enable agent access", self._enable_listing),
+            ("stop_listing", "Stop agent access", self._stop_listing),
+            ("access", "Access…", lambda *_: self._owner_view("access")),
+            ("actions", "Actions…", lambda *_: self._owner_view("actions")),
+            ("activity", "Activity…", lambda *_: self._owner_view("activity")),
             ("forget", "Forget saved password", self._forget),
             ("retry", "Retry keyring cleanup", self._retry_cleanup),
             ("quit", "Quit", self._quit),
@@ -161,8 +192,10 @@ class VaultApplication(Gtk.Application):
             ("setup", "Setup", self._configure_dialog),
             ("unlock", "Unlock", self._unlock),
             ("lock", "Lock now", self._lock),
-            ("enable_listing", "Enable agent listing", self._enable_listing),
-            ("stop_listing", "Stop agent listing", self._stop_listing),
+            ("enable_listing", "Enable agent access", self._enable_listing),
+            ("stop_listing", "Stop agent access", self._stop_listing),
+            ("pending", "Pending requests", self._show_pending),
+            ("activity", "Activity", lambda *_: self._owner_view("activity")),
             ("settings", "Settings", self._present),
             ("quit", "Quit", self._quit),
         ):
@@ -219,7 +252,7 @@ class VaultApplication(Gtk.Application):
             detail += "\nKeyring cleanup pending."
         listing = self.broker.enabled
         if listing:
-            detail += "\nAgent listing enabled."
+            detail += "\nAgent access enabled."
         self.details.set_text(detail)
         message = self.message
         if state is VaultState.UNLOCKED and self.setup.controller.source == "keyring":
@@ -231,6 +264,7 @@ class VaultApplication(Gtk.Application):
             "lock": state is VaultState.UNLOCKED or self.busy,
             "enable_listing": state is VaultState.UNLOCKED and self.broker.config is not None and not listing,
             "stop_listing": listing,
+            "access": True, "actions": True, "activity": True,
             "forget": active_item is not None,
             "retry": bool(pending), "quit": True,
         }
@@ -244,12 +278,43 @@ class VaultApplication(Gtk.Application):
             if state is VaultState.UNLOCKED and self.setup.controller.source == "keyring":
                 tray_status += " · OS keyring"
             if listing:
-                tray_status += " · Agent listing enabled"
+                tray_status += " · Agent access enabled"
             self.menu_items["status"].set_label(tray_status)
             for key in ("setup", "unlock", "lock", "enable_listing", "stop_listing"):
                 visible = target is None if key == "setup" else available[key]
                 self.menu_items[key].set_visible(visible)
                 self.menu_items[key].set_sensitive(not self.busy or key in ("lock", "stop_listing"))
+
+    def save_access_settings(self, settings):
+        config = settings.broker_config(self.fallback_config)
+        self.broker.update(lambda: self.access_store.write(settings), config)
+        self._prune_activity()
+        self._refresh()
+
+    def _prune_activity(self):
+        try:
+            self.activity_store.prune(self.access_store.read().retention_days)
+        except (SettingsError, ActivityError):
+            self.message = "Local activity cleanup is unavailable."
+        return GLib.SOURCE_CONTINUE
+
+    def _owner_view(self, view):
+        if not self._ready():
+            return
+        self._present()
+        try:
+            getattr(self.owner_views, view)()
+        except SettingsError as error:
+            self.message = str(error)
+            self._refresh()
+
+    def _show_pending(self, *_):
+        self.approval_ui.poll()
+        if self.approval_ui.dialog is not None:
+            self.approval_ui.dialog.present()
+        else:
+            self.message = "No pending requests."
+            self._present()
 
     def _present(self, *_):
         if not self.desktop.locked:
@@ -348,12 +413,15 @@ class VaultApplication(Gtk.Application):
         return GLib.SOURCE_REMOVE
 
     def _desktop_lock(self):
+        self.owner_views.close()
         if self.dialog is not None:
             self.dialog.response(Gtk.ResponseType.CANCEL)
         self._lock()
 
     def _lock(self, *_):
         self.broker.stop()
+        self.approval_ui.close()
+        self.owner_views.close()
         self.setup.controller.lock()
         self.message = ""
         if self.window is not None:
@@ -371,12 +439,13 @@ class VaultApplication(Gtk.Application):
             self.broker.start()
             self.message = ""
         except ListingError:
-            self.message = "Agent listing could not start. Check the broker endpoint and agent account."
+            self.message = "Agent access could not start. Check the broker endpoint and agent account."
             self._present()
         self._refresh()
 
     def _stop_listing(self, *_):
         self.broker.stop()
+        self.approval_ui.close()
         self._refresh()
 
     def _retry_cleanup(self, *_):
@@ -391,6 +460,10 @@ class VaultApplication(Gtk.Application):
 
     def do_shutdown(self):
         self.broker.stop()
+        self.approval_ui.close()
+        self.owner_views.close()
+        GLib.source_remove(self.approval_poll)
+        GLib.source_remove(self.activity_prune)
         self.setup.controller.lock()
         self.desktop.close()
         Gtk.Application.do_shutdown(self)
@@ -400,4 +473,5 @@ def main():
     # Disable core dumps for the UI and the password-handling threads.
     if ctypes.CDLL(None).prctl(4, 0, 0, 0, 0):
         raise SystemExit("Could not protect the desktop process from core dumps.")
-    return VaultApplication().run(None)
+    show_window = "--show-window" in sys.argv
+    return VaultApplication(show_window=show_window).run([arg for arg in sys.argv if arg != "--show-window"])

@@ -22,8 +22,16 @@ class BrokerTests(TestCase):
         self.session = Mock()
         self.session.list_entries.return_value = b'{"entries":[]}\n'
         self.current = self.session
-        self.broker = ListingBroker(BrokerConfig(self.path, self.agent_uid), lambda: self.current)
+        self.broker = ListingBroker(
+            BrokerConfig(self.path, self.agent_uid), lambda: self.current, self.handle
+        )
         self.addCleanup(self.broker.stop)
+
+    @staticmethod
+    def handle(request, _uid, session, _live, _dispatch, _deliver):
+        if request != LIST_REQUEST or type(request["version"]) is not int:
+            raise ListingError("invalid_request")
+        return session.list_entries()
 
     def connection(self):
         client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
@@ -109,4 +117,4 @@ class BrokerTests(TestCase):
             self.broker.start()
         owner_config = BrokerConfig(self.path, os.geteuid())
         with self.assertRaises(ListingError):
-            ListingBroker(owner_config, lambda: self.session).start()
+            ListingBroker(owner_config, lambda: self.session, self.handle).start()

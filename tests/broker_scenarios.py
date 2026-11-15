@@ -1,6 +1,7 @@
 """Synthetic GNOME broker scenarios and the fresh-agent test fixture."""
 
 import argparse
+from dataclasses import replace
 import json
 import os
 from pathlib import Path
@@ -13,6 +14,7 @@ import traceback
 from pykeepass import create_database
 
 from desktop_scenarios import fill_setup, set_screen_active, wait_for
+from keepassxc_agent_access.access_settings import AccessMode
 from keepassxc_agent_access.controller import VaultController
 from keepassxc_agent_access.keyring import SystemKeyring
 from keepassxc_agent_access.settings import SettingsStore
@@ -97,6 +99,7 @@ def main(root, hold):
     setup = VaultSetup(SettingsStore(private / "settings.json"), SystemKeyring(), controller)
     setup.configure(controller.begin(), target, PASSWORD, True)
     app = VaultApplication(setup=setup)
+    app.access_store.write(replace(app.access_store.read(), mode=AccessMode.ALLOW))
     result = 1
 
     def unavailable():
@@ -112,7 +115,7 @@ def main(root, hold):
     def enable():
         app.menu_items["enable_listing"].activate()
         assert app.broker.enabled
-        assert "Agent listing enabled" in app.menu_items["status"].get_label()
+        assert "Agent access enabled" in app.menu_items["status"].get_label()
         subprocess.run(["setfacl", "-m", f"u:{uid}:rw", endpoint], check=True)
 
     def unlock():

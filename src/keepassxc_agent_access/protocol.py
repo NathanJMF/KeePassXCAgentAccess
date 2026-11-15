@@ -8,11 +8,19 @@ REQUEST_LIMIT = 4 * 1024
 RESPONSE_LIMIT = 1024 * 1024
 REQUEST_TIMEOUT = 5
 WORKER_TIMEOUT = 3
+APPROVAL_TIMEOUT = 60
+CLIENT_TIMEOUT = APPROVAL_TIMEOUT + 20
 LIST_REQUEST = {"version": 1, "operation": "list_entries"}
 ERRORS = {
-    "unavailable": "Listing is unavailable. Ask the vault owner to check listing access.",
+    "unavailable": "Agent access is unavailable. Ask the vault owner to check broker access.",
     "invalid_request": "The broker rejected the listing request.",
     "invalid_response": "The broker returned an invalid listing response.",
+    "declined": "The owner declined the request.",
+    "expired": "The approval request timed out.",
+    "revoked": "Agent access changed before the request completed.",
+    "busy": "The broker is busy.",
+    "ineligible": "The requested action or entry is unavailable.",
+    "audit_unavailable": "The broker could not verify settings or record the decision.",
     "too_large": "The vault listing exceeds the response size limit.",
 }
 
