@@ -19,7 +19,11 @@ ERRORS = {
     "expired": "The approval request timed out.",
     "revoked": "Agent access changed before the request completed.",
     "busy": "The broker is busy.",
-    "ineligible": "The requested action or entry is unavailable.",
+    "ineligible": "The requested operation is unavailable for this token.",
+    "token_required": "An approved access token is required. Request access through this runner.",
+    "paused": "The owner has paused agent access.",
+    "select_vault": "Choose a vault with --vault using your scoped vault catalog.",
+    "token_storage": "The runner token file is unavailable or unsafe.",
     "audit_unavailable": "The broker could not verify settings or record the decision.",
     "too_large": "The vault listing exceeds the response size limit.",
 }

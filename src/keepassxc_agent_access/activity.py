@@ -80,8 +80,10 @@ class ActivityStore:
     def recover(self, days):
         with self.connection() as db:
             db.executescript(SCHEMA)
-            if "entry" not in {column["name"] for column in db.execute("PRAGMA table_info(activity)")}:
-                db.execute("ALTER TABLE activity ADD COLUMN entry TEXT")
+            columns = {column["name"] for column in db.execute("PRAGMA table_info(activity)")}
+            for name in ("entry", "vault", "vault_id", "token", "agent", "project", "scope"):
+                if name not in columns:
+                    db.execute(f"ALTER TABLE activity ADD COLUMN {name} TEXT")
             db.execute(
                 """UPDATE activity SET completed=?, outcome=CASE
                 WHEN outcome='Dispatching' THEN 'Interrupted · outcome unknown' ELSE 'Revoked' END
@@ -96,7 +98,8 @@ class ActivityStore:
                        (time() - days * 86400,))
             db.execute("DELETE FROM sessions WHERE id NOT IN (SELECT session FROM activity)")
 
-    def begin(self, uid, context, action, destination, entry=None):
+    def begin(self, uid, context, action, destination, entry=None, *, vault=None, vault_id=None,
+              token=None, agent=None, project=None, scope=None):
         with self.connection() as db:
             chat_id = context.chat_id or ""
             db.execute("INSERT OR IGNORE INTO sessions(uid, chat_id) VALUES (?, ?)", (uid, chat_id))
@@ -104,9 +107,11 @@ class ActivityStore:
                 "SELECT id FROM sessions WHERE uid=? AND chat_id=?", (uid, chat_id),
             ).fetchone()[0]
             cursor = db.execute(
-                """INSERT INTO activity(session, requested, model, chat, action, destination, entry, outcome)
-                VALUES(?, ?, ?, ?, ?, ?, ?, 'Pending')""",
-                (session, time(), context.model, context.chat, action, destination, entry),
+                """INSERT INTO activity(session, requested, model, chat, action, destination, entry,
+                                         vault, vault_id, token, agent, project, scope, outcome)
+                VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'Pending')""",
+                (session, time(), context.model, context.chat, action, destination, entry,
+                 vault, vault_id, token, agent, project, scope),
             )
             return cursor.lastrowid
 
@@ -135,7 +140,7 @@ class ActivityStore:
                 WHERE id=?""", (now, now, outcome, status, event),
             )
 
-    def rows(self, *, model="", chat="", action="", outcome=""):
+    def rows(self, *, model="", chat="", action="", outcome="", vault="", agent=""):
         with self.connection() as db:
             return [dict(row) for row in db.execute(
                 """SELECT activity.*, sessions.uid, sessions.chat_id FROM activity
@@ -143,6 +148,8 @@ class ActivityStore:
                 WHERE instr(lower(coalesce(model,'')), lower(?)) > 0
                   AND instr(lower(coalesce(chat,'')), lower(?)) > 0
                   AND instr(lower(action), lower(?)) > 0 AND instr(lower(outcome), lower(?)) > 0
+                  AND instr(lower(coalesce(vault,'') || ' ' || coalesce(vault_id,'')), lower(?)) > 0
+                  AND instr(lower(coalesce(agent,'')), lower(?)) > 0
                 ORDER BY requested DESC, activity.id DESC LIMIT 1000""",
-                (model, chat, action, outcome),
+                (model, chat, action, outcome, vault, agent),
             )]

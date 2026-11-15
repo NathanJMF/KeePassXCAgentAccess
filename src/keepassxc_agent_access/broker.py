@@ -191,7 +191,7 @@ class ListingBroker:
                 effect()
                 return True
 
-        def deliver(reply):
+        def deliver(reply, scope=None):
             try:
                 connection.setblocking(False)
                 payload = memoryview(reply)
@@ -208,7 +208,8 @@ class ListingBroker:
                         except BlockingIOError:
                             pass
 
-                    if not guarded(send) or sent == 0:
+                    permitted = guarded(send) if scope is None else scope(lambda: guarded(send))
+                    if not permitted or sent == 0:
                         return False
                     if sent:
                         payload = payload[sent:]
