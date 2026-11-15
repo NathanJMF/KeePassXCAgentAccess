@@ -21,15 +21,15 @@ class AccessMode(str, Enum):
 REVIEW_ACTIONS = {
     "list_vaults": "Vaults - List",
     "create_group": "Groups - Create",
-    "list_entries": "Groups and entries - Read",
-    "rename_group": "Groups - Update name",
+    "list_entries": "Groups and Entries - Read",
+    "rename_group": "Groups - Update Name",
     "move_group": "Groups - Move",
-    "recycle_group": "Groups - Delete (move to recycle bin)",
+    "recycle_group": "Groups - Delete (Move to Recycle Bin)",
     "create_entry": "Entries - Create",
     "update_entry": "Entries - Update",
     "move_entry": "Entries - Move",
-    "recycle_entry": "Entries - Delete (move to recycle bin)",
-    "use_password": "Passwords - Use in actions",
+    "recycle_entry": "Entries - Delete (Move to Recycle Bin)",
+    "use_password": "Passwords - Use in Actions",
     "replace_password": "Passwords - Replace",
 }
 

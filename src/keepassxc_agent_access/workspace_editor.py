@@ -58,7 +58,7 @@ def _entry_locations(app, dialog, grid, vault, group, *, creating):
 
     group_choice = Gtk.ComboBoxText()
     group_choice.set_name("group-location")
-    unlock = Gtk.Button(label="Unlock vault", no_show_all=True)
+    unlock = Gtk.Button(label="Unlock Vault", no_show_all=True)
     unlock.set_name("entry-unlock-vault")
     error = Gtk.Label(xalign=0, wrap=True, no_show_all=True)
     error.set_name("entry-unlock-error")
@@ -145,7 +145,7 @@ def edit_entry(app, vault, group, entry=None):
 def _entry_form(app, vault, group, entry, saved_notes):
     if not app.workspace.owner_session(vault):
         return
-    dialog, grid = _form(app, "Edit entry" if entry else "New entry")
+    dialog, grid = _form(app, "Edit Entry" if entry else "New Entry")
     locations = _entry_locations(app, dialog, grid, vault, entry["group"] if entry else group, creating=entry is None)
     if locations is None:
         dialog.destroy()
@@ -157,11 +157,11 @@ def _entry_form(app, vault, group, entry, saved_notes):
         control.set_name(f"entry-{name}")
         fields[name] = _field(grid, index, label, control)
 
-    change_password = Gtk.CheckButton(label="Replace saved password", no_show_all=not bool(entry))
+    change_password = Gtk.CheckButton(label="Replace Saved Password", no_show_all=not bool(entry))
     grid.attach(change_password, 1, 5, 1, 1)
     password = password_entry()
     password.set_name("entry-password")
-    password.set_placeholder_text("Entry password")
+    password.set_placeholder_text("Entry Password")
     password.set_sensitive(entry is None)
     _field(grid, 6, "_Password", password)
 
@@ -221,7 +221,7 @@ def edit_group(app, vault, group):
     existing = next((row for row in session.groups if row["id"] == group), None) if group else None
     if group and not existing:
         return
-    dialog, grid = _form(app, "Edit group" if existing else "New group")
+    dialog, grid = _form(app, "Edit Group" if existing else "New Group")
     name = Gtk.Entry(text=existing["name"] if existing else "", activates_default=True)
     name.set_name("group-name")
     _field(grid, 0, "_Name", name)

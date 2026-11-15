@@ -74,9 +74,9 @@ class ActivityExecutionTests(TestCase):
         values = {"scope": "Edit request synthetic-id · Fields title, url, title, synthetic-secret",
                   "outcome": "Succeeded"}
         self.assertEqual(activity_edit_fields({**values, "action": "Apply edit · Rename entry"}),
-                         ("Changed fields", "Title, URL"))
+                         ("Changed Fields", "Title, URL"))
         self.assertEqual(activity_edit_fields({**values, "action": "Request edit · Rename entry"}),
-                         ("Proposed fields", "Title, URL"))
+                         ("Proposed Fields", "Title, URL"))
         self.assertIsNone(activity_edit_fields({**values, "action": "List entries"}))
         self.assertIsNone(activity_edit_fields({**values, "action": "Apply edit", "scope": "Fields synthetic-secret"}))
 

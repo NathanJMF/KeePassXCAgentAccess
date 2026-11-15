@@ -19,18 +19,18 @@ MAX_PENDING = 64
 LIVE_GRANT_STATES = frozenset(("pending", "active", "disabled"))
 OPTIONAL_METADATA_FIELDS = ("username", "url")
 ENTRY_EDITS = {
-    "update_entry": "Update entry details",
-    "move_entry": "Move entry",
-    "recycle_entry": "Move entry to recycle bin",
-    "replace_password": "Replace password",
+    "update_entry": "Update Entry Details",
+    "move_entry": "Move Entry",
+    "recycle_entry": "Move Entry to Recycle Bin",
+    "replace_password": "Replace Password",
 }
 GROUP_EDITS = {
-    "create_entry": "Create entries in group",
-    "create_group": "Create groups in group",
-    "rename_group": "Rename group",
-    "move_group": "Move group and its contents",
-    "recycle_group": "Move group and its contents to recycle bin",
-    "move_into": "Move entries or groups into group",
+    "create_entry": "Create Entries in Group",
+    "create_group": "Create Groups in Group",
+    "rename_group": "Rename Group",
+    "move_group": "Move Group and Its Contents",
+    "recycle_group": "Move Group and Its Contents to Recycle Bin",
+    "move_into": "Move Entries or Groups into Group",
 }
 EDIT_PERMISSIONS = ENTRY_EDITS | GROUP_EDITS
 

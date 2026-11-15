@@ -179,27 +179,27 @@ class WorkspaceApplication(Gtk.Application):
         brand.pack_start(Gtk.Label(label=APP_TITLE, xalign=0), False, False, 0)
         header.pack_start(brand)
         self.add_vault_button = styled(Gtk.Button(), "keeper-control")
-        self.add_vault_button.add(self._toolbar_content("Add vault…", "list-add-symbolic"))
-        self.add_vault_button.get_accessible().set_name("Add vault…")
+        self.add_vault_button.add(self._toolbar_content("Add Vault…", "list-add-symbolic"))
+        self.add_vault_button.get_accessible().set_name("Add Vault…")
         self.add_vault_button.connect("clicked", lambda *_: self._configure())
         header.pack_start(self.add_vault_button)
         self.vault_lock_button = styled(Gtk.Button(), "keeper-control")
         self.vault_lock_labels = self._toolbar_labels(
-            self.vault_lock_button, ("Lock all vaults", "changes-prevent-symbolic"),
-            ("Unlock all vaults", "changes-allow-symbolic"),
+            self.vault_lock_button, ("Lock All Vaults", "changes-prevent-symbolic"),
+            ("Unlock All Vaults", "changes-allow-symbolic"),
         )
         self.vault_lock_button.connect("clicked", self._toggle_all_vaults)
         header.pack_start(self.vault_lock_button)
         self.settings_button = styled(Gtk.Button(), "keeper-control", "keeper-quiet")
-        self.settings_button.set_tooltip_text("Keeper settings")
-        self.settings_button.get_accessible().set_name("Keeper settings")
+        self.settings_button.set_tooltip_text("Keeper Settings")
+        self.settings_button.get_accessible().set_name("Keeper Settings")
         self.settings_button.set_image(Gtk.Image.new_from_icon_name("open-menu-symbolic", Gtk.IconSize.BUTTON))
         self.settings_button.connect("clicked", self._show_settings)
         header.pack_end(self.settings_button)
         self.pause_button = styled(Gtk.Button(), "keeper-control", "keeper-paused")
         self.pause_labels = self._toolbar_labels(
-            self.pause_button, ("Resume agent access", "changes-prevent-symbolic"),
-            ("Pause agent access", "changes-allow-symbolic"),
+            self.pause_button, ("Resume Agent Access", "changes-prevent-symbolic"),
+            ("Pause Agent Access", "changes-allow-symbolic"),
         )
         self.pause_button.connect("clicked", self._toggle_pause)
         header.pack_end(self.pause_button)
@@ -281,7 +281,7 @@ class WorkspaceApplication(Gtk.Application):
         self.vault_buttons = {}
         for name, title, handler in (
             ("unlock", "Unlock", self._unlock),
-            ("lock", "Lock vault", self._lock_selected),
+            ("lock", "Lock Vault", self._lock_selected),
         ):
             self.vault_buttons[name] = button(self.vault_tools, title, handler)
         styled(self.vault_buttons["unlock"], "suggested-action")
@@ -305,7 +305,7 @@ class WorkspaceApplication(Gtk.Application):
         card = styled(Gtk.Box(orientation=Gtk.Orientation.VERTICAL), "keeper-card")
         self.browser.pack_start(card, True, True, 0)
         self.entry_tools = styled(Gtk.Box(), "keeper-card-toolbar")
-        self.entry_search = styled(Gtk.SearchEntry(placeholder_text="Filter entries", width_chars=28,
+        self.entry_search = styled(Gtk.SearchEntry(placeholder_text="Filter Entries", width_chars=28,
                                                  max_width_chars=36, halign=Gtk.Align.START), "keeper-search")
         self.entry_search.connect("changed", lambda *_: self._browse())
         self.entry_tools.pack_start(self.entry_search, False, False, 0)
@@ -354,7 +354,7 @@ class WorkspaceApplication(Gtk.Application):
         self.tray_items = {}
         for key, name, callback in (
             ("open", f"Open {APP_TITLE}", self._present),
-            ("pause", "Resume agent access", self._toggle_pause),
+            ("pause", "Resume Agent Access", self._toggle_pause),
             ("quit", "Quit", self._quit),
         ):
             item = Gtk.MenuItem(label=name)
@@ -403,7 +403,7 @@ class WorkspaceApplication(Gtk.Application):
             self.notice.set_text(self.message)
             self.notice.set_visible(bool(self.message))
             paused = not self.workspace or self.workspace.paused
-            pause_label = "Resume agent access" if paused else "Pause agent access"
+            pause_label = "Resume Agent Access" if paused else "Pause Agent Access"
             if self.pause_labels.get_visible_child_name() != pause_label:
                 self._show_toolbar_label(self.pause_button, self.pause_labels, pause_label)
                 style = self.pause_button.get_style_context()
@@ -661,25 +661,25 @@ class WorkspaceApplication(Gtk.Application):
         if record is None:
             return []
         session = self.workspace.owner_session(vault)
-        create = [("New entry…", self._new_entry)]
+        create = [("New Entry…", self._new_entry)]
         if group:
             if not session:
                 return []
             return self._actions_for(target, [
                 create,
-                [("Edit group…", self._edit_group), ("Copy group reference", self._copy_group_reference)],
+                [("Edit Group…", self._edit_group), ("Copy Group Reference", self._copy_group_reference)],
                 [(DELETE_LABEL, self._delete_group)],
             ])
-        create.append(("New group…", self._new_group))
+        create.append(("New Group…", self._new_group))
         if session:
-            session_actions = [("Lock vault", self._lock_selected)]
+            session_actions = [("Lock Vault", self._lock_selected)]
         else:
             session_actions = [("Unlock", self._unlock)]
-        management = [("Rename vault…", self._rename), ("Relink vault…", lambda: self._configure(self._record()))]
+        management = [("Rename Vault…", self._rename), ("Relink Vault…", lambda: self._configure(self._record()))]
         if record.item:
-            management.append(("Forget saved password…", self._forget))
+            management.append(("Forget Saved Password…", self._forget))
         if session:
-            management.append(("Copy root group reference", self._copy_group_reference))
+            management.append(("Copy Root Group Reference", self._copy_group_reference))
         return self._actions_for(target, [
             session_actions, create if session else [], management, [("Remove from Keeper…", self._remove)],
         ])
@@ -697,15 +697,15 @@ class WorkspaceApplication(Gtk.Application):
                 action(entry)
 
         return self._actions_for(target, [
-            [("View entry details…", lambda: with_entry(lambda entry: entry_details(self, vault, entry))),
-             ("Edit entry…", lambda: with_entry(lambda entry: edit_entry(self, vault, group, entry))),
-             ("Copy entry reference", lambda: with_entry(lambda _: self.copy_reference(vault, "entry", identifier)))],
+            [("View Entry Details…", lambda: with_entry(lambda entry: entry_details(self, vault, entry))),
+             ("Edit Entry…", lambda: with_entry(lambda entry: edit_entry(self, vault, group, entry))),
+             ("Copy Entry Reference", lambda: with_entry(lambda _: self.copy_reference(vault, "entry", identifier)))],
             [(DELETE_LABEL, lambda: with_entry(lambda entry: delete_entry(self, vault, group, entry)))],
         ])
 
     def _activity_context(self, row):
         identifier = row[self.activity_view.RECORD_ID]
-        return [[("View details…", lambda: self.activity_view.open_record(identifier))]]
+        return [[("View Details…", lambda: self.activity_view.open_record(identifier))]]
 
     def copy_reference(self, vault, field, identifier):
         if not self.desktop.locked and self.workspace.owner_session(vault):
@@ -819,7 +819,7 @@ class WorkspaceApplication(Gtk.Application):
         if not self.workspace or self.busy or self.desktop.locked:
             return
         dialog = SetupDialog(self.window, record.target if record else None)
-        dialog.set_title("Relink vault" if record else "Add KeePass vault")
+        dialog.set_title("Relink Vault" if record else "Add KeePass Vault")
         if record and record.item:
             dialog.remember.set_active(True)
         response = self.run_dialog(dialog)
@@ -866,7 +866,7 @@ class WorkspaceApplication(Gtk.Application):
             field = password_entry()
             field.set_activates_default(True)
             body.pack_start(field, False, False, 0)
-            remember = Gtk.CheckButton(label="Remember in the OS keyring", active=bool(record.item))
+            remember = Gtk.CheckButton(label="Remember in the OS Keyring", active=bool(record.item))
             body.pack_start(remember, False, False, 0)
             field.grab_focus()
             response = self.run_dialog(dialog)
@@ -899,7 +899,7 @@ class WorkspaceApplication(Gtk.Application):
 
     def _refresh_vault_lock(self):
         unlocked = self._any_vault_unlocked()
-        label = "Lock all vaults" if unlocked else "Unlock all vaults"
+        label = "Lock All Vaults" if unlocked else "Unlock All Vaults"
         self._show_toolbar_label(self.vault_lock_button, self.vault_lock_labels, label)
         self.vault_lock_button.set_sensitive(bool(self.workspace and self.workspace.registrations
                                                   and not self.desktop.locked and (unlocked or not self.busy)))
@@ -959,7 +959,7 @@ class WorkspaceApplication(Gtk.Application):
         record = self._record()
         if not record or self.desktop.locked:
             return
-        dialog, body = _dialog(self, "Rename vault", 410, 140)
+        dialog, body = _dialog(self, "Rename Vault", 410, 140)
         dialog.set_modal(True)
         dialog.add_buttons("Cancel", Gtk.ResponseType.CANCEL, "Rename", Gtk.ResponseType.OK)
         name = Gtk.Entry(text=record.name, activates_default=True)
@@ -998,7 +998,7 @@ class WorkspaceApplication(Gtk.Application):
                 # Leave room for the dialog title bar and the desktop shell.
                 width = min(width, max(1, workarea.width - 48))
                 height = min(height, max(1, workarea.height - 80))
-        dialog, body = _dialog(self, "Keeper settings", width, height)
+        dialog, body = _dialog(self, "Keeper Settings", width, height)
         dialog.set_name("keeper-settings")
         dialog.set_modal(True)
         body.set_border_width(0)
@@ -1032,16 +1032,16 @@ class WorkspaceApplication(Gtk.Application):
             return rows
 
         notifications = page("notifications", "Notifications", "preferences-system-notifications-symbolic")
-        self._settings_switch(self._settings_card(notifications), "Request pop-ups", self.review_popups.enabled,
+        self._settings_switch(self._settings_card(notifications), "Request Pop-Ups", self.review_popups.enabled,
                               self._set_request_popups, "request-popups",
                               "Open the review window when a request arrives.")
         approvals = page("auto-approve", "Auto Approve", "changes-prevent-symbolic")
-        self._settings_switch(self._settings_card(approvals), "Auto approve agent actions", not self.workspace.review_usage,
+        self._settings_switch(self._settings_card(approvals), "Auto Approve Agent Actions", not self.workspace.review_usage,
                               self._set_usage_policy, "auto-approve-usage",
                               "Skip prompts for enabled actions within each token’s approved permissions.")
         actions = self._settings_card(approvals)
         actions.set_spacing(7)
-        actions.pack_start(styled(_label("Auto approve these requests"), "keeper-settings-caption"), False, False, 0)
+        actions.pack_start(styled(_label("Auto Approve These Requests"), "keeper-settings-caption"), False, False, 0)
         actions.pack_start(styled(_label("Action switches apply when Auto Approve is on. Token switches work independently."),
                                  "keeper-settings-description"), False, False, 0)
         for operation, caption in REVIEW_ACTIONS.items():
@@ -1050,17 +1050,17 @@ class WorkspaceApplication(Gtk.Application):
                                   lambda control, operation=operation: self._set_action_auto_approval(control, operation),
                                   operation)
         for setting, caption in (
-            ("auto_approve_tokens", "Access tokens - Create"),
-            ("auto_approve_token_changes", "Access tokens - Update permissions"),
+            ("auto_approve_tokens", "Access Tokens - Create"),
+            ("auto_approve_token_changes", "Access Tokens - Update Permissions"),
         ):
             actions.pack_start(Gtk.Separator(), False, False, 0)
             self._settings_switch(actions, caption, getattr(self.workspace, setting),
                                   lambda control, setting=setting: self._set_token_auto_approval(control, setting),
                                   setting)
         vaults = page("vaults", "Vaults", "drive-harddisk-symbolic")
-        self._settings_switch(self._settings_card(vaults), "Start unlocked", self.start_unlocked, self._set_start_unlocked,
+        self._settings_switch(self._settings_card(vaults), "Start Unlocked", self.start_unlocked, self._set_start_unlocked,
                               "start-unlocked", "Use saved keyring passwords to unlock vaults when Keeper starts.")
-        broker = page("broker", "Broker settings", "network-server-symbolic")
+        broker = page("broker", "Broker Settings", "network-server-symbolic")
         self._broker_settings_page(self._settings_card(broker))
         stack.set_visible_child_name("notifications")
         return dialog
@@ -1138,8 +1138,8 @@ class WorkspaceApplication(Gtk.Application):
         uid = Gtk.Entry(text=str(config.agent_uid) if config else "")
         retention = Gtk.SpinButton.new_with_range(1, 365, 1)
         retention.set_value(self.workspace.legacy_access.read().retention_days)
-        for label, widget in (("Absolute broker socket path", endpoint), ("Isolated runner account or UID", uid),
-                              ("Activity retention (days)", retention)):
+        for label, widget in (("Absolute Broker Socket Path", endpoint), ("Isolated Runner Account or UID", uid),
+                              ("Activity Retention (Days)", retention)):
             body.pack_start(styled(_label(label), "keeper-settings-caption"), False, False, 0)
             body.pack_start(widget, False, False, 0)
         status = styled(_label(""), "keeper-settings-description")
@@ -1167,7 +1167,7 @@ class WorkspaceApplication(Gtk.Application):
             status.show()
             self._refresh()
 
-        save_button = styled(Gtk.Button(label="Save broker settings", halign=Gtk.Align.START),
+        save_button = styled(Gtk.Button(label="Save Broker Settings", halign=Gtk.Align.START),
                              "keeper-settings-save")
         save_button.set_margin_top(5)
         save_button.connect("clicked", save)

@@ -134,7 +134,7 @@ def main(root):
             active = []
 
             def change(dialog):
-                assert dialog.get_title() == "Keeper settings"
+                assert dialog.get_title() == "Keeper Settings"
                 assert dialog.get_style_context().has_class("keeper-dialog")
                 divider = next(widget for widget in descendants(dialog)
                                if widget.get_style_context().has_class("keeper-settings-divider"))
@@ -148,7 +148,7 @@ def main(root):
                 assert divider.get_allocated_height() == area.get_allocated_height()
                 pages = next(widget for widget in descendants(dialog) if widget.get_name() == "keeper-settings-pages")
                 assert [pages.child_get_property(child, "title") for child in pages.get_children()] == [
-                    "Notifications", "Auto Approve", "Vaults", "Broker settings",
+                    "Notifications", "Auto Approve", "Vaults", "Broker Settings",
                 ]
                 assert pages.get_visible_child_name() == "notifications"
                 assert dialog.get_widget_for_response(Gtk.ResponseType.CLOSE) is None
@@ -267,7 +267,7 @@ def main(root):
 
         def approve(profile, vault=None, *, popup=False, resume=False):
             def confirm(dialog):
-                assert dialog.get_title() == "Review access request"
+                assert dialog.get_title() == "Review Access Request"
                 assert app.window.get_visible()
                 labels = [child for child in descendants(dialog) if isinstance(child, Gtk.Label)]
                 expander, = [child for child in descendants(dialog) if isinstance(child, Gtk.Expander)]
@@ -277,7 +277,7 @@ def main(root):
                 assert app.grants.records[token_ids[profile]].identity in summary, summary
                 assert "Requested by · agent-reported" in summary
                 assert "Disposable project" in summary, summary
-                assert "Permissions if approved" in summary
+                assert "Permissions if Approved" in summary
                 assert all(token_ids[profile] not in text and "verified" not in text for text in summary)
                 details = [child.get_text() for child in descendants(expander) if isinstance(child, Gtk.Label)]
                 assert token_ids[profile] in details, details
@@ -285,18 +285,18 @@ def main(root):
                 assert "Disposable project (reported)" in details, details
                 if profile == "alpha":
                     assert fixture[0]["title"] in summary, summary
-                    assert "Read entry details" in summary and "Entry ID, title and group path" in summary
-                    assert "Read username" in summary and USERNAME in summary
+                    assert "Read Entry Details" in summary and "Entry ID, title and group path" in summary
+                    assert "Read Username" in summary and USERNAME in summary
                     assert "Run Imported fixture action" in summary, summary
                     assert first_entry in details and all(first_entry not in text for text in summary)
                     assert not any(isinstance(child, Gtk.ComboBoxText) for child in descendants(dialog))
                 elif profile == "expanded":
-                    assert "Requested entries (3)" in summary
-                    assert "Read stored URL" in summary and STORED_URL in summary
+                    assert "Requested Entries (3)" in summary
+                    assert "Read Stored URL" in summary and STORED_URL in summary
                 elif profile == "bearer":
                     assert any("HTTPS Bearer token GET" in label and url + "/first" in label for label in summary)
                 elif profile == "scoped-editor":
-                    assert {"Requested resources (2)", "Update entry details", "Create entries in group"} <= set(summary)
+                    assert {"Requested Resources (2)", "Update Entry Details", "Create Entries in Group"} <= set(summary)
                 if vault:
                     combo, = [child for child in descendants(dialog) if isinstance(child, Gtk.ComboBoxText)]
                     assert len(combo.get_model()) == 4
@@ -407,20 +407,20 @@ def main(root):
                 assert read_inline() == inline
 
             def inspect(dialog):
-                assert dialog.get_title() == "Access token"
+                assert dialog.get_title() == "Access Token"
                 labels = {child.get_text() for child in descendants(dialog)
                           if isinstance(child, Gtk.Label) and child.is_visible()}
-                assert "Approved entries" in labels
+                assert "Approved Entries" in labels
                 assert ("Unlock a database to see its group and entry names." in labels) == first_locked
                 assert all(first not in value and second not in value for value in labels)
                 tree, = [child for child in descendants(dialog) if isinstance(child, Gtk.TreeView)]
                 assert [column.get_title() for column in tree.get_columns()] == ["Database / Group / Entry", "Permissions"]
                 entries = expanded_scope(tree, tree.get_model(), 0, 1)
                 assert {scope_label(path): permissions for path, permissions in entries.items()} == inline
-                assert entries[first_entry_path] and "Entry metadata" not in entries[first_entry_path]
-                assert "Entry metadata" in entries[second_name, root_entry]
+                assert entries[first_entry_path] and "Entry Metadata" not in entries[first_entry_path]
+                assert "Entry Metadata" in entries[second_name, root_entry]
                 assert "Stored URL" in entries[second_name, root_entry]
-                assert "Entry metadata" in entries[nested_path]
+                assert "Entry Metadata" in entries[nested_path]
                 assert "Stored URL" not in entries[nested_path]
                 assert all(STORED_URL not in description for description in entries.values())
                 dialog.response(Gtk.ResponseType.CLOSE)
@@ -534,7 +534,7 @@ def main(root):
             menu, = set(Gtk.Menu.get_for_attach_widget(tree) or ()) - previous
             options = [item for item in menu.get_children() if not isinstance(item, Gtk.SeparatorMenuItem)]
             for item in options:
-                if item.get_label() in ("Delete…", "Remove token…"):
+                if item.get_label() in ("Delete…", "Remove Token…"):
                     style = item.get_style_context()
                     assert style.has_class("keeper-delete")
                     found, color = style.lookup_color("keeper_failure")
@@ -850,7 +850,7 @@ def main(root):
                     if resume:
                         assert not approve.get_sensitive()
                         assert "Agent access is paused" in labels
-                        resume_control = button(dialog, "Resume agent access")
+                        resume_control = button(dialog, "Resume Agent Access")
                         assert resume_control.get_visible() and resume_control.get_sensitive()
                         click_decision(resume_control)
                         assert not app.workspace.paused and status(proposal)["status"] == "pending"
@@ -994,7 +994,7 @@ def main(root):
                 verify_isolation(target)
                 assert "token is required" in invoke(None, "entries", "list", expected=1)
                 wait_for(lambda: not app.busy and app.workspace.session(first), "Saved vault did not unlock at startup")
-                assert app.vault_lock_button.get_accessible().get_name() == "Lock all vaults"
+                assert app.vault_lock_button.get_accessible().get_name() == "Lock All Vaults"
                 check_toolbar_button(app.add_vault_button)
                 vault_lock_size = check_toolbar_button(app.vault_lock_button)
                 assert settings_switch("vaults", "start-unlocked")
@@ -1003,13 +1003,13 @@ def main(root):
                 assert settings_switch("vaults", "start-unlocked", True)
                 app.vault_lock_button.clicked()
                 assert not app.workspace.session(first)
-                assert app.vault_lock_button.get_accessible().get_name() == "Unlock all vaults"
+                assert app.vault_lock_button.get_accessible().get_name() == "Unlock All Vaults"
                 assert check_toolbar_button(app.vault_lock_button) == vault_lock_size
                 root_path = select_tree(first)
                 assert not app.tree.row_expanded(root_path)
                 locked_actions = context_menu(app.tree)
-                assert locked_actions.count("Unlock") == 1 and "Relink vault…" in locked_actions
-                assert "Lock vault" not in locked_actions and "New entry…" not in locked_actions
+                assert locked_actions.count("Unlock") == 1 and "Relink Vault…" in locked_actions
+                assert "Lock Vault" not in locked_actions and "New Entry…" not in locked_actions
                 assert "Enter password…" not in locked_actions
                 assert [button.get_label() for button in app.vault_buttons.values() if button.get_visible()] == ["Unlock"]
                 app.vault_lock_button.clicked()
@@ -1023,7 +1023,7 @@ def main(root):
                     labels = [widget.get_text() for widget in descendants(dialog) if isinstance(widget, Gtk.Label)]
                     assert any("password" in label.lower() for label in labels)
                     remember, = (widget for widget in descendants(dialog) if isinstance(widget, Gtk.CheckButton))
-                    assert remember.get_label() == "Remember in the OS keyring"
+                    assert remember.get_label() == "Remember in the OS Keyring"
                     remember.set_active(True)
                     field, = (widget for widget in descendants(dialog) if isinstance(widget, Gtk.Entry))
                     assert not field.get_text() and not field.get_visibility()
@@ -1056,14 +1056,14 @@ def main(root):
                 app.entry_search.set_text("harbor lab / FIELD")
                 assert [row[ENTRY_ID_COLUMN] for row in app.entries.get_model()] == [nested_entry]
                 app.entry_search.set_text("")
-                assert "Copy root group reference" in context_menu(app.tree)
+                assert "Copy Root Group Reference" in context_menu(app.tree)
                 assert not any(widget.get_tooltip_text() == "Vault options" for widget in descendants(app.window))
                 entry_table = app.entries
                 first_path = next(row.path for row in entry_table.get_model() if row[ENTRY_ID_COLUMN] == first_entry)
                 nested_path = next(row.path for row in entry_table.get_model() if row[ENTRY_ID_COLUMN] == nested_entry)
                 entry_table.get_selection().select_path(first_path)
                 assert context_menu(entry_table, nested_path) == [
-                    "View entry details…", "Edit entry…", "Copy entry reference", "Delete…",
+                    "View Entry Details…", "Edit Entry…", "Copy Entry Reference", "Delete…",
                 ]
                 entry_model, selected = entry_table.get_selection().get_selected()
                 assert entry_model[selected][ENTRY_ID_COLUMN] == nested_entry
@@ -1095,7 +1095,7 @@ def main(root):
                 assert not app.workspace.registrations[second].bindings
 
                 def edit_action(dialog):
-                    assert dialog.get_title() == "Credential action"
+                    assert dialog.get_title() == "Credential Action"
                     fields = [child for child in dialog.get_content_area().get_children() if isinstance(child, Gtk.Entry)]
                     for field, value in zip(fields, ("check", "Second vault action", url + "/second")):
                         field.set_text(value)
@@ -1106,7 +1106,7 @@ def main(root):
                     GLib.timeout_add(25, lambda: follow_up())
 
                 def follow_up():
-                    if app.dialog and app.dialog.get_title() == "Credential action":
+                    if app.dialog and app.dialog.get_title() == "Credential Action":
                         edit_action(app.dialog)
                         GLib.timeout_add(25, close_details)
                         return GLib.SOURCE_REMOVE
@@ -1135,7 +1135,7 @@ def main(root):
                     assert layout == group_layout, (group_layout, layout)
                 select_tree(first, outer)
                 assert context_menu(app.tree) == [
-                    "New entry…", "Edit group…", "Copy group reference", "Delete…",
+                    "New Entry…", "Edit Group…", "Copy Group Reference", "Delete…",
                 ]
                 assert [item.get_label() for item in new_menu.get_children() if item.get_visible()] == ["Group…", "Entry…"]
                 assert [row[ENTRY_ID_COLUMN] for row in app.entries.get_model()] == [direct_entry]
@@ -1194,7 +1194,7 @@ def main(root):
                 access_view = app.access_view
                 access_table = access_view.table
                 assert [column.get_title() for column in access_table.get_columns()] == [
-                    "Requested", "Last used", "Identity", "Model", "Project", "Chat", "Status",
+                    "Requested", "Last Used", "Identity", "Model", "Project", "Chat", "Status",
                 ]
                 assert [row[access_view.STATUS] for row in access_table.get_model()] == ["Pending", "Pending", "Active"]
                 identity_column = access_view.TITLES.index("Identity")
@@ -1212,8 +1212,8 @@ def main(root):
                 assert not access_model.iter_has_child(access_root("beta").iter)
                 assert access_model.iter_has_child(access_root("alpha").iter)
                 assert all(timestamp.fullmatch(row[0]) and row[1] == "—" for row in access_table.get_model())
-                assert token_context_menu("beta") == ["Review request…"]
-                assert token_context_menu("alpha") == ["View permissions…", "Disable token", "Remove token…"]
+                assert token_context_menu("beta") == ["Review Request…"]
+                assert token_context_menu("alpha") == ["View Permissions…", "Disable Token", "Remove Token…"]
                 assert not app.review_popups.enabled
                 deny("review")
                 assert app.workspace.paused
@@ -1263,7 +1263,7 @@ def main(root):
                 assert expanded_row[model_column] == f"{enrollment_model} (reported)"
                 assert expanded_row[chat_column] == f"{enrollment_chat} (reported)"
                 assert timestamp.fullmatch(expanded_row[1])
-                check_date_widths(access_table, expanded_row, "Requested", "Last used")
+                check_date_widths(access_table, expanded_row, "Requested", "Last Used")
                 check_token_scope(first, second)
                 assert STORED_URL.encode() not in old_activity.path.read_bytes()
                 assert USERNAME.encode() not in old_activity.path.read_bytes()
@@ -1279,7 +1279,7 @@ def main(root):
                     GLib.timeout_add(25, choose_bearer)
 
                 def choose_bearer():
-                    if not app.dialog or app.dialog.get_title() != "Credential action":
+                    if not app.dialog or app.dialog.get_title() != "Credential Action":
                         return GLib.SOURCE_CONTINUE
                     chooser = next(child for child in descendants(app.dialog) if child.get_name() == "action-kind")
                     chooser.set_active_id(ActionType.BEARER.value)
@@ -1323,7 +1323,7 @@ def main(root):
                     assert not group_choice.get_sensitive()
                     assert group_choice.get_active_id() is None
                     assert group_choice.get_active_text() == "Vault is locked"
-                    assert unlock.get_visible() and unlock.get_label() == "Unlock vault"
+                    assert unlock.get_visible() and unlock.get_label() == "Unlock Vault"
                     title = next(child for child in descendants(dialog) if child.get_name() == "entry-title")
                     title.set_text("Unsaved entry fixture")
                     password = next(child for child in descendants(dialog) if child.get_name() == "entry-password")
@@ -1363,7 +1363,7 @@ def main(root):
                 def check_unsaved_prompt(dialog):
                     assert dialog.get_title() == "Unlock manual"
                     remember, = (widget for widget in descendants(dialog) if isinstance(widget, Gtk.CheckButton))
-                    assert remember.get_label() == "Remember in the OS keyring" and not remember.get_active()
+                    assert remember.get_label() == "Remember in the OS Keyring" and not remember.get_active()
                     dialog.response(Gtk.ResponseType.CANCEL)
 
                 drive_dialog(app.vault_buttons["unlock"].clicked, check_unsaved_prompt)
@@ -1414,11 +1414,11 @@ def main(root):
                 finally:
                     app.workspace.remove(manual)
                 select_tree(first)
-                token_context_menu("alpha", activate="Disable token")
+                token_context_menu("alpha", activate="Disable Token")
                 assert invoke("alpha", "access", "status") == {"status": "disabled"}
                 assert invoke("alpha", "entries", "list", expected=1) == denied
                 assert invoke("beta", "entries", "list")["entries"] == fixture[2:]
-                assert token_context_menu("alpha") == ["View permissions…", "Re-enable token", "Remove token…"]
+                assert token_context_menu("alpha") == ["View Permissions…", "Re-enable Token", "Remove Token…"]
                 disabled = access_root("alpha")
                 assert disabled[app.access_view.STATUS] == "Disabled"
                 access_table.expand_row(disabled.path, False)
@@ -1427,12 +1427,12 @@ def main(root):
                 assert not scope.model.iter_has_child(scope.iter)
                 assert scope[identity_column] == f"{app.workspace.registrations[first].name} > — > {fixture[0]['title']}"
                 permissions = scope[access_view.TITLES.index("Project")]
-                assert "Entry metadata" in permissions and "Username" in permissions
+                assert "Entry Metadata" in permissions and "Username" in permissions
                 drive_dialog(access_row("alpha"), lambda dialog: dialog.response(Gtk.ResponseType.APPLY))
                 assert invoke("alpha", "entries", "list")["entries"] == fixture[:1]
                 alpha_record = next(row for row in app.grants.rows() if row.identity == "Agent alpha")
                 assert alpha_record.last_used and alpha_record.last_used >= alpha_record.requested
-                drive_dialog(lambda: token_context_menu("alpha", activate="Remove token…"),
+                drive_dialog(lambda: token_context_menu("alpha", activate="Remove Token…"),
                              lambda dialog: dialog.response(Gtk.ResponseType.OK))
                 assert enroll("alpha", alpha, expected=1) == denied
                 assert invoke("alpha", "entries", "list", expected=1) == denied
@@ -1484,7 +1484,7 @@ def main(root):
                 assert not table.row_expanded(token_summary.path)
                 def read_parent(dialog):
                     labels = {label.get_text() for label in descendants(dialog) if isinstance(label, Gtk.Label)}
-                    assert {"Remove token", "Audit note", "Check approved services"} <= labels
+                    assert {"Remove token", "Audit Note", "Check approved services"} <= labels
                     dialog.response(Gtk.ResponseType.CLOSE)
 
                 drive_dialog(lambda: table.row_activated(token_summary.path, table.get_column(0)), read_parent)
@@ -1519,14 +1519,14 @@ def main(root):
                 path = row.path
                 table.expand_to_path(path)
                 table.get_selection().select_path(path)
-                assert context_menu(table) == ["View details…"]
+                assert context_menu(table) == ["View Details…"]
 
                 def read_activity(dialog):
                     labels = {child.get_text() for child in descendants(dialog) if isinstance(child, Gtk.Label)}
                     assert {"Resource", "Vault", "Group", "Key", "second", "Root", fixture[0]["title"]} <= labels
                     assert {f"{action_model} (reported)", f"{action_chat} (reported)"} <= labels
                     expander = next(child for child in descendants(dialog) if isinstance(child, Gtk.Expander))
-                    assert expander.get_label() == "Technical details" and not expander.get_expanded()
+                    assert expander.get_label() == "Technical Details" and not expander.get_expanded()
                     dialog.response(Gtk.ResponseType.CLOSE)
 
                 drive_dialog(lambda: table.row_activated(path, table.get_column(0)), read_activity)
@@ -1549,13 +1549,13 @@ def main(root):
                 approve("scoped-editor")
 
                 def review_usage(dialog):
-                    assert dialog.get_title() == "Review agent usage"
+                    assert dialog.get_title() == "Review Agent Usage"
                     labels = {child.get_text() for child in descendants(dialog) if isinstance(child, Gtk.Label)}
                     assert {"Agent beta", "List entries", "Approval applies to this operation only."} <= labels
                     click_decision(dialog.get_widget_for_response(Gtk.ResponseType.ACCEPT))
 
                 assert settings_switch("auto-approve", "list_entries")
-                assert not settings_switch("auto-approve", "list_entries", False, label="Groups and entries - Read")
+                assert not settings_switch("auto-approve", "list_entries", False, label="Groups and Entries - Read")
                 app.usage_button.set_active(True)
                 assert not old_access.read().review_usage
                 assert old_access.read().review_actions == {"list_entries"}
@@ -1565,10 +1565,10 @@ def main(root):
                     assert reviewed.result(timeout=4)["entries"] == fixture[2:]
                 assert settings_switch("auto-approve", "list_entries", True)
                 assert invoke("beta", "entries", "list")["entries"] == fixture[2:]
-                assert app.pause_button.get_accessible().get_name() == "Pause agent access"
+                assert app.pause_button.get_accessible().get_name() == "Pause Agent Access"
                 pause_size = check_toolbar_button(app.pause_button)
                 app.tray_items["pause"].activate()
-                assert app.pause_button.get_accessible().get_name() == "Resume agent access"
+                assert app.pause_button.get_accessible().get_name() == "Resume Agent Access"
                 assert check_toolbar_button(app.pause_button) == pause_size
                 assert app.workspace.paused and app.workspace.session(second)
                 assert app.indicator.get_icon() == "keeper-agent-access-paused"
@@ -1584,9 +1584,9 @@ def main(root):
                 app.tray_items["pause"].activate()
                 assert app.indicator.get_icon() == "keeper-agent-access-active"
                 assert not settings_switch("auto-approve", "auto_approve_token_changes",
-                                           label="Access tokens - Update permissions")
+                                           label="Access Tokens - Update Permissions")
                 assert settings_switch("auto-approve", "auto_approve_tokens", True,
-                                       label="Access tokens - Create")
+                                       label="Access Tokens - Create")
                 assert old_access.read().auto_approve_tokens
                 initial_item = {"vault": first, "entry": first_entry, "metadata": True}
                 assert enroll("auto-token", [initial_item]) == {"status": "active"}
@@ -1605,12 +1605,12 @@ def main(root):
                 app.access_button.clicked()
                 view = app.access_view
                 row, = [row for row in view.table.get_model() if row[view.RECORD_ID] == request_id]
-                assert row[view.STATUS] == "Permission change pending"
+                assert row[view.STATUS] == "Permission Change Pending"
                 assert row.iterchildren() is not None
                 assert invoke("auto-token", "entries", "list", "--vault", first)["entries"][0]["id"] == first_entry
 
                 def approve_permission_change(dialog):
-                    assert dialog.get_title() == "Review token permission change"
+                    assert dialog.get_title() == "Review Token Permission Change"
                     assert_keypress_ignored(dialog, "auto-token", permission_change=True)
                     click_decision(dialog.get_widget_for_response(Gtk.ResponseType.ACCEPT))
 

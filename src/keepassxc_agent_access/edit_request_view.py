@@ -10,15 +10,15 @@ from .workspace_style import styled
 
 
 OPERATION_LABELS = {
-    "create_entry": "Create entry",
-    "update_entry": "Edit entry metadata",
-    "create_group": "Create group",
-    "rename_group": "Rename group",
-    "move_entry": "Move entry",
-    "move_group": "Move group",
-    "recycle_entry": "Recycle entry",
-    "recycle_group": "Recycle group",
-    "replace_password": "Replace entry password",
+    "create_entry": "Create Entry",
+    "update_entry": "Edit Entry Metadata",
+    "create_group": "Create Group",
+    "rename_group": "Rename Group",
+    "move_entry": "Move Entry",
+    "move_group": "Move Group",
+    "recycle_entry": "Recycle Entry",
+    "recycle_group": "Recycle Group",
+    "replace_password": "Replace Entry Password",
 }
 FIELD_LABELS = {"name": "Name", "title": "Title", "username": "Username", "url": "Stored URL"}
 
@@ -57,7 +57,7 @@ def _values(container, review):
 
 
 def _request_details(container, app, record, preview):
-    details = Gtk.Expander(label="Request details")
+    details = Gtk.Expander(label="Request Details")
     fields = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=5, margin_top=8, margin_start=12)
     details.add(fields)
     _add(fields, f"Requested  {_time(record.requested)}")
@@ -83,7 +83,7 @@ def review_edit(app, record):
     dialog.set_position(Gtk.WindowPosition.CENTER_ON_PARENT)
     dialog.set_modal(True)
     dialog.add_buttons("Close", Gtk.ResponseType.CLOSE, "Deny", Gtk.ResponseType.REJECT,
-                       "Approve and apply", Gtk.ResponseType.ACCEPT)
+                       "Approve and Apply", Gtk.ResponseType.ACCEPT)
     dialog.set_default_response(Gtk.ResponseType.CLOSE)
     require_mouse_decisions(dialog)
     styled(dialog.get_widget_for_response(Gtk.ResponseType.ACCEPT), "suggested-action")
@@ -129,7 +129,7 @@ def review_edit(app, record):
             _add(panel, "Enter the replacement password.")
             owner_password = password_entry()
             owner_password.set_name("edit-owner-password")
-            owner_password.set_placeholder_text("Replacement password")
+            owner_password.set_placeholder_text("Replacement Password")
             panel.pack_start(owner_password, False, False, 0)
         if operation == "replace_password" or any(field == "username" for field, _ in preview.new):
             _add(panel, "Existing credential action approvals for this entry will require fresh approval.")
@@ -144,7 +144,7 @@ def review_edit(app, record):
     blocker.pack_start(explanation, True, True, 0)
     _add(explanation, "Agent access is paused", "keeper-review-label")
     reason = _add(explanation, "Resuming lets all approved tokens run again.", "keeper-review-muted")
-    resume = Gtk.Button(label="Resume agent access", valign=Gtk.Align.CENTER)
+    resume = Gtk.Button(label="Resume Agent Access", valign=Gtk.Align.CENTER)
     resume.set_can_focus(False)
     resume.connect("clicked", lambda *_: app.set_agent_paused(False) if mouse_click() else None)
     blocker.pack_end(resume, False, False, 0)

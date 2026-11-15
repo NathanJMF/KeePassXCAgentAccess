@@ -44,31 +44,31 @@ def default_vault_directory():
 def password_entry():
     entry = Gtk.Entry(visibility=False, activates_default=True)
     entry.set_input_purpose(Gtk.InputPurpose.PASSWORD)
-    entry.set_placeholder_text("Database password")
+    entry.set_placeholder_text("Database Password")
     return entry
 
 
 class SetupDialog(Gtk.Dialog):
     def __init__(self, window, target):
-        super().__init__(title="Set up a KeePass database", transient_for=window, modal=True)
+        super().__init__(title="Set Up a KeePass Database", transient_for=window, modal=True)
         styled(self, "keeper-dialog")
-        self.add_buttons("Cancel", Gtk.ResponseType.CANCEL, "Verify and save", Gtk.ResponseType.OK)
+        self.add_buttons("Cancel", Gtk.ResponseType.CANCEL, "Verify and Save", Gtk.ResponseType.OK)
         self.set_default_response(Gtk.ResponseType.OK)
-        self.database = Gtk.FileChooserButton(title="Choose a KeePass database")
+        self.database = Gtk.FileChooserButton(title="Choose a KeePass Database")
         database_filter = Gtk.FileFilter()
         database_filter.set_name("KeePass databases (*.kdbx)")
         database_filter.add_pattern("*.[kK][dD][bB][xX]")
         self.database.add_filter(database_filter)
-        self.key_file = Gtk.FileChooserButton(title="Choose a key file")
-        self.key_file_enabled = Gtk.CheckButton(label="Use a key file")
+        self.key_file = Gtk.FileChooserButton(title="Choose a Key File")
+        self.key_file_enabled = Gtk.CheckButton(label="Use a Key File")
         self.key_file_enabled.connect("toggled", self._toggle_key_file)
         self.password = password_entry()
-        self.remember = Gtk.CheckButton(label="Remember on this device")
+        self.remember = Gtk.CheckButton(label="Remember on This Device")
         self.remember.set_tooltip_text("Save the password in the OS keyring.")
         box = self.get_content_area()
         box.set_border_width(16)
         box.set_spacing(10)
-        for widget in (Gtk.Label(label="KeePass database", xalign=0), self.database,
+        for widget in (Gtk.Label(label="KeePass Database", xalign=0), self.database,
                        self.key_file_enabled, self.key_file, self.password, self.remember):
             box.pack_start(widget, False, False, 0)
         if target:

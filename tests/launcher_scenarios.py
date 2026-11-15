@@ -136,16 +136,16 @@ def main(root):
     assert launcher.launch([], None)
     second = wait_for(app_pid)
     try:
-        wait_for(lambda: tray_labels() == ("Open Keeper", "Resume agent access", "Quit"))
+        wait_for(lambda: tray_labels() == ("Open Keeper", "Resume Agent Access", "Quit"))
         wait_for(endpoint.exists)
         subprocess.run(["setfacl", "-m", f"u:{uid}:rw", endpoint], check=True)
         result = invoke(root, endpoint)
         assert result.returncode != 0 and not result.stdout
         assert b"approved access token" in result.stderr
-        click("Resume agent access")
-        wait_for(lambda: tray_labels() == ("Open Keeper", "Pause agent access", "Quit"))
-        click("Pause agent access")
-        wait_for(lambda: tray_labels() == ("Open Keeper", "Resume agent access", "Quit"))
+        click("Resume Agent Access")
+        wait_for(lambda: tray_labels() == ("Open Keeper", "Pause Agent Access", "Quit"))
+        click("Pause Agent Access")
+        wait_for(lambda: tray_labels() == ("Open Keeper", "Resume Agent Access", "Quit"))
     finally:
         stop(second)
     assert not endpoint.exists()
