@@ -209,14 +209,23 @@ def main(root):
                 assert not table.row_expanded(token.path)
             table.expand_row(token.path, False)
 
+            def scope_label(path):
+                vault, *groups, entry = path
+                return f"{vault} | {' / '.join(groups) or '—'} | {entry}"
+
             def read_inline():
                 token = access_root("expanded")
                 assert table.row_expanded(token.path)
-                return expanded_scope(table, token.iterchildren(), identity, project)
+                entries = {}
+                for row in token.iterchildren():
+                    assert not row.model.iter_has_child(row.iter)
+                    assert row[identity] not in entries
+                    entries[row[identity]] = row[project]
+                return entries
 
             inline = read_inline()
-            assert set(inline) == {first_entry_path, (second_name, root_entry), nested_path}
-            assert all(secret not in value for paths, permissions in inline.items() for value in (*paths, permissions)
+            assert set(inline) == {scope_label(path) for path in (first_entry_path, (second_name, root_entry), nested_path)}
+            assert all(secret not in value for pair in inline.items() for value in pair
                        for secret in (STORED_URL, USERNAME, PASSWORD, OTHER_PASSWORD))
             if not first_locked:
                 invoke("expanded", "vaults", "list")
@@ -236,7 +245,7 @@ def main(root):
                 tree, = [child for child in descendants(dialog) if isinstance(child, Gtk.TreeView)]
                 assert [column.get_title() for column in tree.get_columns()] == ["Database / Group / Entry", "Permissions"]
                 entries = expanded_scope(tree, tree.get_model(), 0, 1)
-                assert entries == inline
+                assert {scope_label(path): permissions for path, permissions in entries.items()} == inline
                 assert entries[first_entry_path] and "Entry metadata" not in entries[first_entry_path]
                 assert "Entry metadata" in entries[second_name, root_entry]
                 assert "Stored URL" in entries[second_name, root_entry]
@@ -1100,8 +1109,10 @@ def main(root):
                 assert disabled[app.access_view.STATUS] == "Disabled"
                 access_table.expand_row(disabled.path, False)
                 assert access_table.row_expanded(disabled.path)
-                permissions, = expanded_scope(access_table, disabled.iterchildren(), 2, 3).values()
-                assert "Entry metadata" in permissions and "Username" in permissions
+                scope, = disabled.iterchildren()
+                assert not scope.model.iter_has_child(scope.iter)
+                assert scope[2] == f"{app.workspace.registrations[first].name} | — | {fixture[0]['title']}"
+                assert "Entry metadata" in scope[3] and "Username" in scope[3]
                 drive_dialog(access_row("alpha"), lambda dialog: dialog.response(Gtk.ResponseType.APPLY))
                 assert invoke("alpha", "entries", "list")["entries"] == fixture[:1]
                 alpha_record = next(row for row in app.grants.rows() if row.identity == "Agent alpha")
