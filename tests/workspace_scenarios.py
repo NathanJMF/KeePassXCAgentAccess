@@ -141,7 +141,8 @@ def main(root):
         def access_row(profile):
             app.access_button.clicked()
             table = app.access_view.table
-            path = next(row.path for row in table.get_model() if row[1].startswith(f"Agent {profile} "))
+            identity = app.access_view.TITLES.index("Identity")
+            path = next(row.path for row in table.get_model() if row[identity].startswith(f"Agent {profile} "))
             table.get_selection().select_path(path)
             return lambda: table.row_activated(path, table.get_column(0))
 
@@ -169,6 +170,49 @@ def main(root):
                 dialog.response(Gtk.ResponseType.ACCEPT)
             drive_dialog(access_row(profile), confirm)
 
+        def check_token_scope(first, second, *, first_locked=False):
+            first_name = app.workspace.registrations[first].name
+            second_name = app.workspace.registrations[second].name
+            root_entry = fixture[0]["title"]
+            nested_path = (second_name, *fixture[2]["group_path"], fixture[2]["title"])
+            first_entry_path = (f"{first_name} · Locked", "Entry 1") if first_locked else (first_name, root_entry)
+
+            def inspect(dialog):
+                assert dialog.get_title() == "Access token"
+                labels = {child.get_text() for child in descendants(dialog)
+                          if isinstance(child, Gtk.Label) and child.is_visible()}
+                assert "Approved entries" in labels
+                assert ("Unlock a database to see its group and entry names." in labels) == first_locked
+                assert all(first not in value and second not in value for value in labels)
+                tree, = [child for child in descendants(dialog) if isinstance(child, Gtk.TreeView)]
+                assert [column.get_title() for column in tree.get_columns()] == ["Database / Group / Entry", "Permissions"]
+                model = tree.get_model()
+                entries = {}
+
+                def collect(model, path, node, names):
+                    if model.iter_has_child(node):
+                        assert tree.row_expanded(path)
+                    else:
+                        lineage = []
+                        while node is not None:
+                            lineage.append(model[node][0])
+                            node = model.iter_parent(node)
+                        names_path = tuple(reversed(lineage))
+                        assert names_path not in names
+                        names[names_path] = model[path][1]
+
+                model.foreach(collect, entries)
+                assert set(entries) == {first_entry_path, (second_name, root_entry), nested_path}
+                assert entries[first_entry_path] and "Entry metadata" not in entries[first_entry_path]
+                assert "Entry metadata" in entries[second_name, root_entry]
+                assert "Stored URL" in entries[second_name, root_entry]
+                assert "Entry metadata" in entries[nested_path]
+                assert "Stored URL" not in entries[nested_path]
+                assert all(STORED_URL not in description for description in entries.values())
+                dialog.response(Gtk.ResponseType.CLOSE)
+
+            drive_dialog(access_row("expanded"), inspect)
+
         def select_tree(vault, group=""):
             model = app.tree.get_model()
             matches = []
@@ -188,7 +232,7 @@ def main(root):
         def use(profile, vault, entry=first_entry, expected=0):
             return invoke(profile, "use", "--vault", vault, "--entry", entry, "--action", "check", expected=expected)
 
-        def context_menu(tree, path=None):
+        def context_menu(tree, path=None, *, activate=None):
             previous = set(Gtk.Menu.get_for_attach_widget(tree) or ())
             if path is None:
                 assert tree.emit("popup-menu")
@@ -213,15 +257,23 @@ def main(root):
             menu, = set(Gtk.Menu.get_for_attach_widget(tree) or ()) - previous
             options = [item for item in menu.get_children() if not isinstance(item, Gtk.SeparatorMenuItem)]
             for item in options:
-                if item.get_label() == "Delete…":
+                if item.get_label() in ("Delete…", "Remove token…"):
                     style = item.get_style_context()
                     assert style.has_class("keeper-delete")
                     found, color = style.lookup_color("keeper_failure")
                     assert found and style.get_color(Gtk.StateFlags.NORMAL).equal(color)
             labels = [item.get_label() for item in options]
             menu.popdown()
+            if activate is not None:
+                options[labels.index(activate)].activate()
             menu.destroy()
             return labels
+
+        def token_context_menu(profile, *, activate=None):
+            access_row(profile)
+            tree = app.access_view.table
+            model, node = tree.get_selection().get_selected()
+            return context_menu(tree, model.get_path(node), activate=activate)
 
         def open_entry(identifier):
             table = app.entries
@@ -574,16 +626,22 @@ def main(root):
                 alpha = [{"vault": first, "entry": first_entry, "metadata": True, "username": True, "action": "check"}]
                 beta = [{"label": duplicate_title, "metadata": True}]
                 expanded = [{"vault": first, "entry": first_entry, "action": "check"},
-                            {"vault": second, "entry": first_entry, "action": "check", "metadata": True, "url": True}]
+                            {"vault": second, "entry": first_entry, "action": "check", "metadata": True, "url": True},
+                            {"vault": second, "entry": nested_entry, "metadata": True}]
                 assert enroll("alpha", alpha) == enroll("alpha", alpha) == {"status": "pending"}
                 assert enroll("beta", beta) == {"status": "pending"}
                 assert enroll("review", beta) == {"status": "pending"}
                 assert len(app.grants.rows()) == 3
                 assert "unavailable for this token" in invoke("beta", "vaults", "list", expected=1)
                 approve("alpha")
-                assert [c.get_title() for c in app.access_view.table.get_columns()] == list(app.access_view.TITLES)
-                assert [row[3] for row in app.access_view.table.get_model()] == ["Pending", "Pending", "Active"]
-                assert app.access_view.table.get_model()[-1][4] == "—"
+                access_table = app.access_view.table
+                assert [column.get_title() for column in access_table.get_columns()] == [
+                    "Requested", "Last used", "Identity", "Project", "Status",
+                ]
+                assert [row[4] for row in access_table.get_model()] == ["Pending", "Pending", "Active"]
+                assert all(timestamp.fullmatch(row[0]) and row[1] == "—" for row in access_table.get_model())
+                assert token_context_menu("beta") == ["Review request…"]
+                assert token_context_menu("alpha") == ["View permissions…", "Disable token", "Remove token…"]
                 approve("beta", second)
                 drive_dialog(access_row("review"), lambda dialog: dialog.response(Gtk.ResponseType.REJECT))
                 assert invoke("review", "access", "status") == {"status": "denied"}
@@ -615,9 +673,17 @@ def main(root):
                 assert len(invoke("expanded", "vaults", "list")["vaults"]) == 2
                 assert "Choose a vault" in invoke("expanded", "entries", "list", expected=1)
                 assert invoke("expanded", "entries", "list", "--vault", first) == {"entries": []}
-                assert invoke("expanded", "entries", "list", "--vault", second)["entries"] == fixture[:1]
-                assert invoke("expanded", "entries", "list", "--vault", second,
-                              "--field", "username", "--field", "url")["entries"] == [{**fixture[0], "url": STORED_URL}]
+                listed = invoke("expanded", "entries", "list", "--vault", second)["entries"]
+                assert {row["id"]: row for row in listed} == {first_entry: fixture[0], nested_entry: fixture[2]}
+                with_fields = invoke("expanded", "entries", "list", "--vault", second,
+                                     "--field", "username", "--field", "url")["entries"]
+                assert {row["id"]: row for row in with_fields} == {
+                    first_entry: {**fixture[0], "url": STORED_URL}, nested_entry: fixture[2],
+                }
+                app.access_view.refresh()
+                expanded_row = next(row for row in access_table.get_model() if row[2].startswith("Agent expanded "))
+                assert timestamp.fullmatch(expanded_row[1])
+                check_token_scope(first, second)
                 assert STORED_URL.encode() not in old_activity.path.read_bytes()
                 assert USERNAME.encode() not in old_activity.path.read_bytes()
                 assert use("expanded", second, expected=1) == {"outcome": "failed", "http_status": 401}
@@ -662,17 +728,21 @@ def main(root):
                 assert not app.entry_scroll.get_visible() and len(app.entries.get_model()) == 0
                 assert invoke("alpha", "entries", "list", expected=1) == denied
                 assert invoke("beta", "entries", "list")["entries"] == fixture[2:]
+                check_token_scope(first, second, first_locked=True)
+                select_tree(first)
                 app.vault_buttons["unlock"].clicked()
                 wait_for(lambda: not app.busy and app.workspace.session(first), "First vault did not unlock again")
-                drive_dialog(access_row("alpha"), lambda dialog: dialog.response(Gtk.ResponseType.APPLY))
+                token_context_menu("alpha", activate="Disable token")
                 assert invoke("alpha", "access", "status") == {"status": "disabled"}
                 assert invoke("alpha", "entries", "list", expected=1) == denied
                 assert invoke("beta", "entries", "list")["entries"] == fixture[2:]
+                assert token_context_menu("alpha") == ["View permissions…", "Re-enable token", "Remove token…"]
                 drive_dialog(access_row("alpha"), lambda dialog: dialog.response(Gtk.ResponseType.APPLY))
                 assert invoke("alpha", "entries", "list")["entries"] == fixture[:1]
                 alpha_record = next(row for row in app.grants.rows() if row.identity == "Agent alpha")
                 assert alpha_record.last_used and alpha_record.last_used >= alpha_record.requested
-                app.grants.transition(alpha_record.id, "removed")
+                drive_dialog(lambda: token_context_menu("alpha", activate="Remove token…"),
+                             lambda dialog: dialog.response(Gtk.ResponseType.OK))
                 assert enroll("alpha", alpha, expected=1) == denied
                 assert invoke("alpha", "entries", "list", expected=1) == denied
                 assert invoke("beta", "entries", "list")["entries"] == fixture[2:]

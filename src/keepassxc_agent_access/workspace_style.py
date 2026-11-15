@@ -259,10 +259,12 @@ button.keeper-delete {
 #keeper-edit-review .keeper-review-blocker image {
     color: @keeper_warning;
 }
+#keeper-access-detail .keeper-event-title,
 #keeper-activity-detail .keeper-event-title {
     font-size: 1.45em;
     font-weight: 800;
 }
+#keeper-access-detail .keeper-event-caption,
 #keeper-activity-detail .keeper-event-caption {
     color: @keeper_muted;
 }
@@ -272,6 +274,7 @@ button.keeper-delete {
     background-color: @keeper_canvas;
     padding: 10px 12px;
 }
+#keeper-access-detail .keeper-event-section-title,
 #keeper-activity-detail .keeper-event-section-title {
     font-weight: 800;
 }

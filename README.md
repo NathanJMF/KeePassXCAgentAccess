@@ -64,7 +64,7 @@ For direct CLI use under the isolated account, provide `KEEPASSXC_AGENT_SOCKET` 
 
 ## Review token requests and activity
 
-Open **Access** to review requests. Double-click a pending request to inspect the verified OS identity, reported agent and project labels, and every requested entry and operation. Resolve duplicate entry names before approving. Username and stored URL access require separate approval for each entry. Approved agents can request those fields with `entries list --field username --field url`. Double-click an approved token to disable, re-enable, or remove it. A larger scope requires a separate token request.
+Open **Access** to review requests. Double-click a pending request to inspect the verified OS identity, reported agent and project labels, and every requested entry and operation. Resolve duplicate entry names before approving. Username and stored URL access require separate approval for each entry. Approved agents can request those fields with `entries list --field username --field url`. Double-click an approved token to see its permissions by database, group, and entry. Unlock a database to see its group and entry names. Use the token dialog or the right-click menu to disable, re-enable, or remove a token. A larger scope requires a separate token request.
 
 Use **Resume agent access** in the tray or main window to let approved tokens run. **Pause agent access** stops broker discovery and credential operations while the owner keeps browsing. Locking the desktop pauses agent access and closes all vault sessions.
 

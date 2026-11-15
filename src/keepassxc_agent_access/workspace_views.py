@@ -8,7 +8,7 @@ from .access_settings import Action, ActionType
 from .activity import ActivityError
 from .edit_request_view import review_edit
 from .owner_views import _dialog, _label, _scroll, _table, _time
-from .workspace_context import DELETE_LABEL
+from .workspace_context import DELETE_LABEL, attach_row_context
 from .workspace_editor import delete_entry, edit_entry
 from .workspace_style import styled
 
@@ -17,10 +17,10 @@ def reported(value):
     return f"{value} (reported)" if value else "—"
 
 
-def table_time(timestamp, *, entry_date=False):
+def table_time(timestamp, *, compact=False):
     if timestamp is None:
         return "—"
-    pattern = "%H:%M %d/%m/%y" if entry_date else "%b %d · %H:%M:%S"
+    pattern = "%H:%M %d/%m/%y" if compact else "%b %d · %H:%M:%S"
     return datetime.fromtimestamp(timestamp).astimezone().strftime(pattern)
 
 
@@ -228,9 +228,84 @@ def metadata_labels(permission):
                                        ("url", "Stored URL")) if getattr(permission, field)]
 
 
+def token_permissions(record, scopes):
+    labels = []
+    for scope in scopes:
+        labels.extend(metadata_labels(scope))
+        if scope.action:
+            binding = record.binding(scope.entry, scope.action) if record else None
+            if binding and binding.revision == scope.revision and binding.action.enabled:
+                labels.append(f"{binding.action.name} ({binding.action.kind.label})")
+            else:
+                labels.append(f"{scope.action} (action unavailable)")
+    return ", ".join(dict.fromkeys(labels))
+
+
+def approved_entries_tree(workspace, scopes):
+    by_vault = {}
+    for scope in scopes:
+        by_vault.setdefault(scope.vault, {}).setdefault(scope.entry, []).append(scope)
+
+    model = Gtk.TreeStore(str, str, str)
+    needs_unlock = False
+    with workspace.mutex:
+        for vault_id, permissions in by_vault.items():
+            record = workspace.registrations.get(vault_id)
+            session = workspace.owner_session(vault_id) if record else None
+            title = record.name if record else "Removed database"
+            locked = record is not None and session is None
+            needs_unlock |= locked
+            if locked:
+                title += " · Locked"
+            vault = model.append(None, (title, "", "drive-harddisk-symbolic"))
+            entries = {row["id"]: row for row in session.entries if row["id"] in permissions} if session else {}
+            groups = {row["id"]: row for row in session.groups} if session else {}
+            branches = {}
+            for index, (entry_id, approved) in enumerate(permissions.items(), 1):
+                entry = entries.get(entry_id)
+                parent = vault
+                if entry is None:
+                    name = f"Entry {index}" if locked else "Entry unavailable"
+                else:
+                    path = []
+                    group = groups.get(entry["group"])
+                    while group and group["parent"] is not None:
+                        path.append(group)
+                        group = groups.get(group["parent"])
+                    for group in reversed(path):
+                        key = group["id"]
+                        if key not in branches:
+                            branches[key] = model.append(parent, (
+                                group["name"] or "(Untitled group)", "", "folder-symbolic",
+                            ))
+                        parent = branches[key]
+                    name = entry["title"] or "(Untitled entry)"
+                model.append(parent, (name, token_permissions(record, approved), "dialog-password-symbolic"))
+
+    tree = Gtk.TreeView(model=model, enable_tree_lines=True)
+    tree.get_selection().set_mode(Gtk.SelectionMode.NONE)
+    target = Gtk.TreeViewColumn("Database / Group / Entry")
+    icon = Gtk.CellRendererPixbuf(xpad=5)
+    target.pack_start(icon, False)
+    target.add_attribute(icon, "icon-name", 2)
+    name = Gtk.CellRendererText(ypad=6, ellipsize=Pango.EllipsizeMode.END)
+    target.pack_start(name, True)
+    target.add_attribute(name, "text", 0)
+    target.set_min_width(255)
+    target.set_resizable(True)
+    target.set_expand(True)
+    tree.append_column(target)
+    permissions = Gtk.CellRendererText(ypad=6, wrap_width=295, wrap_mode=Pango.WrapMode.WORD_CHAR)
+    tree.append_column(Gtk.TreeViewColumn("Permissions", permissions, text=1))
+    tree.expand_all()
+    return tree, needs_unlock
+
+
 class AccessView(Gtk.Box):
-    TITLES = ("Requested", "Identity", "Project", "Status", "Last used")
+    TITLES = ("Requested", "Last used", "Identity", "Project", "Status")
+    STATUS, RECORD_ID, KIND = 4, 5, 6
     REQUESTED_TIME, LAST_USED_TIME, REVIEW_GROUP = 7, 8, 9
+    REMOVE = "Remove token…"
 
     def __init__(self, app):
         super().__init__(orientation=Gtk.Orientation.VERTICAL, spacing=18)
@@ -238,17 +313,18 @@ class AccessView(Gtk.Box):
         header, _, _, _ = section_heading("Agent access", "changes-prevent-symbolic")
         tools = Gtk.Box(valign=Gtk.Align.CENTER)
         header.pack_end(tools, False, False, 0)
-        self.review_button = button(tools, "Review or manage", self._open, icon="view-reveal-symbolic")
+        self.review_button = button(tools, "Open details", self._open, icon="view-reveal-symbolic")
         self.review_button.set_sensitive(False)
         self.pack_start(header, False, False, 0)
         self.table, scroll = pane_table(
-            Gtk.ListStore(*([str] * 7), object, object, bool), self.TITLES, (138, 122, 122, 119, 136),
-            status=(3, ACCESS_STATES), muted_columns=(0, 4),
-            sort_keys={0: self.REQUESTED_TIME, 4: self.LAST_USED_TIME}, sort_group=self.REVIEW_GROUP,
+            Gtk.ListStore(*([str] * 7), object, object, bool), self.TITLES, (138, 138, 122, 122, 119),
+            status=(self.STATUS, ACCESS_STATES), muted_columns=(0, 1), expand_columns=(2, 3),
+            sort_keys={0: self.REQUESTED_TIME, 1: self.LAST_USED_TIME}, sort_group=self.REVIEW_GROUP,
         )
         self.table.connect("row-activated", self._open)
+        attach_row_context(self.table, self._context, destructive_labels=(self.REMOVE,))
         self.table.get_selection().connect("changed", lambda *_: self.review_button.set_sensitive(
-            selected_key(self.table, 5) is not None))
+            selected_key(self.table, self.RECORD_ID) is not None))
         self.empty, _, _ = empty_state("changes-prevent-symbolic", "No access requests or tokens")
         self.pack_start(table_card(scroll, self.empty), True, True, 0)
 
@@ -259,22 +335,43 @@ class AccessView(Gtk.Box):
         for grant in grants:
             other = grant.status != "pending"
             rows.append((other, -grant.requested,
-                         (table_time(grant.requested), reported(grant.identity), reported(grant.project),
-                          grant.status.capitalize(), table_time(grant.last_used), grant.id, "grant",
+                         (table_time(grant.requested, compact=True), table_time(grant.last_used, compact=True),
+                          reported(grant.identity), reported(grant.project), grant.status.capitalize(), grant.id, "grant",
                           grant.requested, grant.last_used, other)))
         for edit in edits:
             state = "Edit pending" if edit.status == "pending" else "Applying edit"
             rows.append((False, -edit.requested,
-                         (table_time(edit.requested), reported(edit.identity), reported(edit.project),
-                          state, "—", f"{edit.token_id}/{edit.id}", "edit", edit.requested, None, False)))
+                         (table_time(edit.requested, compact=True), "—", reported(edit.identity),
+                          reported(edit.project), state, f"{edit.token_id}/{edit.id}", "edit", edit.requested, None, False)))
         rows.sort()
-        fill_table(self.table, [columns for _, _, columns in rows], 5)
+        fill_table(self.table, [columns for _, _, columns in rows], self.RECORD_ID)
         self.empty.set_visible(not rows)
 
     def _open(self, *_):
         model, selected = self.table.get_selection().get_selected()
         if selected is not None:
-            self.open_record(*model[selected][5:7])
+            row = model[selected]
+            self.open_record(row[self.RECORD_ID], row[self.KIND])
+
+    def _context(self, row):
+        state = row[self.STATUS]
+        if self.app.desktop.locked or state == "Applying edit":
+            return []
+        identifier, kind = row[self.RECORD_ID], row[self.KIND]
+
+        def open_selected():
+            self.open_record(identifier, kind)
+
+        if kind == "edit":
+            return [[("Review edit…", open_selected)]]
+        if state == "Pending":
+            return [[("Review request…", open_selected)]]
+        change = "disabled" if state == "Active" else "active"
+        label = "Disable token" if state == "Active" else "Re-enable token"
+        return [
+            [("View permissions…", open_selected), (label, lambda: self._update_token(identifier, change))],
+            [(self.REMOVE, lambda: self._update_token(identifier, "removed"))],
+        ]
 
     def open_record(self, identifier, kind):
         if self.app.desktop.locked:
@@ -361,37 +458,52 @@ class AccessView(Gtk.Box):
             ))
 
     def _manage(self, grant):
-        dialog, body = self._header("Manage access token", grant)
-        dialog.add_buttons("Close", Gtk.ResponseType.CLOSE, "Remove", Gtk.ResponseType.REJECT)
+        dialog, body = _dialog(self.app, "Access token", 690, -1)
+        dialog.set_name("keeper-access-detail")
+        dialog.set_modal(True)
+        dialog.add_buttons("Close", Gtk.ResponseType.CLOSE, "Remove token…", Gtk.ResponseType.REJECT)
+        styled(dialog.get_widget_for_response(Gtk.ResponseType.REJECT), "keeper-delete")
+        dialog.set_default_response(Gtk.ResponseType.CLOSE)
         if grant.status == "active":
             dialog.add_button("Disable", Gtk.ResponseType.APPLY)
         elif grant.status == "disabled":
             dialog.add_button("Re-enable", Gtk.ResponseType.APPLY)
-        add_label(body, f"{grant.status.capitalize()} · Last used  {_time(grant.last_used)}")
-        scope_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8, margin=8)
-        body.pack_start(_scroll(scope_box), True, True, 0)
-        for scope in grant.scope:
-            record = self.app.workspace.registrations.get(scope.vault)
-            session = self.app.workspace.session(scope.vault)
-            entry = next((row for row in session.entries if row["id"] == scope.entry), None) if session else None
-            title = " / ".join([*entry["group_path"], entry["title"]]) if entry else scope.entry
-            operations = metadata_labels(scope)
-            if scope.action:
-                binding = record.binding(scope.entry, scope.action) if record else None
-                current = binding and binding.revision == scope.revision and binding.action.enabled
-                if current:
-                    operations.append(f"{scope.action} · {binding.action.kind.label} · {binding.action.url}")
-                else:
-                    operations.append(f"{scope.action} · Unavailable binding")
-            add_label(scope_box, f"{record.name if record else 'Removed vault'} · {title}\n" +
-                      f"{', '.join(operations)}\n{scope.vault} / {scope.entry}")
+
+        status = styled(_label(grant.status.capitalize()), "keeper-event-title")
+        body.pack_start(status, False, False, 0)
+        body.pack_start(activity_facts((
+            ("Identity", reported(grant.identity)), ("Project", reported(grant.project)),
+            ("Requested", table_time(grant.requested, compact=True)),
+            ("Last used", table_time(grant.last_used, compact=True) if grant.last_used is not None else "Never"),
+        )), False, False, 0)
+        body.pack_start(styled(Gtk.Label(label="Approved entries", xalign=0), "keeper-event-section-title"),
+                        False, False, 0)
+        tree, needs_unlock = approved_entries_tree(self.app.workspace, grant.scope)
+        scroll = _scroll(tree)
+        scroll.set_propagate_natural_height(True)
+        scroll.set_min_content_height(95)
+        scroll.set_max_content_height(335)
+        body.pack_start(scroll, True, True, 0)
+        if needs_unlock:
+            add_label(body, "Unlock a database to see its group and entry names.")
+        technical = Gtk.Expander(label="Technical details")
+        technical.add(activity_facts((("Verified Linux UID", grant.uid), ("Token record", grant.id))))
+        body.pack_start(technical, False, False, 0)
+
         response = self.app.run_dialog(dialog)
         if response == Gtk.ResponseType.REJECT:
-            if self.app.confirm("Remove this token?", "The runner will need a fresh request and approval."):
-                self.app.owner_operation(lambda: self.app.grants.transition(grant.id, "removed"))
+            self._update_token(grant.id, "removed")
         elif response == Gtk.ResponseType.APPLY:
-            status = "disabled" if grant.status == "active" else "active"
-            self.app.owner_operation(lambda: self.app.grants.transition(grant.id, status))
+            self._update_token(grant.id, "disabled" if grant.status == "active" else "active")
+
+    def _update_token(self, identifier, status):
+        if self.app.desktop.locked:
+            return
+        if status == "removed" and not self.app.confirm(
+            "Remove this token?", "The runner will need a fresh request and approval.",
+        ):
+            return
+        self.app.owner_operation(lambda: self.app.grants.transition(identifier, status))
 
 
 def activity_target(row):
@@ -618,8 +730,8 @@ def entry_details(app, vault, entry):
                            "Edit action", Gtk.ResponseType.ACCEPT, "Remove action", Gtk.ResponseType.REJECT)
         add_label(body, f"{record.name} · {' / '.join(entry['group_path']) or 'Root'}\nEntry  {entry['id']}")
         add_label(body, f"Username  {entry['username'] or '—'}\nURL  {entry['url'] or '—'}")
-        created = table_time(entry.get("created"), entry_date=True)
-        modified = table_time(entry.get("modified"), entry_date=True)
+        created = table_time(entry.get("created"), compact=True)
+        modified = table_time(entry.get("modified"), compact=True)
         add_label(body, f"Created  {created}\nModified  {modified}")
         entry_actions = Gtk.Box(spacing=8)
         button(entry_actions, "Copy entry reference", lambda *_: app.copy_reference(vault, "entry", entry["id"]))

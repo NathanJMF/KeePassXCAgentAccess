@@ -132,7 +132,6 @@ class WorkspaceApplication(Gtk.Application):
 
         self.access_view = AccessView(self)
         self.activity_view = ActivityView(self)
-        attach_row_context(self.access_view.table, self._access_context)
         attach_row_context(self.activity_view.table, self._activity_context)
         self.stack.add_named(self.access_view, "access")
         self.stack.add_named(self.activity_view, "activity")
@@ -524,7 +523,7 @@ class WorkspaceApplication(Gtk.Application):
         for row, folder in matches:
             created, modified = row.get("created"), row.get("modified")
             values.append((row["title"] or "(Untitled entry)", row["username"], row["url"],
-                           table_time(created, entry_date=True), table_time(modified, entry_date=True),
+                           table_time(created, compact=True), table_time(modified, compact=True),
                            folder, row["id"], created, modified))
         fill_table(self.entries, values, ENTRY_ID_COLUMN)
         self.new_group_item.set_visible(bool(session and not group_id))
@@ -597,16 +596,6 @@ class WorkspaceApplication(Gtk.Application):
              ("Copy entry reference", lambda: with_entry(lambda _: self.copy_reference(vault, "entry", identifier)))],
             [(DELETE_LABEL, lambda: with_entry(lambda entry: delete_entry(self, vault, group, entry)))],
         ])
-
-    def _access_context(self, row):
-        if self.desktop.locked or row[3] == "Applying edit":
-            return []
-        identifier, kind = row[5:7]
-        if kind == "edit":
-            label = "Review edit…"
-        else:
-            label = "Review access request…" if row[3] == "Pending" else "Manage token…"
-        return [[(label, lambda: self.access_view.open_record(identifier, kind))]]
 
     def _activity_context(self, row):
         identifier = row[self.activity_view.RECORD_ID]
