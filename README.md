@@ -72,7 +72,7 @@ Credential use requires an enabled action on the selected entry. **HTTPS Basic-a
 
 ## Review agent edit requests
 
-An active runner token can submit one edit request with a new UUID and exact vault, entry or group references. In **Access**, open the pending edit to see its target, destination, and changed fields. Choose **Approve and apply** or **Deny**. Keeper requires a fresh request if the reviewed vault state changes.
+An active runner token can submit one edit request with a new UUID and exact vault, entry or group references. In **Access**, open the pending edit to see its target, destination, and changed fields. Choose **Approve and apply** or **Deny**. If agent access is paused, you can explicitly resume it from the review first. Keeper requires a fresh request if the reviewed vault state changes.
 
 Use **Copy group reference** in the vault menu or **Copy entry reference** in entry details to give the agent the exact target.
 

@@ -264,7 +264,7 @@ def main(root):
                 }
                 return proposal
 
-            def decide(proposal, response, *, strings=(), password=None, before=None, allow=True):
+            def decide(proposal, response, *, strings=(), password=None, before=None, allow=True, resume=False):
                 app.access_button.clicked()
                 table = app.access_view.table
                 path = next(row.path for row in table.get_model() if row[5].endswith("/" + proposal["id"]))
@@ -278,7 +278,16 @@ def main(root):
                         entry = next(child for child in descendants(dialog) if child.get_name() == "edit-owner-password")
                         assert not entry.get_visibility() and not entry.get_text()
                         entry.set_text(password)
-                    assert dialog.get_widget_for_response(Gtk.ResponseType.ACCEPT).get_sensitive() == allow
+                    approve = dialog.get_widget_for_response(Gtk.ResponseType.ACCEPT)
+                    if resume:
+                        assert not approve.get_sensitive()
+                        assert "Agent access is paused" in labels
+                        resume_control = button(dialog, "Resume agent access")
+                        assert resume_control.get_visible() and resume_control.get_sensitive()
+                        resume_control.clicked()
+                        assert not app.workspace.paused and status(proposal)["status"] == "pending"
+                        assert not resume_control.get_parent().get_visible()
+                    assert approve.get_sensitive() == allow
                     if before:
                         before()
                     dialog.response(response)
@@ -298,7 +307,8 @@ def main(root):
             duplicate = runner("beta", "request_edit", {"request": first_group})
             assert duplicate["status"] == "pending"
             assert runner("expanded", "edit_status", {"id": first_group["id"]}, error=True)
-            group = apply(first_group, strings=("Reviewed group", "Proposed"))
+            app.set_agent_paused(True)
+            group = apply(first_group, strings=("Reviewed group", "Proposed"), resume=True)
             assert runner("beta", "request_edit", {"request": first_group}) == {
                 "id": first_group["id"], "status": "applied", "result": group,
             }

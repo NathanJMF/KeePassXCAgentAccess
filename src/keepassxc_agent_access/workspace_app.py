@@ -727,8 +727,12 @@ class WorkspaceApplication(Gtk.Application):
             self._background(lambda: self.workspace.forget(record.id))
 
     def _toggle_pause(self, *_):
+        if self.workspace:
+            self.set_agent_paused(not self.workspace.paused)
+
+    def set_agent_paused(self, paused):
         if self.broker and self.broker.enabled and not self.desktop.locked:
-            self.workspace.pause(not self.workspace.paused)
+            self.workspace.pause(paused)
             self._refresh()
 
     def _broker_settings(self, *_):

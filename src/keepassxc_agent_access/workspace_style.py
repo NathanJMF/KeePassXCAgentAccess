@@ -224,6 +224,36 @@ CSS = b"""
     border-radius: 9px;
     padding: 9px 12px;
 }
+#keeper-edit-review .keeper-review-title {
+    font-size: 1.45em;
+    font-weight: 800;
+}
+#keeper-edit-review .keeper-review-label {
+    font-weight: 700;
+}
+#keeper-edit-review .keeper-review-muted {
+    color: @keeper_muted;
+}
+#keeper-edit-review .keeper-review-value,
+#keeper-edit-review .keeper-review-blocker {
+    border-radius: 8px;
+    border: 1px solid @keeper_line;
+    padding: 10px 12px;
+}
+#keeper-edit-review .keeper-review-value {
+    background-color: @keeper_canvas;
+}
+#keeper-edit-review .keeper-review-proposed {
+    background-color: mix(@keeper_surface, @keeper_cobalt, 0.085);
+    border-color: alpha(@keeper_cobalt, 0.24);
+}
+#keeper-edit-review .keeper-review-blocker {
+    background-color: mix(@keeper_surface, @keeper_warning, 0.12);
+    border-color: alpha(@keeper_warning, 0.34);
+}
+#keeper-edit-review .keeper-review-blocker image {
+    color: @keeper_warning;
+}
 """
 
 
