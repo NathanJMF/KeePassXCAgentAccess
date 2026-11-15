@@ -192,18 +192,39 @@ class WorkspaceApplication(Gtk.Application):
         self.settings_button.set_image(Gtk.Image.new_from_icon_name("open-menu-symbolic", Gtk.IconSize.BUTTON))
         self.settings_button.connect("clicked", self._show_settings)
         header.pack_end(self.settings_button)
-        self.pause_button = styled(Gtk.Button(label="Resume agent access", always_show_image=True),
-                                   "keeper-control", "keeper-paused")
+        self.pause_button = styled(Gtk.Button(), "keeper-control", "keeper-paused")
         self.pause_icon = Gtk.Image.new_from_icon_name("changes-prevent-symbolic", Gtk.IconSize.BUTTON)
-        self.pause_button.set_image(self.pause_icon)
+        self.pause_labels = self._toolbar_labels(self.pause_button, ("Resume agent access", "Pause agent access"),
+                                                 icon=self.pause_icon)
         self.pause_button.connect("clicked", self._toggle_pause)
         header.pack_end(self.pause_button)
         self.usage_button = styled(Gtk.ToggleButton(), "keeper-control")
-        self.usage_button.set_active(bool(self.workspace and self.workspace.review_usage))
+        self.usage_labels = self._toolbar_labels(self.usage_button, ("Allow usage", "Review usage"))
         self._style_usage_policy()
         self.usage_button.connect("toggled", self._set_usage_policy)
         header.pack_end(self.usage_button)
         header.show_all()
+
+    @staticmethod
+    def _toolbar_labels(button, labels, *, icon=None):
+        stack = Gtk.Stack(hhomogeneous=True, vhomogeneous=True)
+        for text in labels:
+            stack.add_named(Gtk.Label(label=text, xalign=0), text)
+        stack.show_all()
+        button.get_accessible().set_name(labels[0])
+        if icon is None:
+            button.add(stack)
+        else:
+            content = Gtk.Box(spacing=6)
+            content.pack_start(icon, False, False, 0)
+            content.pack_start(stack, False, False, 0)
+            button.add(content)
+        return stack
+
+    @staticmethod
+    def _show_toolbar_label(button, stack, label):
+        stack.set_visible_child_name(label)
+        button.get_accessible().set_name(label)
 
     def _build_sidebar(self):
         sidebar = styled(Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=11), "keeper-sidebar")
@@ -381,8 +402,8 @@ class WorkspaceApplication(Gtk.Application):
             self.notice.set_visible(bool(self.message))
             paused = not self.workspace or self.workspace.paused
             pause_label = "Resume agent access" if paused else "Pause agent access"
-            if self.pause_button.get_label() != pause_label:
-                self.pause_button.set_label(pause_label)
+            if self.pause_labels.get_visible_child_name() != pause_label:
+                self._show_toolbar_label(self.pause_button, self.pause_labels, pause_label)
                 icon = "changes-prevent-symbolic" if paused else "changes-allow-symbolic"
                 self.pause_icon.set_from_icon_name(icon, Gtk.IconSize.BUTTON)
                 style = self.pause_button.get_style_context()
@@ -418,7 +439,7 @@ class WorkspaceApplication(Gtk.Application):
     def _style_usage_policy(self):
         review = bool(self.workspace and self.workspace.review_usage)
         self.usage_button.set_active(review)
-        self.usage_button.set_label("Review usage" if review else "Allow usage")
+        self._show_toolbar_label(self.usage_button, self.usage_labels, "Review usage" if review else "Allow usage")
         self.usage_button.set_tooltip_text(
             "Ask for a decision on each agent operation" if review else "Run operations within each approved token’s scope"
         )
@@ -969,56 +990,78 @@ class WorkspaceApplication(Gtk.Application):
             self.run_dialog(self._settings_dialog())
 
     def _settings_dialog(self):
-        dialog, body = _dialog(self, "Keeper settings", 690, 500)
+        dialog, body = _dialog(self, "Keeper settings", 700, 490)
+        dialog.set_name("keeper-settings")
         dialog.set_modal(True)
-        dialog.add_button("Close", Gtk.ResponseType.CLOSE)
-        panel = Gtk.Box(spacing=14)
-        stack = Gtk.Stack(hexpand=True, vexpand=True)
+        body.set_border_width(20)
+        panel = Gtk.Box(spacing=20)
+        stack = Gtk.Stack(hexpand=True, vexpand=True, hhomogeneous=False, vhomogeneous=False)
         stack.set_name("keeper-settings-pages")
-        sidebar = Gtk.StackSidebar(stack=stack)
-        sidebar.set_size_request(155, -1)
+        sidebar = styled(Gtk.StackSidebar(stack=stack), "keeper-settings-nav")
+        sidebar.set_size_request(160, -1)
         panel.pack_start(sidebar, False, False, 0)
         panel.pack_start(stack, True, True, 0)
         body.pack_start(panel, True, True, 0)
 
-        def page(name, title):
-            rows = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10, margin=8)
-            scroll = Gtk.ScrolledWindow()
+        def page(name, title, icon):
+            rows = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=14, margin_end=6)
+            heading = Gtk.Box(spacing=11)
+            mark = Gtk.Image.new_from_icon_name(icon, Gtk.IconSize.LARGE_TOOLBAR)
+            heading.pack_start(styled(mark, "keeper-settings-mark"), False, False, 0)
+            heading.pack_start(styled(_label(title), "keeper-settings-title"), True, True, 0)
+            rows.pack_start(heading, False, False, 0)
+            scroll = Gtk.ScrolledWindow(overlay_scrolling=False)
             scroll.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
             scroll.add(rows)
             stack.add_titled(scroll, name, title)
             return rows
 
-        broker = page("broker", "Broker settings")
-        self._broker_settings_page(broker)
-        notifications = page("notifications", "Notifications")
-        self._settings_switch(notifications, "Request pop-ups", self.review_popups.enabled,
-                              self._set_request_popups, "request-popups")
-        review = page("reviews", "Reviewals")
-        self._settings_switch(review, "Review usage", self.workspace.review_usage,
-                              self._set_usage_policy, "review-usage")
-        review.pack_start(Gtk.Separator(), False, False, 1)
-        add_label(review, "Always require approval for")
+        notifications = page("notifications", "Notifications", "preferences-system-notifications-symbolic")
+        self._settings_switch(self._settings_card(notifications), "Request pop-ups", self.review_popups.enabled,
+                              self._set_request_popups, "request-popups",
+                              "Open the review window when a request arrives.")
+        review = page("reviews", "Reviewals", "changes-prevent-symbolic")
+        self._settings_switch(self._settings_card(review), "Review usage", self.workspace.review_usage,
+                              self._set_usage_policy, "review-usage",
+                              "Ask for approval each time an agent runs an operation.")
+        actions = self._settings_card(review)
+        actions.pack_start(styled(_label("Always require approval for"), "keeper-settings-caption"), False, False, 0)
+        actions.pack_start(styled(_label("These switches also apply in Allow usage mode."), "keeper-settings-description"),
+                           False, False, 0)
         for operation, caption in REVIEW_ACTIONS.items():
-            self._settings_switch(review, caption, operation in self.workspace.review_actions,
+            actions.pack_start(Gtk.Separator(), False, False, 0)
+            self._settings_switch(actions, caption, operation in self.workspace.review_actions,
                                   lambda control, operation=operation: self._set_review_action(control, operation),
                                   operation)
-        vaults = page("vaults", "Vaults")
-        self._settings_switch(vaults, "Start unlocked", self.start_unlocked, self._set_start_unlocked, "start-unlocked")
-        description = styled(_label("Use saved keyring passwords to unlock vaults when Keeper starts."), "keeper-muted")
-        vaults.pack_start(description, False, False, 0)
-        stack.set_visible_child_name("broker")
+        vaults = page("vaults", "Vaults", "drive-harddisk-symbolic")
+        self._settings_switch(self._settings_card(vaults), "Start unlocked", self.start_unlocked, self._set_start_unlocked,
+                              "start-unlocked", "Use saved keyring passwords to unlock vaults when Keeper starts.")
+        broker = page("broker", "Broker settings", "network-server-symbolic")
+        self._broker_settings_page(self._settings_card(broker))
+        stack.set_visible_child_name("notifications")
         return dialog
 
     @staticmethod
-    def _settings_switch(page, caption, enabled, changed, name):
-        row = Gtk.Box(spacing=8)
-        label = _label(caption)
+    def _settings_card(page):
+        card = styled(Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=9), "keeper-settings-card")
+        page.pack_start(card, False, False, 0)
+        return card
+
+    @staticmethod
+    def _settings_switch(page, caption, enabled, changed, name, detail=None):
+        row = Gtk.Box(spacing=16)
+        labels = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=3)
+        title = _label(caption)
+        if detail:
+            styled(title, "keeper-settings-caption")
+        labels.pack_start(title, False, False, 0)
+        if detail:
+            labels.pack_start(styled(_label(detail), "keeper-settings-description"), False, False, 0)
         toggle = Gtk.Switch(active=enabled, valign=Gtk.Align.CENTER)
         toggle.set_name(name)
         toggle.get_accessible().set_name(caption)
         toggle.connect("notify::active", lambda control, _: changed(control))
-        row.pack_start(label, True, True, 0)
+        row.pack_start(labels, True, True, 0)
         row.pack_end(toggle, False, False, 0)
         page.pack_start(row, False, False, 0)
 
@@ -1059,10 +1102,10 @@ class WorkspaceApplication(Gtk.Application):
         retention.set_value(self.workspace.legacy_access.read().retention_days)
         for label, widget in (("Absolute broker socket path", endpoint), ("Isolated runner account or UID", uid),
                               ("Activity retention (days)", retention)):
-            add_label(body, label)
+            body.pack_start(styled(_label(label), "keeper-settings-caption"), False, False, 0)
             body.pack_start(widget, False, False, 0)
-        status = _label("")
-        body.pack_start(status, False, False, 0)
+        status = styled(_label(""), "keeper-settings-description")
+        status.set_no_show_all(True)
 
         def save(*_):
             try:
@@ -1083,11 +1126,15 @@ class WorkspaceApplication(Gtk.Application):
                 status.set_text("Broker settings saved.")
             except OWNER_ERRORS as error:
                 status.set_text(str(error) or "Could not save the broker settings.")
+            status.show()
             self._refresh()
 
-        save_button = Gtk.Button(label="Save broker settings", halign=Gtk.Align.START)
+        save_button = styled(Gtk.Button(label="Save broker settings", halign=Gtk.Align.START),
+                             "keeper-settings-save")
+        save_button.set_margin_top(5)
         save_button.connect("clicked", save)
         body.pack_start(save_button, False, False, 0)
+        body.pack_start(status, False, False, 0)
 
     def _desktop_lock(self, *_):
         dialog = self.dialog

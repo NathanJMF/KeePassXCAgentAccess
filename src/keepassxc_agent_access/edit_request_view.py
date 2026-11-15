@@ -166,14 +166,17 @@ def review_edit(app, record):
 
     if owner_password is not None:
         owner_password.connect("changed", update)
-    signals = [app.pause_button.connect(signal, update) for signal in ("notify::label", "notify::sensitive")]
+    signals = (
+        (app.pause_labels, app.pause_labels.connect("notify::visible-child-name", update)),
+        (app.pause_button, app.pause_button.connect("notify::sensitive", update)),
+    )
     update()
     try:
         response = app.run_dialog(dialog)
         value = owner_password.get_text() if owner_password is not None and response == Gtk.ResponseType.ACCEPT else None
     finally:
-        for signal in signals:
-            app.pause_button.disconnect(signal)
+        for widget, signal in signals:
+            widget.disconnect(signal)
         if owner_password is not None:
             owner_password.set_text("")
     if response == Gtk.ResponseType.REJECT:

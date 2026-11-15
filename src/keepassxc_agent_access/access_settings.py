@@ -19,18 +19,18 @@ class AccessMode(str, Enum):
 
 
 REVIEW_ACTIONS = {
-    "list_vaults": "List vaults",
-    "list_entries": "List entries and read approved fields",
-    "use_password": "Run password actions",
-    "create_entry": "Create entries",
-    "update_entry": "Update entries",
-    "move_entry": "Move entries",
-    "recycle_entry": "Move entries to the recycle bin",
-    "replace_password": "Replace passwords",
-    "create_group": "Create groups",
-    "rename_group": "Rename groups",
-    "move_group": "Move groups",
-    "recycle_group": "Move groups to the recycle bin",
+    "list_vaults": "Vaults - List",
+    "create_group": "Groups - Create",
+    "list_entries": "Groups and entries - Read",
+    "rename_group": "Groups - Update name",
+    "move_group": "Groups - Move",
+    "recycle_group": "Groups - Delete (move to recycle bin)",
+    "create_entry": "Entries - Create",
+    "update_entry": "Entries - Update",
+    "move_entry": "Entries - Move",
+    "recycle_entry": "Entries - Delete (move to recycle bin)",
+    "use_password": "Passwords - Use in actions",
+    "replace_password": "Passwords - Replace",
 }
 
 

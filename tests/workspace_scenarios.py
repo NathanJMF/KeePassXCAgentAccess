@@ -129,21 +129,25 @@ def main(root):
         enrollment_model, enrollment_chat = "Synthetic enrollment model", "Synthetic enrollment chat"
         action_model, action_chat = "Synthetic test model", "Synthetic test chat"
 
-        def settings_switch(page, name, enabled=None):
+        def settings_switch(page, name, enabled=None, *, label=None):
             active = []
 
             def change(dialog):
                 assert dialog.get_title() == "Keeper settings"
                 pages = next(widget for widget in descendants(dialog) if widget.get_name() == "keeper-settings-pages")
                 assert [pages.child_get_property(child, "title") for child in pages.get_children()] == [
-                    "Broker settings", "Notifications", "Reviewals", "Vaults",
+                    "Notifications", "Reviewals", "Vaults", "Broker settings",
                 ]
+                assert pages.get_visible_child_name() == "notifications"
+                assert dialog.get_widget_for_response(Gtk.ResponseType.CLOSE) is None
                 pages.set_visible_child_name(page)
                 toggle = next(widget for widget in descendants(pages.get_visible_child()) if widget.get_name() == name)
+                if label is not None:
+                    assert toggle.get_accessible().get_name() == label
                 if enabled is not None:
                     toggle.set_active(enabled)
                 active.append(toggle.get_active())
-                dialog.response(Gtk.ResponseType.CLOSE)
+                dialog.close()
 
             drive_dialog(app.settings_button.clicked, change)
             return active[0]
@@ -1494,10 +1498,16 @@ def main(root):
 
                 drive_dialog(lambda: table.row_activated(path, table.get_column(0)), read_activity)
                 check_agent_edits(first, second)
-                assert app.usage_button.get_label() == "Allow usage"
+                def button_size(button):
+                    wait_for_paint(button)
+                    return button.get_allocated_width(), button.get_allocated_height()
+
+                assert app.usage_button.get_accessible().get_name() == "Allow usage"
+                usage_size = button_size(app.usage_button)
                 assert app.usage_button.get_style_context().has_class("keeper-usage-allow")
                 assert settings_switch("reviews", "review-usage", True)
-                assert app.usage_button.get_label() == "Review usage"
+                assert app.usage_button.get_accessible().get_name() == "Review usage"
+                assert button_size(app.usage_button) == usage_size
                 assert app.usage_button.get_style_context().has_class("keeper-usage-review")
                 assert old_access.read().review_usage
 
@@ -1513,7 +1523,7 @@ def main(root):
                     assert {"Agent beta", "List entries", "Approval applies to this operation only."} <= labels
                     click_decision(dialog.get_widget_for_response(Gtk.ResponseType.ACCEPT))
 
-                assert settings_switch("reviews", "list_entries", True)
+                assert settings_switch("reviews", "list_entries", True, label="Groups and entries - Read")
                 app.usage_button.set_active(False)
                 assert not old_access.read().review_usage
                 assert old_access.read().review_actions == {"list_entries"}
@@ -1523,7 +1533,11 @@ def main(root):
                     assert reviewed.result(timeout=4)["entries"] == fixture[2:]
                 assert not settings_switch("reviews", "list_entries", False)
                 assert invoke("beta", "entries", "list")["entries"] == fixture[2:]
+                assert app.pause_button.get_accessible().get_name() == "Pause agent access"
+                pause_size = button_size(app.pause_button)
                 app.tray_items["pause"].activate()
+                assert app.pause_button.get_accessible().get_name() == "Resume agent access"
+                assert button_size(app.pause_button) == pause_size
                 assert app.workspace.paused and app.workspace.session(second)
                 assert app.indicator.get_icon() == "keeper-agent-access-paused"
                 assert "paused" in invoke("beta", "entries", "list", expected=1)

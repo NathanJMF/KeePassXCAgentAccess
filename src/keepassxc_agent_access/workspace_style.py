@@ -237,6 +237,73 @@ button.keeper-delete {
     border-radius: 9px;
     padding: 9px 12px;
 }
+#keeper-settings {
+    background-color: @keeper_surface;
+}
+#keeper-settings .keeper-settings-nav {
+    background-color: @keeper_canvas;
+    border: 1px solid @keeper_line;
+    border-radius: 11px;
+}
+#keeper-settings .keeper-settings-nav list {
+    padding: 7px;
+    background-color: transparent;
+}
+#keeper-settings .keeper-settings-nav row {
+    padding: 7px 9px;
+    margin: 2px 0;
+    border-radius: 7px;
+}
+#keeper-settings .keeper-settings-nav row:hover {
+    background-color: mix(@keeper_canvas, @theme_fg_color, 0.07);
+}
+#keeper-settings .keeper-settings-nav row:selected {
+    color: @theme_fg_color;
+    background-color: @keeper_selection;
+}
+#keeper-settings .keeper-settings-mark {
+    min-width: 40px;
+    min-height: 40px;
+    color: @keeper_accent;
+    background-color: mix(@keeper_surface, @keeper_cobalt, 0.14);
+    border-radius: 10px;
+}
+#keeper-settings .keeper-settings-title {
+    font-size: 1.45em;
+    font-weight: 800;
+}
+#keeper-settings .keeper-settings-card {
+    padding: 14px;
+    background-color: @keeper_canvas;
+    border: 1px solid @keeper_line;
+    border-radius: 11px;
+}
+#keeper-settings .keeper-settings-card separator {
+    background-color: @keeper_line;
+}
+#keeper-settings .keeper-settings-caption {
+    font-weight: 700;
+}
+#keeper-settings .keeper-settings-description {
+    color: @keeper_muted;
+}
+#keeper-settings switch:checked {
+    background-image: none;
+    background-color: #3f63d4;
+    border-color: #3f63d4;
+}
+#keeper-settings .keeper-settings-save {
+    background-image: none;
+    background-color: #3f63d4;
+    color: white;
+    border: 1px solid #3f63d4;
+    border-radius: 7px;
+    padding: 5px 12px;
+    text-shadow: none;
+}
+#keeper-settings .keeper-settings-save:hover {
+    background-color: #3558c5;
+}
 #keeper-edit-review .keeper-review-title {
     font-size: 1.45em;
     font-weight: 800;
