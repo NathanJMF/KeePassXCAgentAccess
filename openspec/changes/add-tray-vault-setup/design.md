@@ -1,0 +1,49 @@
+# Design
+
+## Context
+
+This is a greenfield project with OpenSpec as its only existing project structure. The first milestone establishes the desktop owner interface and a read-only KeePass vault session. It gives later broker features a defined place to request use of an unlocked vault.
+
+## Goals / Non-Goals
+
+**Goals**
+
+- Keep persistent unlock credentials in the owner's OS keyring and make successful retrieval visible in the tray.
+- Give a single owner-side component control over the lifecycle of the unlocked database and any retained credentials.
+- Define a deployment boundary and rehearse the migration using a synthetic vault.
+
+**Non-Goals**
+
+Agent registration, approval modes, activity history, credential delivery, and entry mutations belong to subsequent changes. This milestone focuses on a single existing database and password-based unlock with an optional key file.
+
+## Decisions
+
+### Use an owner-side desktop process
+
+Run the tray, setup dialogs, keyring access, and read-only KeePass adapter in the trusted desktop session. Keep the vault session behind the adapter, with one place to close it on lock or shutdown. A future broker endpoint can accept narrowly scoped requests without exposing the adapter or administrative controls. An agent deployment uses an isolated account or sandbox with access to approved workspaces and only the endpoints that are explicitly exposed to it.
+
+An unlocked desktop keyring is accessible according to the platform's session permissions. The isolation test must show that the supported agent runtime cannot reach the database or key file, desktop session bus, UI controls, or owner process memory. Privileged processes on the host are outside this deployment boundary. [Secret Service access control](https://specifications.freedesktop.org/secret-service/latest/ch10.html)
+
+### Use the system keyring for remembered passwords
+
+On Linux, use the desktop's Secret Service provider. Store a random item identifier with local vault settings and use it to address the keyring item. Keep file locations and keyring references in owner-only local settings. Store the password in the keyring only after the proposed configuration opens the database. Report save success after settings and the keyring item are both usable. Preserve the previous configuration on failure and clean up any unreferenced item created during the failed attempt. A failed keyring write leaves the owner with the retry and session-only paths.
+
+Treat password entry and saved-password retrieval as transient. Discard plaintext input once the backend has opened the vault, using the backend's session state for the rest of the unlock. Closing that session drops its keys and decrypted state. Manual desktop entry is the recovery path if the keyring is unavailable or the password has changed. An optional key file remains a separate owner-side file.
+
+### Use a tray state that reflects actual vault availability
+
+Target AppIndicator or StatusNotifierItem on supported Linux desktops. Keep the setup window available as the fallback where a tray is unavailable. Derive the visible state from the vault controller. Route tray actions, desktop lock notifications, and shutdown through that controller. An unlock finishing after a lock or quit event must have its result discarded and any opened session closed. [AppIndicator support](https://github.com/ubuntu/gnome-shell-extension-appindicator)
+
+## Risks / Trade-offs
+
+- **Locked keyring or changed vault password.** Show why the vault stayed locked and offer a verified manual unlock. The owner can save a replacement only after the new password works.
+- **Interrupted keyring or settings update.** Track partial saves and offer cleanup on the next launch. If keyring deletion fails, keep the vault locked and show that removal still needs attention.
+- **Unavailable desktop session signals.** Document the supported desktop baseline and verify lock and logout behavior on it before release.
+- **Earlier copies of the database.** Rotate the old password in KeePassXC and review backups separately. Older copies can still open with the credential in use when they were created.
+
+## Migration Plan
+
+1. Rehearse setup, restart, and recovery using a disposable vault and a test keyring with synthetic credentials.
+2. For an existing installation, have the owner verify their recovery path and rotate the database password in KeePassXC. Enter the new password in the desktop wizard and enable **Remember on this device**.
+3. Restart the app and unlock from the tray with the plaintext file unavailable. Show when the successful unlock used the keyring. If verification fails, use manual desktop entry and repair or replace the saved item.
+4. After successful verification, have the owner retire the old plaintext file. Existing database contents and password changes remain under the owner's control in KeePassXC.
