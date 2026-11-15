@@ -1,6 +1,6 @@
-# KeePassXC Agent Access
+# Keeper
 
-A Linux tray app for browsing existing KeePass databases and granting agents access to specific entries and credential actions. The desktop opens KeePass files read-only and can independently remember each database password in the owner's OS keyring.
+Keeper is a Linux tray app for browsing existing KeePass databases and granting agents access to specific entries and credential actions. The desktop opens KeePass files read-only and can independently remember each database password in the owner's OS keyring.
 
 ## Run on Ubuntu GNOME
 
@@ -12,7 +12,7 @@ sudo apt install python3-gi python3-pykeepass gir1.2-gtk-3.0 \
 ./run-tray
 ```
 
-Run `./install-launcher` from the owner-controlled checkout to add **KeePassXC Agent Access** to the GNOME application menu. Rerun the installer if the checkout moves. Closing the window leaves the app running when the tray icon is available.
+Run `./install-launcher` from the owner-controlled checkout to add **Keeper** to the GNOME application menu. Rerun the installer to refresh an existing launcher or if the checkout moves. Closing the window leaves the app running when the tray icon is available.
 
 1. Select **Add vault…** and choose an existing KeePass file. Enter its password and select its key file if required.
 2. Select **Remember on this device** to save the password in the system keyring, then select **Verify and save**.

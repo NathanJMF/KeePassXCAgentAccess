@@ -11,6 +11,7 @@ import gi
 gi.require_version("Gtk", "3.0")
 from gi.repository import Gio, GLib, Gtk
 
+from . import APP_TITLE
 from .access import AccessEngine
 from .access_settings import AccessStore
 from .activity import ActivityError, ActivityStore
@@ -27,7 +28,6 @@ from .vault import UnlockCancelled, VaultError, VaultTarget
 
 
 APP_ID = "io.github.keepassxcagentaccess.Tray"
-APP_TITLE = "KeePassXC Agent Access"
 ICONS = {
     VaultState.SETUP: "dialog-password",
     VaultState.LOCKED: "changes-prevent",
@@ -473,6 +473,7 @@ def main():
     # Disable core dumps for the UI and the password-handling threads.
     if ctypes.CDLL(None).prctl(4, 0, 0, 0, 0):
         raise SystemExit("Could not protect the desktop process from core dumps.")
+    GLib.set_application_name(APP_TITLE)
     show_window = "--show-window" in sys.argv
     from .workspace_app import WorkspaceApplication
     return WorkspaceApplication(show_window=show_window).run([arg for arg in sys.argv if arg != "--show-window"])

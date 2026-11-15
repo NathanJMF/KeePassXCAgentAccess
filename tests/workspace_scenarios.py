@@ -173,6 +173,7 @@ def main(root):
             try:
                 wait_for(lambda: app.tray_connected, "AppIndicator did not connect")
                 assert app.window.get_visible()
+                assert app.window.get_title() == "Keeper"
                 assert app.workspace.paused and app.grants.rows() == []
                 assert old_activity.rows(action="Legacy fixture")[0]["token"] is None
                 first, = app.workspace.registrations

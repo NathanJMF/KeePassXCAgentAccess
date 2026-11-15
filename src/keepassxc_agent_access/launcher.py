@@ -5,6 +5,8 @@ from pathlib import Path
 import sys
 import tempfile
 
+from . import APP_TITLE
+
 
 DESKTOP_ID = "io.github.keepassxcagentaccess.Tray.desktop"
 
@@ -26,7 +28,7 @@ def install(executable, data_directory):
     contents = "\n".join([
         "[Desktop Entry]",
         "Type=Application",
-        "Name=KeePassXC Agent Access",
+        f"Name={APP_TITLE}",
         "Comment=Manage agent access to your KeePass vault",
         "Icon=dialog-password",
         f"Exec={_exec_argument(str(executable))} --show-window",

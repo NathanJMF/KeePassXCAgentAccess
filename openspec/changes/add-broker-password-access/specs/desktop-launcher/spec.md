@@ -8,7 +8,7 @@ Give the owner an application-menu entry for opening the tray app and its vault 
 
 ### Requirement: Install and open the app from the desktop menu
 
-The project SHALL provide a per-user application launcher named **KeePassXC Agent Access** for the supported GNOME desktop. The launcher SHALL open the owner window without a terminal and reuse the existing tray process when one is running.
+The project SHALL provide a per-user application launcher named **Keeper** for the supported GNOME desktop. The launcher SHALL open the owner window without a terminal and reuse the existing tray process when one is running.
 
 #### Scenario: Owner starts the app from GNOME
 - **WHEN** the owner selects the installed launcher with the app stopped

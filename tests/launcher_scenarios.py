@@ -51,6 +51,9 @@ def menu():
                     GLib.Variant("(ss)", ("org.kde.StatusNotifierWatcher", "RegisteredStatusNotifierItems")))
     selected = next(row for row in entries if "keepassxc_agent_access" in row)
     name, _, item_path = selected.partition("@")
+    title, = call(name, item_path, "org.freedesktop.DBus.Properties", "Get",
+                  GLib.Variant("(ss)", ("org.kde.StatusNotifierItem", "Title")))
+    assert title == "Keeper"
     path, = call(name, item_path, "org.freedesktop.DBus.Properties", "Get",
                  GLib.Variant("(ss)", ("org.kde.StatusNotifierItem", "Menu")))
     _, layout = call(name, path, "com.canonical.dbusmenu", "GetLayout",
@@ -95,11 +98,12 @@ def main(root):
     subprocess.run(["./install-launcher"], check=True, capture_output=True)
     launcher = Gio.DesktopAppInfo.new(DESKTOP_ID)
     assert launcher is not None and "--show-window" in launcher.get_commandline()
+    assert launcher.get_name() == "Keeper"
 
     assert launcher.launch([], None)
     first = wait_for(app_pid)
     try:
-        wait_for(lambda: row("Open workspace"))
+        wait_for(lambda: row("Open Keeper"))
         assert launcher.launch([], None)
         sleep(.6)
         assert app_pid() == first

@@ -163,10 +163,11 @@ class WorkspaceApplication(Gtk.Application):
         self.indicator = AyatanaAppIndicator3.Indicator.new(
             "keepassxc-agent-access", "changes-prevent", AyatanaAppIndicator3.IndicatorCategory.APPLICATION_STATUS,
         )
+        self.indicator.set_title(APP_TITLE)
         self.menu = Gtk.Menu()
         self.tray_items = {}
         for key, name, callback in (
-            ("open", "Open workspace", self._present),
+            ("open", f"Open {APP_TITLE}", self._present),
             ("pause", "Resume agent access", self._toggle_pause),
             ("lock", "Lock all vaults", self._lock_all),
             ("access", "Access", lambda *_: self._tray_access()),
