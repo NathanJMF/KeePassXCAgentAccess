@@ -55,7 +55,7 @@ def _group_options(groups):
     return [(root, "Root"), *sorted(options, key=lambda option: option[1].casefold())]
 
 
-def _entry_locations(app, grid, vault, group, *, creating):
+def _entry_locations(app, dialog, grid, vault, group, *, creating):
     workspace = app.workspace
     with workspace.mutex:
         locations = {}
@@ -75,23 +75,70 @@ def _entry_locations(app, grid, vault, group, *, creating):
 
     group_choice = Gtk.ComboBoxText()
     group_choice.set_name("group-location")
+    unlock = Gtk.Button(label="Unlock vault", no_show_all=True)
+    unlock.set_name("entry-unlock-vault")
+    error = Gtk.Label(xalign=0, wrap=True, no_show_all=True)
+    error.set_name("entry-unlock-error")
+    manual_retry = set()
 
     def populate(widget, selected=None):
         group_choice.remove_all()
         active = widget.get_active_id()
         groups = locations[active][1] if active in locations else None
         group_choice.set_sensitive(groups is not None)
+        unlock.set_visible(creating and active in locations and groups is None)
+        unlock.set_label("Enter password…" if active in manual_retry else "Unlock vault")
+        error.hide()
         if groups is None:
-            group_choice.append_text("Unlock the vault in the sidebar")
+            group_choice.append_text("Vault is locked")
         else:
             for identifier, name in _group_options(groups):
                 group_choice.append(identifier, name)
         if not selected or not group_choice.set_active_id(selected):
             group_choice.set_active(0)
 
+    def unlock_selected(_):
+        identifier = vault_choice.get_active_id()
+        record = workspace.registrations.get(identifier)
+        if record is None:
+            return
+        use_saved = bool(record.item) and identifier not in manual_retry
+        vault_choice.set_sensitive(False)
+        unlock.set_sensitive(False)
+        error.hide()
+
+        def finished(completed, message):
+            if not dialog.get_visible():
+                return
+            vault_choice.set_sensitive(True)
+            unlock.set_sensitive(True)
+            session = workspace.owner_session(identifier) if completed else None
+            if session:
+                locations[identifier] = (record.name, session.groups)
+                model = vault_choice.get_model()
+                model[vault_choice.get_active_iter()][0] = record.name
+                populate(vault_choice)
+            elif message:
+                if use_saved:
+                    manual_retry.add(identifier)
+                    unlock.set_label("Enter password…")
+                error.set_text(message)
+                error.show()
+
+        if not app.unlock_record(record, use_saved=use_saved, parent=dialog, finished=finished):
+            vault_choice.set_sensitive(True)
+            unlock.set_sensitive(True)
+
+    vault_line = Gtk.Box(spacing=6)
+    vault_line.pack_start(vault_choice, True, True, 0)
+    vault_line.pack_start(unlock, False, False, 0)
+    vault_controls = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+    vault_controls.pack_start(vault_line, False, False, 0)
+    vault_controls.pack_start(error, False, False, 0)
     populate(vault_choice, group)
     vault_choice.connect("changed", populate)
-    _field(grid, 0, "_Vault", vault_choice)
+    unlock.connect("clicked", unlock_selected)
+    _field(grid, 0, "_Vault", vault_controls, focus=vault_choice)
     _field(grid, 1, "_Group", group_choice)
     return vault_choice, group_choice
 
@@ -110,7 +157,7 @@ def _entry_form(app, vault, group, entry, saved_notes):
     if not app.workspace.owner_session(vault):
         return
     dialog, grid = _form(app, "Edit entry" if entry else "New entry")
-    locations = _entry_locations(app, grid, vault, entry["group"] if entry else group, creating=entry is None)
+    locations = _entry_locations(app, dialog, grid, vault, entry["group"] if entry else group, creating=entry is None)
     if locations is None:
         dialog.destroy()
         return

@@ -856,26 +856,89 @@ def main(root):
 
                 def check_locked_destination(dialog):
                     vault_choice, group_choice = entry_locations(dialog)
+                    unlock = next(child for child in descendants(dialog) if child.get_name() == "entry-unlock-vault")
                     assert len(vault_choice.get_model()) == 2 and vault_choice.get_active_id() == second
-                    assert group_choice.get_active_text() == "Root"
+                    assert group_choice.get_active_text() == "Root" and not unlock.get_visible()
                     assert vault_choice.set_active_id(first)
                     assert vault_choice.get_active_text().endswith(" · Locked")
                     assert not group_choice.get_sensitive()
                     assert group_choice.get_active_id() is None
-                    assert group_choice.get_active_text() == "Unlock the vault in the sidebar"
+                    assert group_choice.get_active_text() == "Vault is locked"
+                    assert unlock.get_visible() and unlock.get_label() == "Unlock vault"
                     title = next(child for child in descendants(dialog) if child.get_name() == "entry-title")
                     title.set_text("Unsaved entry fixture")
+                    password = next(child for child in descendants(dialog) if child.get_name() == "entry-password")
+                    password.set_text(EDIT_PASSWORD)
                     save = dialog.get_widget_for_response(Gtk.ResponseType.OK)
                     assert not save.get_sensitive()
                     assert vault_choice.set_active_id(second)
                     assert group_choice.get_sensitive() and group_choice.get_active_text() == "Root"
-                    assert save.get_sensitive() and title.get_text() == "Unsaved entry fixture"
+                    assert save.get_sensitive() and not unlock.get_visible()
+                    assert vault_choice.set_active_id(first)
+                    assert not save.get_sensitive() and unlock.get_visible()
+
+                    unlock.clicked()
+                    wait_for(lambda: not app.busy and app.workspace.session(first),
+                             "Vault did not unlock from the entry form")
+                    assert app.dialog is dialog and dialog.get_visible()
+                    assert vault_choice.get_active_id() == first
+                    assert vault_choice.get_active_text() == app.workspace.registrations[first].name
+                    assert group_choice.get_sensitive() and group_choice.get_active_text() == "Root"
+                    assert save.get_sensitive() and not unlock.get_visible()
+                    assert title.get_text() == "Unsaved entry fixture" and password.get_text() == EDIT_PASSWORD
+                    assert app.workspace.session(second)
                     dialog.response(Gtk.ResponseType.CANCEL)
 
                 drive_dialog(app.new_entry_item.activate, check_locked_destination)
+
+                manual_path = private / "manual.kdbx"
+                shutil.copyfile(second_path, manual_path)
+                manual = app.workspace.add(replace(target, database=manual_path), UNLOCK, False)
+                app.workspace.lock(manual)
+
+                def check_manual_unlock(dialog):
+                    vault_choice, group_choice = entry_locations(dialog)
+                    assert vault_choice.set_active_id(manual)
+                    unlock = next(child for child in descendants(dialog) if child.get_name() == "entry-unlock-vault")
+                    title = next(child for child in descendants(dialog) if child.get_name() == "entry-title")
+                    title.set_text("Manual unlock draft")
+                    save = dialog.get_widget_for_response(Gtk.ResponseType.OK)
+
+                    error = next(child for child in descendants(dialog) if child.get_name() == "entry-unlock-error")
+
+                    def answer_prompt(prompt, response, password=UNLOCK):
+                        assert prompt is not dialog and prompt.get_title() == "Unlock manual"
+                        assert prompt.get_transient_for() is dialog
+                        if response == Gtk.ResponseType.OK:
+                            field, = (child for child in descendants(prompt) if isinstance(child, Gtk.Entry))
+                            field.set_text(password)
+                        prompt.response(response)
+
+                    drive_dialog(unlock.clicked, lambda prompt: answer_prompt(prompt, Gtk.ResponseType.CANCEL))
+                    assert app.dialog is dialog and not app.workspace.session(manual)
+                    assert unlock.get_visible() and not save.get_sensitive() and not error.get_visible()
+                    assert title.get_text() == "Manual unlock draft"
+                    drive_dialog(unlock.clicked, lambda prompt: answer_prompt(
+                        prompt, Gtk.ResponseType.OK, "synthetic-wrong-vault-password",
+                    ))
+                    wait_for(lambda: not app.busy and error.get_visible(), "Unlock failure was not shown")
+                    assert app.dialog is dialog and not app.workspace.session(manual)
+                    assert unlock.get_sensitive() and not save.get_sensitive()
+                    assert title.get_text() == "Manual unlock draft"
+                    drive_dialog(unlock.clicked, lambda prompt: answer_prompt(prompt, Gtk.ResponseType.OK))
+                    wait_for(lambda: not app.busy and app.workspace.session(manual), "Manual unlock timed out")
+                    assert app.dialog is dialog and vault_choice.get_active_id() == manual
+                    assert group_choice.get_active_text() == "Root" and save.get_sensitive()
+                    assert not error.get_visible() and not unlock.get_visible()
+                    assert title.get_text() == "Manual unlock draft"
+                    assert not app.workspace.registrations[manual].item
+                    dialog.response(Gtk.ResponseType.CANCEL)
+
+                try:
+                    drive_dialog(app.new_entry_item.activate, check_manual_unlock)
+                finally:
+                    app.workspace.remove(manual)
                 select_tree(first)
-                app.vault_buttons["unlock"].clicked()
-                wait_for(lambda: not app.busy and app.workspace.session(first), "First vault did not unlock again")
                 token_context_menu("alpha", activate="Disable token")
                 assert invoke("alpha", "access", "status") == {"status": "disabled"}
                 assert invoke("alpha", "entries", "list", expected=1) == denied

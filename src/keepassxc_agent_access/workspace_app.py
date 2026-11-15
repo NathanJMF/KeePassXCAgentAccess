@@ -644,12 +644,13 @@ class WorkspaceApplication(Gtk.Application):
         if self.desktop.locked or self.exiting:
             dialog.destroy()
             return Gtk.ResponseType.CANCEL
+        previous = self.dialog
         self.dialog = dialog
         dialog.show_all()
         try:
             return dialog.run()
         finally:
-            self.dialog = None
+            self.dialog = previous
             dialog.hide()
             # Let the caller read submitted controls before disposing of the dialog.
             GLib.idle_add(dialog.destroy)
@@ -674,7 +675,7 @@ class WorkspaceApplication(Gtk.Application):
             self.message = str(error) or "The operation could not be completed."
         self._refresh()
 
-    def _background(self, operation, *, select=False, after=None):
+    def _background(self, operation, *, select=False, after=None, finished=None):
         if self.busy or self.exiting or self.desktop.locked:
             return
         self.busy = True
@@ -694,11 +695,14 @@ class WorkspaceApplication(Gtk.Application):
             self.busy = False
             if not self.exiting:
                 self.message = message
-                if completed and not self.desktop.locked:
-                    if select and value:
-                        self._show_group(value, "")
-                    elif after:
-                        after(value)
+                if not self.desktop.locked:
+                    if completed:
+                        if select and value:
+                            self._show_group(value, "")
+                        elif after:
+                            after(value)
+                    if finished:
+                        finished(completed, message)
                 self._refresh()
 
         Thread(target=work, daemon=True).start()
@@ -730,14 +734,18 @@ class WorkspaceApplication(Gtk.Application):
             self._background(lambda: self.workspace.add(target, password, remember, cycle=cycle), select=True)
 
     def _unlock(self, use_saved=False):
-        record = self._record()
-        if not record or self.busy or self.desktop.locked:
-            return
+        self.unlock_record(self._record(), use_saved=use_saved)
+
+    def unlock_record(self, record, *, use_saved=False, parent=None, finished=None):
+        if not record or self.busy or self.desktop.locked or self.exiting:
+            return False
         cycle = self.workspace.owner_generation
         if use_saved and record.item:
-            self._background(lambda: self.workspace.unlock(record.id, cycle=cycle))
-            return
+            self._background(lambda: self.workspace.unlock(record.id, cycle=cycle), finished=finished)
+            return True
         dialog, body = _dialog(self, f"Unlock {record.name}", 445, 175)
+        if parent is not None:
+            dialog.set_transient_for(parent)
         dialog.set_modal(True)
         dialog.add_buttons("Cancel", Gtk.ResponseType.CANCEL, "Unlock", Gtk.ResponseType.OK)
         field = password_entry()
@@ -747,8 +755,10 @@ class WorkspaceApplication(Gtk.Application):
         response = self.run_dialog(dialog)
         password, save = field.get_text(), remember.get_active()
         field.set_text("")
-        if response == Gtk.ResponseType.OK:
-            self._background(lambda: self.workspace.unlock(record.id, password, save, cycle=cycle))
+        if response != Gtk.ResponseType.OK or self.desktop.locked or self.exiting:
+            return False
+        self._background(lambda: self.workspace.unlock(record.id, password, save, cycle=cycle), finished=finished)
+        return True
 
     def _lock_selected(self, *_):
         record = self._record()
@@ -827,8 +837,11 @@ class WorkspaceApplication(Gtk.Application):
             self.owner_operation(save)
 
     def _desktop_lock(self, *_):
-        if self.dialog:
-            self.dialog.response(Gtk.ResponseType.CANCEL)
+        dialog = self.dialog
+        while isinstance(dialog, Gtk.Dialog):
+            parent = dialog.get_transient_for()
+            dialog.response(Gtk.ResponseType.CANCEL)
+            dialog = parent
         self._lock_all()
         if self.window:
             self._view("browse")
