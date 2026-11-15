@@ -13,7 +13,7 @@ import sys
 import traceback
 from uuid import UUID, uuid4
 
-from pykeepass import PyKeePass
+from pykeepass import PyKeePass, create_database
 
 from broker_scenarios import NAMESPACE, PASSWORD as UNLOCK, REPO, isolated_uid, prepare, verify_isolation
 from desktop_scenarios import set_screen_active, wait_for
@@ -287,6 +287,30 @@ def main(root):
             choosers = {child.get_name(): child for child in descendants(dialog) if isinstance(child, Gtk.ComboBoxText)}
             return choosers["entry-vault"], choosers["group-location"]
 
+        def sidebar_group_options(vault):
+            model = app.tree.get_model()
+            options = []
+
+            def collect(_model, _path, item, *_):
+                name, current_vault, group = model[item][:3]
+                if current_vault != vault or not group:
+                    return
+                names = [name]
+                parent = model.iter_parent(item)
+                while parent is not None and model[parent][2]:
+                    names.append(model[parent][0])
+                    parent = model.iter_parent(parent)
+                options.append((group, " / ".join(reversed(names))))
+
+            model.foreach(collect)
+            return options
+
+        def check_group_order(vault, chooser):
+            expected = sidebar_group_options(vault)
+            actual = [(row[chooser.get_id_column()], row[0]) for row in chooser.get_model()]
+            assert actual == expected
+            return expected
+
         def check_editors(vault, other_vault):
             original_notes = "Synthetic notes on line one\nSynthetic notes on line two"
             updated_notes = original_notes + "\nUpdated in Keeper"
@@ -307,6 +331,7 @@ def main(root):
                 assert vault_choice.get_active_id() == vault
                 assert vault_choice.get_sensitive() == create
                 assert group_choice.get_sensitive() and group_choice.get_active_id() == group
+                check_group_order(vault, group_choice)
                 if create:
                     assert {row[vault_choice.get_id_column()] for row in vault_choice.get_model()} == {
                         vault, other_vault,
@@ -334,14 +359,27 @@ def main(root):
             root, = (group["id"] for group in session.groups if group["parent"] is None)
             folder = next(group["id"] for group in session.groups if group["parent"] == root)
             select_tree(vault, folder)
-            drive_dialog(app.new_group_item.activate, lambda dialog: fill_group(dialog, "New fixture group"))
+            drive_dialog(app.new_group_item.activate, lambda dialog: fill_group(dialog, "Accounting fixture group"))
             wait_for(lambda: not app.busy, "Creating a group timed out")
             group = app.selection[1]
-            assert group and app.browse_title.get_text() == "New fixture group"
+            assert group and app.browse_title.get_text() == "Accounting fixture group"
             created_group = next(row for row in app.workspace.owner_session(vault).groups if row["id"] == group)
             assert created_group["parent"] == root
+            def check_first_sidebar_group(dialog):
+                vault_choice, group_choice = entry_locations(dialog)
+                assert vault_choice.get_active_id() == vault
+                options = check_group_order(vault, group_choice)
+                assert [label for _, label in options] == [
+                    "Harbor Lab", "Harbor Lab / Field Notes", "Accounting fixture group",
+                ]
+                assert group_choice.get_active_id() == options[0][0]
+                dialog.response(Gtk.ResponseType.CANCEL)
+
+            select_tree(vault)
+            drive_dialog(app.new_entry_item.activate, check_first_sidebar_group)
+            select_tree(vault, group)
+
             other_session = app.workspace.owner_session(other_vault)
-            other_root, = (row["id"] for row in other_session.groups if row["parent"] is None)
             other_group, = (row["id"] for row in other_session.groups if row["name"] == "Harbor Lab")
             cross_title = "Cross-vault entry fixture"
 
@@ -349,14 +387,11 @@ def main(root):
                 vault_choice, group_choice = entry_locations(dialog)
                 assert vault_choice.get_active_id() == vault
                 assert group_choice.get_active_id() == group
-                assert group_choice.set_active_id(root) and group_choice.get_active_text() == "Root"
-                assert group_choice.set_active_id(group)
+                check_group_order(vault, group_choice)
+                assert not group_choice.set_active_id(root)
                 assert vault_choice.set_active_id(other_vault)
-                assert group_choice.get_active_id() == other_root
-                assert group_choice.get_active_text() == "Root"
-                assert {row[group_choice.get_id_column()] for row in group_choice.get_model()} == {
-                    row["id"] for row in other_session.groups
-                }
+                options = check_group_order(other_vault, group_choice)
+                assert group_choice.get_active_id() == options[0][0]
                 assert group_choice.set_active_id(other_group)
                 title = next(child for child in descendants(dialog) if child.get_name() == "entry-title")
                 title.set_text(cross_title)
@@ -426,6 +461,52 @@ def main(root):
             saved = PyKeePass(target.database, password=UNLOCK, keyfile=str(target.key_file))
             assert saved.find_entries(uuid=UUID(entry["id"]), first=True) is None
             assert saved.find_groups(uuid=UUID(group), first=True) is None
+
+        def check_entries_without_groups(vault):
+            empty_path = private / "empty.kdbx"
+            create_database(empty_path, password=UNLOCK, keyfile=str(target.key_file))
+            empty_vault = app.workspace.add(replace(target, database=empty_path), UNLOCK, False)
+            try:
+                original_title = "Entry in a vault without groups"
+                edited_title = "Edited ungrouped entry"
+
+                def create_without_group(dialog):
+                    vault_choice, group_choice = entry_locations(dialog)
+                    assert vault_choice.set_active_id(empty_vault)
+                    assert not group_choice.get_sensitive() and group_choice.get_active_id() is None
+                    assert group_choice.get_active_text() == "No groups"
+                    title = next(child for child in descendants(dialog) if child.get_name() == "entry-title")
+                    title.set_text(original_title)
+                    assert dialog.get_widget_for_response(Gtk.ResponseType.OK).get_sensitive()
+                    dialog.response(Gtk.ResponseType.OK)
+
+                select_tree(vault)
+                drive_dialog(app.new_entry_item.activate, create_without_group)
+                wait_for(lambda: not app.busy, "Creating an entry without groups timed out")
+                assert app.selection == (empty_vault, "")
+                session = app.workspace.owner_session(empty_vault)
+                root, = (row["id"] for row in session.groups if row["parent"] is None)
+                entry, = session.entries
+                assert entry["title"] == original_title and entry["group"] == root
+                group = app.workspace.put_group(empty_vault, root, name="A group fixture")
+                app._refresh()
+
+                def edit_without_group(dialog):
+                    _, group_choice = entry_locations(dialog)
+                    assert check_group_order(empty_vault, group_choice) == [(group, "A group fixture")]
+                    assert group_choice.get_active_id() is None
+                    title = next(child for child in descendants(dialog) if child.get_name() == "entry-title")
+                    title.set_text(edited_title)
+                    assert dialog.get_widget_for_response(Gtk.ResponseType.OK).get_sensitive()
+                    dialog.response(Gtk.ResponseType.OK)
+
+                drive_dialog(lambda: edit_entry(app, empty_vault, "", entry), edit_without_group, opens_async=True)
+                wait_for(lambda: not app.busy, "Editing an ungrouped entry timed out")
+                reopened = PyKeePass(empty_path, password=UNLOCK, keyfile=str(target.key_file))
+                saved = reopened.find_entries(uuid=UUID(entry["id"]), first=True)
+                assert saved is not None and saved.title == edited_title and saved.group.uuid == UUID(root)
+            finally:
+                app.workspace.remove(empty_vault)
 
         def activity_leaf(event_id):
             view = app.activity_view
@@ -858,7 +939,8 @@ def main(root):
                     vault_choice, group_choice = entry_locations(dialog)
                     unlock = next(child for child in descendants(dialog) if child.get_name() == "entry-unlock-vault")
                     assert len(vault_choice.get_model()) == 2 and vault_choice.get_active_id() == second
-                    assert group_choice.get_active_text() == "Root" and not unlock.get_visible()
+                    second_options = check_group_order(second, group_choice)
+                    assert group_choice.get_active_id() == second_options[0][0] and not unlock.get_visible()
                     assert vault_choice.set_active_id(first)
                     assert vault_choice.get_active_text().endswith(" · Locked")
                     assert not group_choice.get_sensitive()
@@ -872,7 +954,7 @@ def main(root):
                     save = dialog.get_widget_for_response(Gtk.ResponseType.OK)
                     assert not save.get_sensitive()
                     assert vault_choice.set_active_id(second)
-                    assert group_choice.get_sensitive() and group_choice.get_active_text() == "Root"
+                    assert group_choice.get_sensitive() and group_choice.get_active_id() == second_options[0][0]
                     assert save.get_sensitive() and not unlock.get_visible()
                     assert vault_choice.set_active_id(first)
                     assert not save.get_sensitive() and unlock.get_visible()
@@ -883,7 +965,8 @@ def main(root):
                     assert app.dialog is dialog and dialog.get_visible()
                     assert vault_choice.get_active_id() == first
                     assert vault_choice.get_active_text() == app.workspace.registrations[first].name
-                    assert group_choice.get_sensitive() and group_choice.get_active_text() == "Root"
+                    first_options = check_group_order(first, group_choice)
+                    assert group_choice.get_sensitive() and group_choice.get_active_id() == first_options[0][0]
                     assert save.get_sensitive() and not unlock.get_visible()
                     assert title.get_text() == "Unsaved entry fixture" and password.get_text() == EDIT_PASSWORD
                     assert app.workspace.session(second)
@@ -928,7 +1011,8 @@ def main(root):
                     drive_dialog(unlock.clicked, lambda prompt: answer_prompt(prompt, Gtk.ResponseType.OK))
                     wait_for(lambda: not app.busy and app.workspace.session(manual), "Manual unlock timed out")
                     assert app.dialog is dialog and vault_choice.get_active_id() == manual
-                    assert group_choice.get_active_text() == "Root" and save.get_sensitive()
+                    options = check_group_order(manual, group_choice)
+                    assert group_choice.get_active_id() == options[0][0] and save.get_sensitive()
                     assert not error.get_visible() and not unlock.get_visible()
                     assert title.get_text() == "Manual unlock draft"
                     assert not app.workspace.registrations[manual].item
@@ -955,6 +1039,7 @@ def main(root):
                 assert invoke("beta", "entries", "list")["entries"] == fixture[2:]
 
                 check_editors(first, second)
+                check_entries_without_groups(first)
                 assert invoke("beta", "entries", "list")["entries"] == fixture[2:]
                 app.activity_button.clicked()
                 view = app.activity_view

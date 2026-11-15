@@ -4,6 +4,7 @@ from gi.repository import Gtk
 
 from .owner_views import _dialog
 from .tray import password_entry
+from .workspace import ordered_groups
 
 
 def _form(app, title):
@@ -17,9 +18,9 @@ def _form(app, title):
     return dialog, fields
 
 
-def _require_name(dialog, field, *, group_choice=None):
+def _require_name(dialog, field, *, group_choice=None, destination=None):
     def validate(*_):
-        has_destination = group_choice is None or group_choice.get_active_id() is not None
+        has_destination = destination is None or destination() is not None
         dialog.set_response_sensitive(Gtk.ResponseType.OK, bool(field.get_text().strip()) and has_destination)
     field.connect("changed", validate)
     if group_choice is not None:
@@ -35,24 +36,6 @@ def _field(grid, row, label, widget, *, focus=None):
     grid.attach(caption, 0, row, 1, 1)
     grid.attach(widget, 1, row, 1, 1)
     return widget
-
-
-def _group_options(groups):
-    names = {group["id"]: group for group in groups}
-    root, = (group["id"] for group in groups if group["parent"] is None)
-    options = []
-    for identifier, group in names.items():
-        if identifier == root:
-            continue
-        path = [group["name"] or "(Untitled group)"]
-        parent = group["parent"]
-        while parent in names and parent != root:
-            ancestor = names[parent]
-            path.append(ancestor["name"] or "(Untitled group)")
-            parent = ancestor["parent"]
-        if parent == root:
-            options.append((identifier, " / ".join(reversed(path))))
-    return [(root, "Root"), *sorted(options, key=lambda option: option[1].casefold())]
 
 
 def _entry_locations(app, dialog, grid, vault, group, *, creating):
@@ -85,17 +68,29 @@ def _entry_locations(app, dialog, grid, vault, group, *, creating):
         group_choice.remove_all()
         active = widget.get_active_id()
         groups = locations[active][1] if active in locations else None
-        group_choice.set_sensitive(groups is not None)
         unlock.set_visible(creating and active in locations and groups is None)
         unlock.set_label("Enter password…" if active in manual_retry else "Unlock vault")
         error.hide()
-        if groups is None:
-            group_choice.append_text("Vault is locked")
-        else:
-            for identifier, name in _group_options(groups):
-                group_choice.append(identifier, name)
-        if not selected or not group_choice.set_active_id(selected):
+        choices = list(ordered_groups(groups)) if groups is not None else []
+        group_choice.set_sensitive(bool(choices))
+        if not choices:
+            group_choice.append_text("Vault is locked" if groups is None else "No groups")
             group_choice.set_active(0)
+            return
+
+        for item, path in choices:
+            group_choice.append(item["id"], " / ".join(path))
+        if not creating and any(item["id"] == selected and item["parent"] is None for item in groups):
+            group_choice.set_active(-1)
+        elif not selected or not group_choice.set_active_id(selected):
+            group_choice.set_active(0)
+
+    def destination():
+        active = vault_choice.get_active_id()
+        session = workspace.owner_session(active)
+        if session is None or locations[active][1] is None:
+            return None
+        return group_choice.get_active_id() or next(item["id"] for item in session.groups if item["parent"] is None)
 
     def unlock_selected(_):
         identifier = vault_choice.get_active_id()
@@ -140,7 +135,7 @@ def _entry_locations(app, dialog, grid, vault, group, *, creating):
     unlock.connect("clicked", unlock_selected)
     _field(grid, 0, "_Vault", vault_controls, focus=vault_choice)
     _field(grid, 1, "_Group", group_choice)
-    return vault_choice, group_choice
+    return vault_choice, group_choice, destination
 
 
 def edit_entry(app, vault, group, entry=None):
@@ -161,7 +156,7 @@ def _entry_form(app, vault, group, entry, saved_notes):
     if locations is None:
         dialog.destroy()
         return
-    vault_choice, group_choice = locations
+    vault_choice, group_choice, destination = locations
     fields = {}
     for index, (name, label) in enumerate((("title", "_Title"), ("url", "U_RL"), ("username", "_Username")), 2):
         control = Gtk.Entry(text=entry[name] if entry else "", activates_default=True)
@@ -197,7 +192,7 @@ def _entry_form(app, vault, group, entry, saved_notes):
             password.set_text("")
 
     change_password.connect("toggled", change)
-    _require_name(dialog, fields["title"], group_choice=group_choice)
+    _require_name(dialog, fields["title"], group_choice=group_choice, destination=destination)
     fields["title"].grab_focus()
     response = app.run_dialog(dialog)
     updated_password = password.get_text() if entry is None or change_password.get_active() else None
@@ -211,10 +206,10 @@ def _entry_form(app, vault, group, entry, saved_notes):
     if response != Gtk.ResponseType.OK:
         return
     destination_vault = vault_choice.get_active_id()
-    destination_group = group_choice.get_active_id()
+    destination_group = destination()
     if destination_vault is None or destination_group is None:
         return
-    selection = "" if group_choice.get_active() == 0 else destination_group
+    selection = group_choice.get_active_id() or ""
     values = {name: field.get_text() for name, field in fields.items()}
     app._background(
         lambda: app.workspace.put_entry(destination_vault, destination_group, **values, password=updated_password,

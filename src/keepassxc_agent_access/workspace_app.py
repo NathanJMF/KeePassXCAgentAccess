@@ -25,7 +25,7 @@ from .scoped_broker import ScopedBroker
 from .settings import SettingsError, SettingsStore
 from .tray import APP_ID, APP_TITLE, SetupDialog, password_entry
 from .vault import UnlockCancelled, VaultError
-from .workspace import Workspace
+from .workspace import Workspace, ordered_groups
 from .workspace_context import DELETE_LABEL, attach_row_context
 from .workspace_editor import delete_entry, delete_group, edit_entry, edit_group
 from .workspace_style import install_style, styled
@@ -413,16 +413,10 @@ class WorkspaceApplication(Gtk.Application):
                                        "drive-harddisk-symbolic" if session else "changes-prevent-symbolic"))
             nodes[identifier, ""] = root
             if session:
-                children = {}
-                for group in session.groups:
-                    children.setdefault(group["parent"], []).append(group)
-                todo = [(root, group) for top in children.get(None, ()) for group in reversed(children.get(top["id"], ()))]
-                while todo:
-                    parent, group = todo.pop()
-                    node = model.append(parent, (group["name"] or "(Untitled group)", identifier,
-                                                 group["id"], "folder-symbolic"))
+                for group, path in ordered_groups(session.groups):
+                    parent = nodes.get((identifier, group["parent"]), root)
+                    node = model.append(parent, (path[-1], identifier, group["id"], "folder-symbolic"))
                     nodes[identifier, group["id"]] = node
-                    todo.extend((node, child) for child in reversed(children.get(group["id"], ())))
         open_vaults = {record.id for record, session in records if session}
         expanded.update((identifier, "") for identifier in open_vaults - self.tree_open_vaults)
         self.tree_open_vaults = open_vaults

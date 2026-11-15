@@ -20,6 +20,19 @@ def new_id():
     return str(uuid4())
 
 
+def ordered_groups(groups):
+    """Yield visible groups with their paths in the vault's tree order."""
+    children = {}
+    for group in groups:
+        children.setdefault(group["parent"], []).append(group)
+    pending = [(group, ()) for root in children.get(None, ()) for group in reversed(children.get(root["id"], ()))]
+    while pending:
+        group, parent_path = pending.pop()
+        path = (*parent_path, group["name"] or "(Untitled group)")
+        yield group, path
+        pending.extend((child, path) for child in reversed(children.get(group["id"], ())))
+
+
 @dataclass(frozen=True)
 class Binding:
     action: Action
