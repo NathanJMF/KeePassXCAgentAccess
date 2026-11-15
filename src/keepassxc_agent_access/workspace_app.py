@@ -235,8 +235,7 @@ class WorkspaceApplication(Gtk.Application):
         header.pack_end(self.vault_tools, False, False, 0)
         self.vault_buttons = {}
         for name, title, handler in (
-            ("unlock", "Unlock", lambda *_: self._unlock(use_saved=True)),
-            ("manual", "Enter password…", lambda *_: self._unlock()),
+            ("unlock", "Unlock", self._unlock),
             ("lock", "Lock vault", self._lock_selected),
         ):
             self.vault_buttons[name] = button(self.vault_tools, title, handler)
@@ -534,7 +533,7 @@ class WorkspaceApplication(Gtk.Application):
         self.new_item.set_sensitive(not self.busy and not self.desktop.locked)
         for key, control in self.vault_buttons.items():
             visible = {
-                "unlock": bool(record and record.item and not session), "manual": bool(record and not session),
+                "unlock": bool(record and not session),
                 "lock": bool(session),
             }[key]
             control.set_visible(visible)
@@ -570,8 +569,7 @@ class WorkspaceApplication(Gtk.Application):
         if session:
             session_actions = [("Lock vault", self._lock_selected)]
         else:
-            session_actions = [("Unlock", lambda: self._unlock(use_saved=True))] if record.item else []
-            session_actions.append(("Enter password…", self._unlock))
+            session_actions = [("Unlock", self._unlock)]
         management = [("Rename vault…", self._rename), ("Relink vault…", lambda: self._configure(self._record()))]
         if record.item:
             management.append(("Forget saved password…", self._forget))
@@ -737,31 +735,53 @@ class WorkspaceApplication(Gtk.Application):
         else:
             self._background(lambda: self.workspace.add(target, password, remember, cycle=cycle), select=True)
 
-    def _unlock(self, use_saved=False):
-        self.unlock_record(self._record(), use_saved=use_saved)
+    def _unlock(self, *_):
+        self.unlock_record(self._record())
 
-    def unlock_record(self, record, *, use_saved=False, parent=None, finished=None):
+    def unlock_record(self, record, *, parent=None, finished=None):
         if not record or self.busy or self.desktop.locked or self.exiting:
             return False
         cycle = self.workspace.owner_generation
-        if use_saved and record.item:
-            self._background(lambda: self.workspace.unlock(record.id, cycle=cycle), finished=finished)
+
+        def can_prompt():
+            return (not self.desktop.locked and not self.exiting and self.workspace.owner_generation == cycle
+                    and (parent is None or parent.get_visible()))
+
+        def prompt(reason=""):
+            if not can_prompt():
+                return False
+            dialog, body = _dialog(self, f"Unlock {record.name}", 445, 175)
+            if parent is not None:
+                dialog.set_transient_for(parent)
+            dialog.set_modal(True)
+            dialog.add_buttons("Cancel", Gtk.ResponseType.CANCEL, "Unlock", Gtk.ResponseType.OK)
+            dialog.set_default_response(Gtk.ResponseType.OK)
+            if reason:
+                body.pack_start(_label(reason), False, False, 0)
+            field = password_entry()
+            field.set_activates_default(True)
+            body.pack_start(field, False, False, 0)
+            remember = Gtk.CheckButton(label="Remember in the OS keyring", active=bool(record.item))
+            body.pack_start(remember, False, False, 0)
+            field.grab_focus()
+            response = self.run_dialog(dialog)
+            password, save = field.get_text(), remember.get_active()
+            field.set_text("")
+            if response != Gtk.ResponseType.OK or not can_prompt():
+                return False
+            self._background(lambda: self.workspace.unlock(record.id, password, save, cycle=cycle), finished=finished)
             return True
-        dialog, body = _dialog(self, f"Unlock {record.name}", 445, 175)
-        if parent is not None:
-            dialog.set_transient_for(parent)
-        dialog.set_modal(True)
-        dialog.add_buttons("Cancel", Gtk.ResponseType.CANCEL, "Unlock", Gtk.ResponseType.OK)
-        field = password_entry()
-        body.pack_start(field, False, False, 0)
-        remember = Gtk.CheckButton(label="Remember in the OS keyring", active=bool(record.item))
-        body.pack_start(remember, False, False, 0)
-        response = self.run_dialog(dialog)
-        password, save = field.get_text(), remember.get_active()
-        field.set_text("")
-        if response != Gtk.ResponseType.OK or self.desktop.locked or self.exiting:
-            return False
-        self._background(lambda: self.workspace.unlock(record.id, password, save, cycle=cycle), finished=finished)
+
+        if not record.item:
+            return prompt()
+
+        def saved_finished(completed, message):
+            if not completed and message and prompt(message):
+                return
+            if finished:
+                finished(completed, "")
+
+        self._background(lambda: self.workspace.unlock(record.id, cycle=cycle), finished=saved_finished)
         return True
 
     def _lock_selected(self, *_):

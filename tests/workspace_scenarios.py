@@ -784,10 +784,36 @@ def main(root):
                 root_path = select_tree(first)
                 assert not app.tree.row_expanded(root_path)
                 locked_actions = context_menu(app.tree)
-                assert "Unlock" in locked_actions and "Relink vault…" in locked_actions
+                assert locked_actions.count("Unlock") == 1 and "Relink vault…" in locked_actions
                 assert "Lock vault" not in locked_actions and "New entry…" not in locked_actions
+                assert "Enter password…" not in locked_actions
+                assert [button.get_label() for button in app.vault_buttons.values() if button.get_visible()] == ["Unlock"]
                 app.vault_buttons["unlock"].clicked()
                 wait_for(lambda: not app.busy and app.workspace.session(first), "Migrated keyring did not unlock")
+
+                app.vault_buttons["lock"].clicked()
+                keyring.remember(original_item, "synthetic-stale-vault-password")
+
+                def replace_password(dialog):
+                    assert dialog.get_title() == f"Unlock {app.workspace.registrations[first].name}"
+                    labels = [widget.get_text() for widget in descendants(dialog) if isinstance(widget, Gtk.Label)]
+                    assert any("password" in label.lower() for label in labels)
+                    remember, = (widget for widget in descendants(dialog) if isinstance(widget, Gtk.CheckButton))
+                    assert remember.get_label() == "Remember in the OS keyring"
+                    remember.set_active(True)
+                    field, = (widget for widget in descendants(dialog) if isinstance(widget, Gtk.Entry))
+                    assert not field.get_text() and not field.get_visibility()
+                    field.set_text(UNLOCK)
+                    dialog.response(Gtk.ResponseType.OK)
+
+                drive_dialog(app.vault_buttons["unlock"].clicked, replace_password, opens_async=True)
+                wait_for(lambda: not app.busy and app.workspace.session(first), "Replacement password did not unlock")
+                replacement_item = app.workspace.registrations[first].item
+                assert replacement_item and replacement_item != original_item
+                assert keyring.retrieve(replacement_item) == UNLOCK
+                app.vault_buttons["lock"].clicked()
+                app.vault_buttons["unlock"].clicked()
+                wait_for(lambda: not app.busy and app.workspace.session(first), "Replacement keyring item did not unlock")
                 assert app.tree.row_expanded(root_path)
                 wait_for(lambda: app.new_item.get_allocated_height() > 1, "New button was not laid out")
                 assert app.new_item.get_allocated_height() == app.vault_buttons["lock"].get_allocated_height()
@@ -1064,6 +1090,20 @@ def main(root):
                 shutil.copyfile(second_path, manual_path)
                 manual = app.workspace.add(replace(target, database=manual_path), UNLOCK, False)
                 app.workspace.lock(manual)
+                app._refresh()
+                select_tree(manual)
+                assert context_menu(app.tree).count("Unlock") == 1
+                assert [button.get_label() for button in app.vault_buttons.values() if button.get_visible()] == ["Unlock"]
+
+                def check_unsaved_prompt(dialog):
+                    assert dialog.get_title() == "Unlock manual"
+                    remember, = (widget for widget in descendants(dialog) if isinstance(widget, Gtk.CheckButton))
+                    assert remember.get_label() == "Remember in the OS keyring" and not remember.get_active()
+                    dialog.response(Gtk.ResponseType.CANCEL)
+
+                drive_dialog(app.vault_buttons["unlock"].clicked, check_unsaved_prompt)
+                assert not app.workspace.session(manual)
+                select_tree(second)
 
                 def check_manual_unlock(dialog):
                     vault_choice, group_choice = entry_locations(dialog)

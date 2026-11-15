@@ -33,7 +33,7 @@ Keeper checks for external changes before replacing the encrypted file. If Keepe
 
 1. Confirm you have an owner-controlled recovery path, then rotate the master password in KeePassXC.
 2. In the workspace, lock the vault, select **Enter password…**, and remember the new password.
-3. Quit and restart the tray app. Select the vault, click **Unlock**, and check that its groups and entries appear.
+3. Quit and restart the tray app. Select the vault, click **Unlock**, and check that its groups and entries appear. Keeper tries the saved keyring password first and prompts you if it needs a new one.
 4. Retire the old plaintext file after verifying the keyring unlock. Review any backups separately because older database copies can still use the previous password.
 
 ## Isolate the agent runtime

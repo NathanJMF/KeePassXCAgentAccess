@@ -62,14 +62,12 @@ def _entry_locations(app, dialog, grid, vault, group, *, creating):
     unlock.set_name("entry-unlock-vault")
     error = Gtk.Label(xalign=0, wrap=True, no_show_all=True)
     error.set_name("entry-unlock-error")
-    manual_retry = set()
 
     def populate(widget, selected=None):
         group_choice.remove_all()
         active = widget.get_active_id()
         groups = locations[active][1] if active in locations else None
         unlock.set_visible(creating and active in locations and groups is None)
-        unlock.set_label("Enter password…" if active in manual_retry else "Unlock vault")
         error.hide()
         choices = list(ordered_groups(groups)) if groups is not None else []
         group_choice.set_sensitive(bool(choices))
@@ -97,7 +95,6 @@ def _entry_locations(app, dialog, grid, vault, group, *, creating):
         record = workspace.registrations.get(identifier)
         if record is None:
             return
-        use_saved = bool(record.item) and identifier not in manual_retry
         vault_choice.set_sensitive(False)
         unlock.set_sensitive(False)
         error.hide()
@@ -114,13 +111,10 @@ def _entry_locations(app, dialog, grid, vault, group, *, creating):
                 model[vault_choice.get_active_iter()][0] = record.name
                 populate(vault_choice)
             elif message:
-                if use_saved:
-                    manual_retry.add(identifier)
-                    unlock.set_label("Enter password…")
                 error.set_text(message)
                 error.show()
 
-        if not app.unlock_record(record, use_saved=use_saved, parent=dialog, finished=finished):
+        if not app.unlock_record(record, parent=dialog, finished=finished):
             vault_choice.set_sensitive(True)
             unlock.set_sensitive(True)
 
