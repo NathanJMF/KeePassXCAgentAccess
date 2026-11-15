@@ -20,7 +20,7 @@ from pykeepass import PyKeePass, create_database
 from broker_scenarios import NAMESPACE, PASSWORD as UNLOCK, REPO, isolated_uid, prepare, verify_isolation
 from desktop_scenarios import set_screen_active, wait_for
 from password_scenarios import button, descendants
-from keepassxc_agent_access.access_settings import AccessMode, AccessStore, Action, ActionType, VaultPolicy
+from keepassxc_agent_access.access_settings import REVIEW_ACTIONS, AccessMode, AccessStore, Action, ActionType, VaultPolicy
 from keepassxc_agent_access.activity import ActivityStore
 from keepassxc_agent_access.controller import VaultController
 from keepassxc_agent_access.launcher import install as install_launcher
@@ -148,12 +148,18 @@ def main(root):
                 assert divider.get_allocated_height() == area.get_allocated_height()
                 pages = next(widget for widget in descendants(dialog) if widget.get_name() == "keeper-settings-pages")
                 assert [pages.child_get_property(child, "title") for child in pages.get_children()] == [
-                    "Notifications", "Reviewals", "Vaults", "Broker settings",
+                    "Notifications", "Auto Approve", "Vaults", "Broker settings",
                 ]
                 assert pages.get_visible_child_name() == "notifications"
                 assert dialog.get_widget_for_response(Gtk.ResponseType.CLOSE) is None
                 pages.set_visible_child_name(page)
-                toggle = next(widget for widget in descendants(pages.get_visible_child()) if widget.get_name() == name)
+                toggles = [widget for widget in descendants(pages.get_visible_child()) if isinstance(widget, Gtk.Switch)]
+                if page == "auto-approve":
+                    assert [widget.get_name() for widget in toggles] == [
+                        "auto-approve-usage", *REVIEW_ACTIONS, "auto_approve_tokens", "auto_approve_token_changes",
+                    ]
+                    assert toggles[-2].get_parent().get_parent() is toggles[-3].get_parent().get_parent()
+                toggle = next(widget for widget in toggles if widget.get_name() == name)
                 if label is not None:
                     assert toggle.get_accessible().get_name() == label
                 if enabled is not None:
@@ -1525,11 +1531,13 @@ def main(root):
 
                 drive_dialog(lambda: table.row_activated(path, table.get_column(0)), read_activity)
                 check_agent_edits(first, second)
-                assert app.usage_button.get_accessible().get_name() == "Allow usage"
+                assert app.usage_button.get_accessible().get_name() == "Auto Approve: On"
                 usage_size = check_toolbar_button(app.usage_button)
                 assert app.usage_button.get_style_context().has_class("keeper-usage-allow")
-                assert settings_switch("reviews", "review-usage", True)
-                assert app.usage_button.get_accessible().get_name() == "Review usage"
+                assert app.usage_button.get_active()
+                assert not settings_switch("auto-approve", "auto-approve-usage", False)
+                assert not app.usage_button.get_active()
+                assert app.usage_button.get_accessible().get_name() == "Auto Approve: Off"
                 assert check_toolbar_button(app.usage_button) == usage_size
                 assert app.usage_button.get_style_context().has_class("keeper-usage-review")
                 assert old_access.read().review_usage
@@ -1546,15 +1554,16 @@ def main(root):
                     assert {"Agent beta", "List entries", "Approval applies to this operation only."} <= labels
                     click_decision(dialog.get_widget_for_response(Gtk.ResponseType.ACCEPT))
 
-                assert settings_switch("reviews", "list_entries", True, label="Groups and entries - Read")
-                app.usage_button.set_active(False)
+                assert settings_switch("auto-approve", "list_entries")
+                assert not settings_switch("auto-approve", "list_entries", False, label="Groups and entries - Read")
+                app.usage_button.set_active(True)
                 assert not old_access.read().review_usage
                 assert old_access.read().review_actions == {"list_entries"}
                 with ThreadPoolExecutor() as pool:
                     reviewed = pool.submit(invoke, "beta", "entries", "list")
                     drive_dialog(app._refresh, review_usage, opens_async=True)
                     assert reviewed.result(timeout=4)["entries"] == fixture[2:]
-                assert not settings_switch("reviews", "list_entries", False)
+                assert settings_switch("auto-approve", "list_entries", True)
                 assert invoke("beta", "entries", "list")["entries"] == fixture[2:]
                 assert app.pause_button.get_accessible().get_name() == "Pause agent access"
                 pause_size = check_toolbar_button(app.pause_button)
@@ -1574,8 +1583,8 @@ def main(root):
                 activity_group(same_scope, "Paused")
                 app.tray_items["pause"].activate()
                 assert app.indicator.get_icon() == "keeper-agent-access-active"
-                assert not settings_switch("reviews", "auto_approve_token_changes")
-                assert settings_switch("reviews", "auto_approve_tokens", True)
+                assert not settings_switch("auto-approve", "auto_approve_token_changes")
+                assert settings_switch("auto-approve", "auto_approve_tokens", True)
                 assert old_access.read().auto_approve_tokens
                 initial_item = {"vault": first, "entry": first_entry, "metadata": True}
                 assert enroll("auto-token", [initial_item]) == {"status": "active"}
@@ -1606,8 +1615,8 @@ def main(root):
                 drive_dialog(app._refresh, approve_permission_change, opens_async=True)
                 assert invoke("auto-token", "access", "request", request=change) == {"status": "active"}
                 assert invoke("auto-token", "entries", "list", "--vault", second)["entries"][0]["id"] == nested_entry
-                assert settings_switch("reviews", "auto_approve_token_changes", True)
-                assert not settings_switch("reviews", "auto_approve_tokens", False)
+                assert settings_switch("auto-approve", "auto_approve_token_changes", True)
+                assert not settings_switch("auto-approve", "auto_approve_tokens", False)
                 assert old_access.read().auto_approve_token_changes
                 change = {**change, "items": [initial_item], "change_id": str(uuid4())}
                 assert invoke("auto-token", "access", "request", request=change) == {"status": "active"}

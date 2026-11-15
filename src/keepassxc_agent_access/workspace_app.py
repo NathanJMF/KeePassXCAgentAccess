@@ -204,7 +204,7 @@ class WorkspaceApplication(Gtk.Application):
         self.pause_button.connect("clicked", self._toggle_pause)
         header.pack_end(self.pause_button)
         self.usage_button = styled(Gtk.ToggleButton(), "keeper-control")
-        self.usage_labels = self._toolbar_labels(self.usage_button, ("Allow usage",), ("Review usage",))
+        self.usage_labels = self._toolbar_labels(self.usage_button, ("Auto Approve: On",), ("Auto Approve: Off",))
         self._style_usage_policy()
         self.usage_button.connect("toggled", self._set_usage_policy)
         header.pack_end(self.usage_button)
@@ -448,27 +448,29 @@ class WorkspaceApplication(Gtk.Application):
 
     def _style_usage_policy(self):
         review = bool(self.workspace and self.workspace.review_usage)
-        self.usage_button.set_active(review)
-        self._show_toolbar_label(self.usage_button, self.usage_labels, "Review usage" if review else "Allow usage")
+        self.usage_button.set_active(not review)
+        self._show_toolbar_label(self.usage_button, self.usage_labels,
+                                 "Auto Approve: Off" if review else "Auto Approve: On")
         self.usage_button.set_tooltip_text(
-            "Ask for a decision on each agent operation" if review else "Run operations within each approved token’s scope"
+            "Ask for approval on each agent action" if review else "Auto approve enabled actions within token permissions"
         )
         style = self.usage_button.get_style_context()
         style.add_class("keeper-usage-review" if review else "keeper-usage-allow")
         style.remove_class("keeper-usage-allow" if review else "keeper-usage-review")
 
     def _set_usage_policy(self, item):
-        if not self.workspace or self.workspace.review_usage == item.get_active():
+        review = not item.get_active()
+        if not self.workspace or self.workspace.review_usage == review:
             return
         if self.desktop.locked:
-            item.set_active(self.workspace.review_usage)
+            item.set_active(not self.workspace.review_usage)
             return
         try:
-            self.workspace.set_review_usage(item.get_active())
+            self.workspace.set_review_usage(review)
             self.message = ""
         except OWNER_ERRORS as error:
-            self.message = str(error) or "Could not save the agent usage setting."
-            item.set_active(self.workspace.review_usage)
+            self.message = str(error) or "Could not save the Auto Approve setting."
+            item.set_active(not self.workspace.review_usage)
         self._style_usage_policy()
         self._refresh()
 
@@ -1041,31 +1043,28 @@ class WorkspaceApplication(Gtk.Application):
         self._settings_switch(self._settings_card(notifications), "Request pop-ups", self.review_popups.enabled,
                               self._set_request_popups, "request-popups",
                               "Open the review window when a request arrives.")
-        review = page("reviews", "Reviewals", "changes-prevent-symbolic")
-        self._settings_switch(self._settings_card(review), "Review usage", self.workspace.review_usage,
-                              self._set_usage_policy, "review-usage",
-                              "Ask for approval each time an agent runs an operation.")
-        tokens = self._settings_card(review)
-        tokens.pack_start(styled(_label("Auto approve"), "keeper-settings-caption"), False, False, 0)
-        tokens.pack_start(styled(_label("Grant requests without a prompt when Keeper can identify every resource."),
+        approvals = page("auto-approve", "Auto Approve", "changes-prevent-symbolic")
+        self._settings_switch(self._settings_card(approvals), "Auto approve agent actions", not self.workspace.review_usage,
+                              self._set_usage_policy, "auto-approve-usage",
+                              "Skip prompts for enabled actions within each token’s approved permissions.")
+        actions = self._settings_card(approvals)
+        actions.set_spacing(7)
+        actions.pack_start(styled(_label("Auto approve these requests"), "keeper-settings-caption"), False, False, 0)
+        actions.pack_start(styled(_label("Action switches apply when Auto Approve is on. Token switches work independently."),
                                  "keeper-settings-description"), False, False, 0)
+        for operation, caption in REVIEW_ACTIONS.items():
+            actions.pack_start(Gtk.Separator(), False, False, 0)
+            self._settings_switch(actions, caption, operation not in self.workspace.review_actions,
+                                  lambda control, operation=operation: self._set_action_auto_approval(control, operation),
+                                  operation)
         for setting, caption in (
             ("auto_approve_tokens", "New access tokens"),
             ("auto_approve_token_changes", "Token permission changes"),
         ):
-            tokens.pack_start(Gtk.Separator(), False, False, 0)
-            self._settings_switch(tokens, caption, getattr(self.workspace, setting),
+            actions.pack_start(Gtk.Separator(), False, False, 0)
+            self._settings_switch(actions, caption, getattr(self.workspace, setting),
                                   lambda control, setting=setting: self._set_token_auto_approval(control, setting),
                                   setting)
-        actions = self._settings_card(review)
-        actions.pack_start(styled(_label("Always require approval for"), "keeper-settings-caption"), False, False, 0)
-        actions.pack_start(styled(_label("These switches also apply in Allow usage mode."), "keeper-settings-description"),
-                           False, False, 0)
-        for operation, caption in REVIEW_ACTIONS.items():
-            actions.pack_start(Gtk.Separator(), False, False, 0)
-            self._settings_switch(actions, caption, operation in self.workspace.review_actions,
-                                  lambda control, operation=operation: self._set_review_action(control, operation),
-                                  operation)
         vaults = page("vaults", "Vaults", "drive-harddisk-symbolic")
         self._settings_switch(self._settings_card(vaults), "Start unlocked", self.start_unlocked, self._set_start_unlocked,
                               "start-unlocked", "Use saved keyring passwords to unlock vaults when Keeper starts.")
@@ -1098,15 +1097,16 @@ class WorkspaceApplication(Gtk.Application):
         row.pack_end(toggle, False, False, 0)
         page.pack_start(row, False, False, 0)
 
-    def _set_review_action(self, control, operation):
-        previous = operation in self.workspace.review_actions
-        if control.get_active() == previous:
+    def _set_action_auto_approval(self, control, operation):
+        previous = operation not in self.workspace.review_actions
+        enabled = control.get_active()
+        if enabled == previous:
             return
         try:
-            self.workspace.set_review_action(operation, control.get_active())
+            self.workspace.set_review_action(operation, not enabled)
             self.message = ""
         except OWNER_ERRORS as error:
-            self.message = str(error) or "Could not save the action’s review setting."
+            self.message = str(error) or "Could not save the action’s auto approval setting."
             control.set_active(previous)
         self._refresh()
 

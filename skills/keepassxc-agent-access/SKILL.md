@@ -34,7 +34,7 @@ Keeper can auto approve new tokens and permission changes independently. If a re
 
 ## Discover and list
 
-In Review mode, the owner must approve each listing and credential action. Keep the active call open while they decide.
+When a listing or credential action requires approval, keep the active call open while the owner decides.
 
     keepassxc-agent vaults list --json
     keepassxc-agent entries list --vault VAULT_UUID --json
@@ -69,4 +69,4 @@ With stdio, call request_edit with the JSON object under request, and check it w
 - move_entry and move_group use entry or group and the destination parent. recycle_entry and recycle_group use entry or group.
 - replace_password uses entry and password_source set to generate or owner. Enter or generate password values in Keeper's owner dialog.
 
-A pending request awaits an owner decision. Report the status to the user. In Allow mode an edit can apply immediately when the token includes the exact edit permission. For a move, the destination group also needs `move_into` permission. Create permissions belong to the parent group. Owner-entered replacement passwords always need the review window. A completed create can include the new item's UUID under result.
+A pending request awaits an owner decision. Report the status to the user. With Auto Approve on for the action, an edit can apply immediately when the token includes the exact edit permission. For a move, the destination group also needs `move_into` permission. Create permissions belong to the parent group. Owner-entered replacement passwords always need the review window. A completed create can include the new item's UUID under result.
