@@ -237,6 +237,13 @@ def main(root):
                 assert [row[3] for row in app.entries.get_model()] == [direct_entry]
                 selected_path = select_tree(first, inner)
                 assert [row[3] for row in app.entries.get_model()] == [nested_entry]
+                assert app.browse_title.get_text() == "Field Notes"
+                app.entry_search.set_text("NO MATCH")
+                assert not list(app.entries.get_model())
+                assert app.empty_entries.get_text() == "No entries match this filter."
+                app.entry_search.set_text(duplicate_title.upper())
+                assert [row[3] for row in app.entries.get_model()] == [nested_entry]
+                assert app.entry_count.get_text() == "1 entry"
                 app.activity_button.clicked()
                 assert app.stack.get_visible_child_name() == "activity"
                 assert app.tree.get_selection().path_is_selected(selected_path)
@@ -244,6 +251,9 @@ def main(root):
                 assert parent_path.up() and app.tree.row_expanded(parent_path)
                 select_tree(first, inner)
                 assert app.stack.get_visible_child_name() == "browse"
+                assert app.entry_search.get_text() == duplicate_title.upper()
+                select_tree(first, outer)
+                assert not app.entry_search.get_text()
 
                 alpha = [{"vault": first, "entry": first_entry, "metadata": True, "action": "check"}]
                 beta = [{"label": duplicate_title, "metadata": True}]

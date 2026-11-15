@@ -1,10 +1,11 @@
 """GTK views for request review, entry actions, and local activity."""
 
-from gi.repository import Gtk
+from gi.repository import Gtk, Pango
 
 from .access_settings import Action
 from .activity import ActivityError
 from .owner_views import _dialog, _label, _scroll, _table, _time
+from .workspace_style import styled
 
 
 def reported(value):
@@ -39,17 +40,35 @@ def fill_table(table, rows, key_column):
             table.get_selection().select_iter(row)
 
 
+def pane_table(model, titles):
+    table = styled(_table(model, titles), "keeper-table")
+    for column, title in zip(table.get_columns(), titles):
+        column.set_expand(True)
+        column.set_resizable(True)
+        column.set_min_width(124 if title in ("Requested", "Last used", "Time") else 85)
+        column.get_cells()[0].set_properties(xpad=8, ypad=8, ellipsize=Pango.EllipsizeMode.END)
+    scroll = _scroll(table)
+    scroll.set_shadow_type(Gtk.ShadowType.NONE)
+    return table, scroll
+
+
 class AccessView(Gtk.Box):
     TITLES = ("Requested", "Identity", "Project", "Status", "Last used")
 
     def __init__(self, app):
         super().__init__(orientation=Gtk.Orientation.VERTICAL, spacing=8)
         self.app = app
-        add_label(self, "Agent access")
-        self.table = _table(Gtk.ListStore(*([str] * 6)), self.TITLES)
+        header = Gtk.Box(spacing=10)
+        header.pack_start(styled(Gtk.Label(label="Agent access", xalign=0, hexpand=True), "keeper-title"),
+                          True, True, 0)
+        self.review_button = button(header, "Review or manage", self._open)
+        self.review_button.set_sensitive(False)
+        self.pack_start(header, False, False, 0)
+        self.table, scroll = pane_table(Gtk.ListStore(*([str] * 6)), self.TITLES)
         self.table.connect("row-activated", self._open)
-        self.pack_start(_scroll(self.table), True, True, 0)
-        button(self, "Review or manage selected token", self._open)
+        self.table.get_selection().connect("changed", lambda *_: self.review_button.set_sensitive(
+            selected_key(self.table, 5) is not None))
+        self.pack_start(scroll, True, True, 0)
 
     def refresh(self):
         rows = self.app.grants.rows() if self.app.grants else []
@@ -165,6 +184,7 @@ class ActivityView(Gtk.Box):
         super().__init__(orientation=Gtk.Orientation.VERTICAL, spacing=8)
         self.app = app
         self.rows = {}
+        self.pack_start(styled(Gtk.Label(label="Activity", xalign=0), "keeper-title"), False, False, 0)
         filters = Gtk.Grid(column_spacing=8, row_spacing=6)
         self.filters = {}
         for index, name in enumerate(("Vault", "Agent", "Model", "Chat", "Action", "Outcome")):
@@ -172,10 +192,12 @@ class ActivityView(Gtk.Box):
             field.connect("search-changed", self.refresh)
             filters.attach(field, index % 3, index // 3, 1, 1)
             self.filters[name.lower()] = field
-        self.pack_start(filters, False, False, 0)
-        self.table = _table(Gtk.ListStore(str, str, str, str, str, str), self.TITLES)
+        expander = Gtk.Expander(label="Filters")
+        expander.add(filters)
+        self.pack_start(expander, False, False, 0)
+        self.table, scroll = pane_table(Gtk.ListStore(str, str, str, str, str, str), self.TITLES)
         self.table.connect("row-activated", self._details)
-        self.pack_start(_scroll(self.table), True, True, 0)
+        self.pack_start(scroll, True, True, 0)
 
     def refresh(self, *_):
         try:
