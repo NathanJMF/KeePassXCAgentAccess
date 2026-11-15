@@ -139,6 +139,10 @@ def main(root):
                                if widget.get_style_context().has_class("keeper-settings-divider"))
                 wait_for_paint(divider)
                 area = dialog.get_content_area()
+                window = app.window.get_window()
+                workarea = window.get_display().get_monitor_at_window(window).get_workarea()
+                assert tuple(dialog.get_default_size()) == (min(1080, workarea.width - 48),
+                                                            min(826, workarea.height - 80))
                 assert divider.translate_coordinates(area, 0, 0)[1] == 0
                 assert divider.get_allocated_height() == area.get_allocated_height()
                 pages = next(widget for widget in descendants(dialog) if widget.get_name() == "keeper-settings-pages")
@@ -437,15 +441,15 @@ def main(root):
             widget.queue_draw()
             wait_for(lambda: clock.get_frame_counter() > frame, "Keeper view did not repaint")
 
-        def check_toolbar_button(button, label):
+        def check_toolbar_button(button):
             wait_for_paint(button)
-            allocation = label.get_allocation()
-            layout_x, layout_y = label.get_layout_offsets()
-            x, y = label.translate_coordinates(button, layout_x - allocation.x, layout_y - allocation.y)
-            text_width, text_height = label.get_layout().get_pixel_size()
+            content = button.get_child()
+            if isinstance(content, Gtk.Stack):
+                content = content.get_visible_child()
+            x, y = content.translate_coordinates(button, 0, 0)
             size = button.get_allocated_width(), button.get_allocated_height()
-            assert abs(2 * x + text_width - size[0]) <= 1, label.get_text()
-            assert abs(2 * y + text_height - size[1]) <= 1, label.get_text()
+            assert abs(2 * x + content.get_allocated_width() - size[0]) <= 1
+            assert abs(2 * y + content.get_allocated_height() - size[1]) <= 1
             return size
 
         def check_date_widths(table, row, *titles):
@@ -983,9 +987,8 @@ def main(root):
                 assert "token is required" in invoke(None, "entries", "list", expected=1)
                 wait_for(lambda: not app.busy and app.workspace.session(first), "Saved vault did not unlock at startup")
                 assert app.vault_lock_button.get_accessible().get_name() == "Lock all vaults"
-                check_toolbar_button(app.add_vault_button, next(widget for widget in descendants(app.add_vault_button)
-                                                                if isinstance(widget, Gtk.Label)))
-                vault_lock_size = check_toolbar_button(app.vault_lock_button, app.vault_lock_labels.get_visible_child())
+                check_toolbar_button(app.add_vault_button)
+                vault_lock_size = check_toolbar_button(app.vault_lock_button)
                 assert settings_switch("vaults", "start-unlocked")
                 assert not settings_switch("vaults", "start-unlocked", False)
                 assert not old_access.read().start_unlocked
@@ -993,7 +996,7 @@ def main(root):
                 app.vault_lock_button.clicked()
                 assert not app.workspace.session(first)
                 assert app.vault_lock_button.get_accessible().get_name() == "Unlock all vaults"
-                assert check_toolbar_button(app.vault_lock_button, app.vault_lock_labels.get_visible_child()) == vault_lock_size
+                assert check_toolbar_button(app.vault_lock_button) == vault_lock_size
                 root_path = select_tree(first)
                 assert not app.tree.row_expanded(root_path)
                 locked_actions = context_menu(app.tree)
@@ -1521,11 +1524,11 @@ def main(root):
                 drive_dialog(lambda: table.row_activated(path, table.get_column(0)), read_activity)
                 check_agent_edits(first, second)
                 assert app.usage_button.get_accessible().get_name() == "Allow usage"
-                usage_size = check_toolbar_button(app.usage_button, app.usage_labels.get_visible_child())
+                usage_size = check_toolbar_button(app.usage_button)
                 assert app.usage_button.get_style_context().has_class("keeper-usage-allow")
                 assert settings_switch("reviews", "review-usage", True)
                 assert app.usage_button.get_accessible().get_name() == "Review usage"
-                assert check_toolbar_button(app.usage_button, app.usage_labels.get_visible_child()) == usage_size
+                assert check_toolbar_button(app.usage_button) == usage_size
                 assert app.usage_button.get_style_context().has_class("keeper-usage-review")
                 assert old_access.read().review_usage
 
@@ -1552,10 +1555,10 @@ def main(root):
                 assert not settings_switch("reviews", "list_entries", False)
                 assert invoke("beta", "entries", "list")["entries"] == fixture[2:]
                 assert app.pause_button.get_accessible().get_name() == "Pause agent access"
-                pause_size = check_toolbar_button(app.pause_button, app.pause_labels.get_visible_child())
+                pause_size = check_toolbar_button(app.pause_button)
                 app.tray_items["pause"].activate()
                 assert app.pause_button.get_accessible().get_name() == "Resume agent access"
-                assert check_toolbar_button(app.pause_button, app.pause_labels.get_visible_child()) == pause_size
+                assert check_toolbar_button(app.pause_button) == pause_size
                 assert app.workspace.paused and app.workspace.session(second)
                 assert app.indicator.get_icon() == "keeper-agent-access-paused"
                 assert "paused" in invoke("beta", "entries", "list", expected=1)

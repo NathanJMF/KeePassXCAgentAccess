@@ -179,15 +179,14 @@ class WorkspaceApplication(Gtk.Application):
         brand.pack_start(Gtk.Label(label=APP_TITLE, xalign=0), False, False, 0)
         header.pack_start(brand)
         self.add_vault_button = styled(Gtk.Button(), "keeper-control")
-        add_icon = Gtk.Image.new_from_icon_name("list-add-symbolic", Gtk.IconSize.BUTTON)
-        self._set_toolbar_content(self.add_vault_button, Gtk.Label(label="Add vault…"), add_icon)
+        self.add_vault_button.add(self._toolbar_content("Add vault…", "list-add-symbolic"))
         self.add_vault_button.get_accessible().set_name("Add vault…")
         self.add_vault_button.connect("clicked", lambda *_: self._configure())
         header.pack_start(self.add_vault_button)
         self.vault_lock_button = styled(Gtk.Button(), "keeper-control")
-        self.vault_lock_icon = Gtk.Image.new_from_icon_name("changes-prevent-symbolic", Gtk.IconSize.BUTTON)
         self.vault_lock_labels = self._toolbar_labels(
-            self.vault_lock_button, ("Lock all vaults", "Unlock all vaults"), icon=self.vault_lock_icon,
+            self.vault_lock_button, ("Lock all vaults", "changes-prevent-symbolic"),
+            ("Unlock all vaults", "changes-allow-symbolic"),
         )
         self.vault_lock_button.connect("clicked", self._toggle_all_vaults)
         header.pack_start(self.vault_lock_button)
@@ -198,40 +197,38 @@ class WorkspaceApplication(Gtk.Application):
         self.settings_button.connect("clicked", self._show_settings)
         header.pack_end(self.settings_button)
         self.pause_button = styled(Gtk.Button(), "keeper-control", "keeper-paused")
-        self.pause_icon = Gtk.Image.new_from_icon_name("changes-prevent-symbolic", Gtk.IconSize.BUTTON)
-        self.pause_labels = self._toolbar_labels(self.pause_button, ("Resume agent access", "Pause agent access"),
-                                                 icon=self.pause_icon)
+        self.pause_labels = self._toolbar_labels(
+            self.pause_button, ("Resume agent access", "changes-prevent-symbolic"),
+            ("Pause agent access", "changes-allow-symbolic"),
+        )
         self.pause_button.connect("clicked", self._toggle_pause)
         header.pack_end(self.pause_button)
         self.usage_button = styled(Gtk.ToggleButton(), "keeper-control")
-        self.usage_labels = self._toolbar_labels(self.usage_button, ("Allow usage", "Review usage"))
+        self.usage_labels = self._toolbar_labels(self.usage_button, ("Allow usage",), ("Review usage",))
         self._style_usage_policy()
         self.usage_button.connect("toggled", self._set_usage_policy)
         header.pack_end(self.usage_button)
         header.show_all()
 
     @classmethod
-    def _toolbar_labels(cls, button, labels, *, icon=None):
+    def _toolbar_labels(cls, button, *states):
         stack = Gtk.Stack(hhomogeneous=True, vhomogeneous=True)
-        for text in labels:
-            stack.add_named(Gtk.Label(label=text), text)
+        for label, *icon in states:
+            stack.add_named(cls._toolbar_content(label, *icon), label)
         stack.show_all()
-        button.get_accessible().set_name(labels[0])
-        cls._set_toolbar_content(button, stack, icon)
+        button.get_accessible().set_name(stack.get_visible_child_name())
+        button.add(stack)
         return stack
 
     @staticmethod
-    def _set_toolbar_content(button, label, icon):
-        if icon is None:
-            button.add(label)
-            return
-        content = Gtk.Box(spacing=6)
-        icon.set_pixel_size(16)
-        # Balance the leading icon so the text itself sits at the button's midpoint.
-        content.pack_start(icon, False, False, 0)
-        content.pack_start(label, True, True, 0)
-        content.pack_end(Gtk.Box(width_request=16), False, False, 0)
-        button.add(content)
+    def _toolbar_content(label, icon_name=None):
+        content = Gtk.Box(spacing=6, halign=Gtk.Align.CENTER, valign=Gtk.Align.CENTER)
+        if icon_name:
+            icon = Gtk.Image.new_from_icon_name(icon_name, Gtk.IconSize.BUTTON)
+            icon.set_pixel_size(16)
+            content.pack_start(icon, False, False, 0)
+        content.pack_start(Gtk.Label(label=label), False, False, 0)
+        return content
 
     @staticmethod
     def _show_toolbar_label(button, stack, label):
@@ -416,8 +413,6 @@ class WorkspaceApplication(Gtk.Application):
             pause_label = "Resume agent access" if paused else "Pause agent access"
             if self.pause_labels.get_visible_child_name() != pause_label:
                 self._show_toolbar_label(self.pause_button, self.pause_labels, pause_label)
-                icon = "changes-prevent-symbolic" if paused else "changes-allow-symbolic"
-                self.pause_icon.set_from_icon_name(icon, Gtk.IconSize.BUTTON)
                 style = self.pause_button.get_style_context()
                 style.add_class("keeper-paused" if paused else "keeper-live")
                 style.remove_class("keeper-live" if paused else "keeper-paused")
@@ -908,10 +903,7 @@ class WorkspaceApplication(Gtk.Application):
     def _refresh_vault_lock(self):
         unlocked = self._any_vault_unlocked()
         label = "Lock all vaults" if unlocked else "Unlock all vaults"
-        if self.vault_lock_labels.get_visible_child_name() != label:
-            self._show_toolbar_label(self.vault_lock_button, self.vault_lock_labels, label)
-            icon = "changes-prevent-symbolic" if unlocked else "changes-allow-symbolic"
-            self.vault_lock_icon.set_from_icon_name(icon, Gtk.IconSize.BUTTON)
+        self._show_toolbar_label(self.vault_lock_button, self.vault_lock_labels, label)
         self.vault_lock_button.set_sensitive(bool(self.workspace and self.workspace.registrations
                                                   and not self.desktop.locked and (unlocked or not self.busy)))
 
@@ -1002,7 +994,14 @@ class WorkspaceApplication(Gtk.Application):
             self.run_dialog(self._settings_dialog())
 
     def _settings_dialog(self):
-        dialog, body = _dialog(self, "Keeper settings", 700, 490)
+        width, height = 1080, 826
+        if window := self.window.get_window():
+            if monitor := window.get_display().get_monitor_at_window(window):
+                workarea = monitor.get_workarea()
+                # Leave room for the dialog title bar and the desktop shell.
+                width = min(width, max(1, workarea.width - 48))
+                height = min(height, max(1, workarea.height - 80))
+        dialog, body = _dialog(self, "Keeper settings", width, height)
         dialog.set_name("keeper-settings")
         dialog.set_modal(True)
         body.set_border_width(0)
