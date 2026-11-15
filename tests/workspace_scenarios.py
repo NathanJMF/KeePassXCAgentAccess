@@ -1369,7 +1369,7 @@ def main(root):
                 view = app.activity_view
                 table = view.table
                 assert [column.get_title() for column in table.get_columns()] == [
-                    "Time", "Identity", "Action", "Vault", "Group", "Key", "Outcome",
+                    "Time", "Action", "Identity", "Vault", "Group", "Key", "Outcome",
                 ]
                 activity_identity = view.TITLES.index("Identity")
                 assert isinstance(table.get_model(), Gtk.TreeStore)
@@ -1406,11 +1406,28 @@ def main(root):
                 assert token_summary[activity_identity] == expected_identity("alpha")
                 assert all(row[activity_identity] == expected_identity("alpha") for row in token_summary.iterchildren())
                 assert not table.row_expanded(token_summary.path)
-                for expanded in (True, False):
-                    table.row_activated(token_summary.path, table.get_column(0))
-                    assert table.row_expanded(token_summary.path) == expanded
+                table.row_activated(token_summary.path, table.get_column(0))
+                assert table.row_expanded(token_summary.path)
+                pending = activity_leaf(token_events[-1]["id"])
+                action_column = table.get_column(view.ACTION)
+                action_icon, action_text = action_column.get_cells()
+                action_column.cell_set_cell_data(pending.model, pending.iter, False, False)
+                assert action_icon.get_property("icon-name") == "dialog-question-symbolic"
+                assert action_text.get_property("text") == "Request token"
+                wait_for_paint(table)
+                outcome_column = table.get_column(view.OUTCOME)
+                outcome_column.cell_set_cell_data(pending.model, pending.iter, False, False)
+                outcome_icon, outcome_text = outcome_column.get_cells()
+                assert outcome_icon.get_property("icon-name") == "appointment-soon-symbolic"
+                assert outcome_text.get_property("text") == "Pending approval"
+                required = sum(cell.get_preferred_width(table)[1] for cell in (outcome_icon, outcome_text))
+                assert outcome_column.get_width() >= required, (outcome_column.get_width(), required)
+                table.row_activated(token_summary.path, table.get_column(0))
+                assert not table.row_expanded(token_summary.path)
 
                 row = activity_leaf(access["id"])
+                action_column.cell_set_cell_data(row.model, row.iter, False, False)
+                assert action_icon.get_property("icon-name") == "dialog-password-symbolic"
                 assert row[activity_identity] == expected_identity("expanded")
                 assert row[view.TITLES.index("Vault")] == "second"
                 assert row[view.TITLES.index("Group")] == "Root"

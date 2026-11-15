@@ -144,9 +144,11 @@ def empty_state(icon, text):
 
 
 def pane_table(model, titles, widths, *, lead_icon=None, status=None, expand_columns=(1, 2), muted_columns=(),
-               time_columns=None, text_renderers=None, sort_group=None, replace_rows=_replace_rows):
+               time_columns=None, text_renderers=None, icon_columns=None, full_text_columns=(),
+               sort_group=None, replace_rows=_replace_rows):
     time_columns = time_columns or {}
     text_renderers = text_renderers or {}
+    icon_columns = icon_columns or {}
     table = styled(Gtk.TreeView(model=model), "keeper-table")
     table.keeper_sort = TableSort(time_columns, sort_group, replace_rows)
     table.set_grid_lines(Gtk.TreeViewGridLines.HORIZONTAL)
@@ -157,19 +159,24 @@ def pane_table(model, titles, widths, *, lead_icon=None, status=None, expand_col
         column.set_resizable(True)
         column.set_expand(index in expand_columns)
         column.set_min_width(widths[index])
-        ellipsize = Pango.EllipsizeMode.NONE if index in time_columns else Pango.EllipsizeMode.END
+        full_text = index in time_columns or index in full_text_columns
+        ellipsize = Pango.EllipsizeMode.NONE if full_text else Pango.EllipsizeMode.END
         renderer = text_renderers.get(index, Gtk.CellRendererText)
         text = renderer(xpad=10, ypad=9, ellipsize=ellipsize)
         colored = status is not None and index == status[0]
-        if colored or (index == 0 and lead_icon):
+        leading = index == 0 and lead_icon
+        if colored or leading or index in icon_columns:
             icon = Gtk.CellRendererPixbuf(xpad=5, stock_size=Gtk.IconSize.MENU)
             column.pack_start(icon, False)
             if colored:
                 column.set_cell_data_func(icon, _status_icon, status)
+            elif index in icon_columns:
+                column.add_attribute(icon, "icon-name", icon_columns[index])
             else:
                 icon.set_property("icon-name", lead_icon)
             text.set_property("xpad", 3)
-            text.set_property("weight", Pango.Weight.SEMIBOLD)
+            if colored or leading:
+                text.set_property("weight", Pango.Weight.SEMIBOLD)
         column.pack_start(text, True)
         column.add_attribute(text, "text", index)
         if colored or index in muted_columns:
@@ -214,6 +221,19 @@ ACTIVITY_STATES = {
     "Denied": ("action-unavailable-symbolic", "keeper_failure"),
     "Paused": ("media-playback-pause-symbolic", "keeper_warning"),
     "Revoked": ("action-unavailable-symbolic", "keeper_muted"),
+}
+
+
+ACTIVITY_ACTION_ICONS = {
+    "List vaults": "drive-harddisk-symbolic",
+    "List entries": "view-list-symbolic",
+    "Use password": "dialog-password-symbolic",
+    "Request token": "dialog-question-symbolic",
+    "Approve token": "changes-allow-symbolic",
+    "Deny token": "changes-prevent-symbolic",
+    "Disable token": "changes-prevent-symbolic",
+    "Re-enable token": "changes-allow-symbolic",
+    "Remove token": "user-trash-symbolic",
 }
 
 
@@ -925,9 +945,12 @@ def replace_tree_rows(table, rows, key_column):
 
 
 class ActivityView(Gtk.Box):
-    TITLES = ("Time", "Identity", "Action", "Vault", "Group", "Key", "Outcome")
+    TITLES = ("Time", "Action", "Identity", "Vault", "Group", "Key", "Outcome")
+    ACTION = TITLES.index("Action")
+    OUTCOME = TITLES.index("Outcome")
     RECORD_ID = len(TITLES)
-    TIME = RECORD_ID + 1
+    ACTION_ICON = RECORD_ID + 1
+    TIME = ACTION_ICON + 1
     ROW_KEY = TIME + 1
 
     def __init__(self, app):
@@ -954,9 +977,10 @@ class ActivityView(Gtk.Box):
         self.pack_start(header, False, False, 0)
         self.pack_start(self.filter_panel, False, False, 0)
         self.table, scroll = pane_table(
-            Gtk.TreeStore(*([str] * (self.RECORD_ID + 1)), object, object, object), self.TITLES,
-            (144, 110, 115, 78, 86, 84, 144), status=(6, ACTIVITY_STATES),
+            Gtk.TreeStore(*([str] * (self.ACTION_ICON + 1)), object, object, object), self.TITLES,
+            (144, 144, 110, 78, 86, 84, 166), status=(self.OUTCOME, ACTIVITY_STATES),
             expand_columns=(1, 2, 3, 4, 5), muted_columns=(0,), time_columns={0: self.TIME},
+            icon_columns={self.ACTION: self.ACTION_ICON}, full_text_columns=(self.OUTCOME,),
             replace_rows=replace_tree_rows,
         )
         self.table.set_enable_tree_lines(True)
@@ -1013,9 +1037,16 @@ class ActivityView(Gtk.Box):
     @staticmethod
     def _values(row, resource, key, *, action=None, children=()):
         timestamp = event_time(row)
-        return (table_time(timestamp), reported(row["identity"]),
-                action or row["action"], *(value or "—" for value in resource),
-                row["outcome"], str(row["id"]), timestamp, key, children)
+        stage = row["action"].partition(" · ")[0]
+        if children and key[0] == "token":
+            icon = "changes-allow-symbolic"
+        elif stage in EDIT_STAGES:
+            icon = "document-edit-symbolic"
+        else:
+            icon = ACTIVITY_ACTION_ICONS.get(stage, "document-open-recent-symbolic")
+        return (table_time(timestamp), action or row["action"], reported(row["identity"]),
+                *(value or "—" for value in resource), row["outcome"], str(row["id"]),
+                icon, timestamp, key, children)
 
     def _details(self, table, path, _column):
         model = table.get_model()
