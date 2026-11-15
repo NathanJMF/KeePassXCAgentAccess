@@ -257,7 +257,87 @@ button.keeper-delete {
 #keeper-edit-review .keeper-review-blocker image {
     color: @keeper_warning;
 }
-#keeper-access-review .keeper-event-title,
+#keeper-access-review {
+    background-color: @keeper_surface;
+}
+#keeper-access-review .keeper-access-agent-icon,
+#keeper-access-review .keeper-access-resource-icon {
+    min-width: 40px;
+    min-height: 40px;
+    border-radius: 10px;
+    color: @keeper_accent;
+    background-color: mix(@keeper_surface, @keeper_cobalt, 0.14);
+}
+#keeper-access-review .keeper-access-agent {
+    font-size: 1.5em;
+    font-weight: 800;
+}
+#keeper-access-review .keeper-access-entry {
+    font-size: 1.17em;
+    font-weight: 800;
+}
+#keeper-access-review .keeper-access-resource {
+    padding: 14px;
+    border: 1px solid @keeper_line;
+    border-radius: 12px;
+    background-color: @keeper_canvas;
+}
+#keeper-access-review .keeper-access-permissions {
+    padding: 10px 11px;
+    border-radius: 8px;
+    background-color: mix(@keeper_canvas, @keeper_cobalt, 0.08);
+}
+#keeper-access-review .keeper-access-caption,
+#keeper-access-review .keeper-access-permission-name {
+    font-weight: 700;
+}
+#keeper-access-review .keeper-access-permission-icon {
+    color: @keeper_accent;
+}
+#keeper-access-review .keeper-access-technical {
+    color: @keeper_muted;
+    padding: 4px 0;
+}
+#keeper-access-review .keeper-access-notice {
+    padding: 10px 12px;
+    border: 1px solid alpha(@keeper_warning, 0.40);
+    border-radius: 9px;
+    background-color: mix(@keeper_surface, @keeper_warning, 0.12);
+}
+#keeper-access-review .keeper-access-notice image,
+#keeper-access-review label.keeper-access-unresolved {
+    color: @keeper_warning;
+}
+#keeper-access-review .keeper-access-footer {
+    padding: 0 12px 12px;
+}
+#keeper-access-review .keeper-access-footer button {
+    min-height: 25px;
+    padding: 5px 17px;
+    border-radius: 7px;
+}
+#keeper-access-review .keeper-access-approve {
+    color: white;
+    background-image: none;
+    background-color: #3f63d4;
+    border-color: #3f63d4;
+    font-weight: 700;
+    text-shadow: none;
+}
+#keeper-access-review .keeper-access-approve:hover {
+    background-color: #3558c5;
+}
+#keeper-access-review .keeper-access-approve:active {
+    background-color: #304fad;
+}
+#keeper-access-review .keeper-access-approve:disabled {
+    color: @keeper_muted;
+    background-color: @keeper_canvas;
+    border-color: @keeper_line;
+}
+#keeper-access-review .keeper-access-deny {
+    color: @keeper_failure;
+}
 #keeper-access-detail .keeper-event-title,
 #keeper-activity-detail .keeper-event-title {
     font-size: 1.45em;
@@ -268,14 +348,12 @@ button.keeper-delete {
 #keeper-activity-detail .keeper-event-caption {
     color: @keeper_muted;
 }
-#keeper-access-review .keeper-event-section,
 #keeper-activity-detail .keeper-event-section {
     border-radius: 9px;
     border: 1px solid @keeper_line;
     background-color: @keeper_canvas;
     padding: 10px 12px;
 }
-#keeper-access-review .keeper-event-section-title,
 #keeper-access-detail .keeper-event-section-title,
 #keeper-activity-detail .keeper-event-section-title {
     font-weight: 800;

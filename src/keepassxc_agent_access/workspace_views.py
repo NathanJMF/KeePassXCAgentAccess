@@ -532,23 +532,45 @@ class AccessView(Gtk.Box):
         dialog.connect("key-press-event", lambda *_: True)
         dialog.connect("key-release-event", lambda *_: True)
         require_mouse_decisions(dialog)
-        approve = styled(dialog.get_widget_for_response(Gtk.ResponseType.ACCEPT), "suggested-action")
+        approve = styled(dialog.get_widget_for_response(Gtk.ResponseType.ACCEPT), "keeper-access-approve")
+        styled(dialog.get_widget_for_response(Gtk.ResponseType.REJECT), "keeper-access-deny")
+        styled(dialog.get_action_area(), "keeper-access-footer")
         resume_label = "Resume Access and Approve"
 
-        body.pack_start(styled(_label(reported(grant.identity)), "keeper-event-title"), False, False, 0)
-        body.pack_start(styled(_label(grant.project), "keeper-event-caption"), False, False, 0)
+        body.set_border_width(20)
+        body.set_spacing(14)
+        requester = Gtk.Box(spacing=12)
+        badge = Gtk.Image.new_from_icon_name("avatar-default-symbolic", Gtk.IconSize.LARGE_TOOLBAR)
+        badge.set_valign(Gtk.Align.CENTER)
+        requester.pack_start(styled(badge, "keeper-access-agent-icon"), False, False, 0)
+        identity = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=3)
+        requester.pack_start(identity, True, True, 0)
+        identity.pack_start(styled(_label("Requested by · agent-reported"), "keeper-event-caption"), False, False, 0)
+        identity.pack_start(styled(_label(grant.identity), "keeper-access-agent"), False, False, 0)
+        project = styled(_label(grant.project), "keeper-event-caption")
+        project.set_tooltip_text("Reported project")
+        identity.pack_start(project, False, False, 0)
+        body.pack_start(requester, False, False, 0)
+
         count = len(grant.items)
-        heading = "Requested entry" if count == 1 else f"Requested entries ({count})"
         review = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
-        review.pack_start(styled(_label(heading), "keeper-event-section-title"), False, False, 0)
+        if count > 1:
+            heading = styled(_label(f"Requested entries ({count})"), "keeper-access-caption")
+            review.pack_start(heading, False, False, 0)
         scroll = Gtk.ScrolledWindow()
         scroll.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
         scroll.set_propagate_natural_height(True)
         scroll.set_max_content_height(440)
         scroll.add(review)
         body.pack_start(scroll, True, True, 0)
-        pause_notice = styled(_label("Agent access is paused. Approving will resume it for all approved agents."),
-                              "keeper-event-caption")
+        pause_notice = Gtk.Box(spacing=10)
+        pause_icon = Gtk.Image.new_from_icon_name("changes-prevent-symbolic", Gtk.IconSize.MENU)
+        pause_notice.pack_start(pause_icon, False, False, 0)
+        pause_text = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=3)
+        pause_text.pack_start(styled(_label("Agent access is paused"), "keeper-access-caption"), False, False, 0)
+        add_label(pause_text, "Approving also resumes access for all approved agents.")
+        pause_notice.pack_start(pause_text, True, True, 0)
+        styled(pause_notice, "keeper-access-notice").show_all()
         pause_notice.set_no_show_all(True)
         body.pack_start(pause_notice, False, False, 0)
 
@@ -563,6 +585,7 @@ class AccessView(Gtk.Box):
             ("Token record", grant.id),
         )), False, False, 0)
         technical.add(details)
+        styled(technical, "keeper-access-technical")
 
         controls = [self._review_entry(review, details, item) for item in grant.items]
 
@@ -605,7 +628,7 @@ class AccessView(Gtk.Box):
 
     def _review_entry(self, review, details, item):
         choices = self.app.grants.choices(item)
-        card = styled(Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6), "keeper-event-section")
+        card = styled(Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12), "keeper-access-resource")
         review.pack_start(card, False, False, 0)
         combo = Gtk.ComboBoxText()
         paths = [" › ".join((choice.vault_name, *choice.path)) for choice in choices]
@@ -614,16 +637,30 @@ class AccessView(Gtk.Box):
             if matches[path] > 1:
                 path = f"{path} · {choice.scope.vault[:8]} / {choice.scope.entry[:8]}"
             combo.append_text(path)
+
+        resource = Gtk.Box(spacing=10)
+        resource_icon = Gtk.Image.new_from_icon_name("dialog-password-symbolic", Gtk.IconSize.LARGE_TOOLBAR)
+        resource_icon.set_valign(Gtk.Align.CENTER)
+        resource.pack_start(styled(resource_icon, "keeper-access-resource-icon"), False, False, 0)
+        resource_text = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
+        title = styled(_label(""), "keeper-access-entry")
+        location = styled(_label(""), "keeper-event-caption")
+        resource_text.pack_start(title, False, False, 0)
+        resource_text.pack_start(location, False, False, 0)
+        resource.pack_start(resource_text, True, True, 0)
+        card.pack_start(resource, False, False, 0)
+
         if len(choices) > 1:
             for renderer in combo.get_cells():
                 renderer.set_property("ellipsize", Pango.EllipsizeMode.MIDDLE)
-            card.pack_start(_label("Choose the exact entry"), False, False, 0)
             card.pack_start(combo, False, False, 0)
-        title = styled(_label(""), "keeper-event-section-title")
-        location = styled(_label(""), "keeper-event-caption")
-        permissions = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=5)
-        for widget in (title, location, permissions):
-            card.pack_start(widget, False, False, 0)
+
+        permissions = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        permission_section = styled(Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8),
+                                    "keeper-access-permissions")
+        permission_section.pack_start(styled(_label("Permissions if approved"), "keeper-access-caption"), False, False, 0)
+        permission_section.pack_start(permissions, False, False, 0)
+        card.pack_start(permission_section, False, False, 0)
         references = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
         details.pack_start(references, False, False, 0)
 
@@ -638,26 +675,33 @@ class AccessView(Gtk.Box):
             if choice:
                 title.set_text(choice.path[-1])
                 location.set_text(" › ".join((choice.vault_name, *choice.path[:-1])))
+            elif choices:
+                title.set_text(item.label or "Choose an entry")
+                location.set_text("Choose the exact entry before approving.")
+            elif vault and not self.app.workspace.session(vault_id):
+                title.set_text(item.label or vault.name)
+                location.set_text(f"{vault.name} is locked. Unlock it and reopen this request." if item.label
+                                  else "Vault locked. Unlock it and reopen this request to approve.")
             else:
-                title.set_text(item.label or "Requested entry")
-                if choices:
-                    location.set_text("Multiple entries match this request.")
-                elif vault and not self.app.workspace.session(vault_id):
-                    location.set_text(f"Unlock {vault.name}, then reopen this request.")
-                else:
-                    location.set_text("No matching entry in the unlocked vaults.")
+                title.set_text(item.label or "Entry unavailable")
+                location.set_text("No matching entry in the unlocked vaults.")
+            location_style = location.get_style_context()
+            if choice:
+                location_style.remove_class("keeper-access-unresolved")
+            else:
+                location_style.add_class("keeper-access-unresolved")
             if item.metadata:
-                add_label(permissions, "Read entry title and group")
+                access_permission(permissions, "Read entry details", "Entry ID, title and group path")
             if item.username:
-                add_label(permissions, f"Read username · {choice.username or '—'}" if choice else "Read username")
+                access_permission(permissions, "Read username", (choice.username or "—") if choice else None)
             if item.url:
-                add_label(permissions, f"Read stored URL · {choice.url or '—'}" if choice else "Read stored URL")
+                access_permission(permissions, "Read stored URL", (choice.url or "—") if choice else None)
             if item.action:
                 binding = vault.binding(entry_id, item.action) if choice else None
                 action = binding.action if binding else None
-                add_label(permissions, f"Run {action.name}" if action else f"Run credential action {item.action}")
-                if action:
-                    add_label(permissions, f"{action.kind.label} · {action.url}")
+                name = f"Run {action.name}" if action else f"Run credential action {item.action}"
+                destination = f"{action.kind.label} · {action.url}" if action else None
+                access_permission(permissions, name, destination)
             facts = activity_facts((
                 ("Vault ID", vault_id),
                 ("Entry ID", entry_id),
@@ -724,6 +768,19 @@ class AccessView(Gtk.Box):
         ):
             return
         self.app.owner_operation(lambda: self.app.grants.transition(identifier, status))
+
+
+def access_permission(container, title, detail=None):
+    row = Gtk.Box(spacing=8)
+    icon = Gtk.Image.new_from_icon_name("object-select-symbolic", Gtk.IconSize.MENU)
+    icon.set_valign(Gtk.Align.START)
+    row.pack_start(styled(icon, "keeper-access-permission-icon"), False, False, 0)
+    text = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
+    text.pack_start(styled(_label(title), "keeper-access-permission-name"), False, False, 0)
+    if detail is not None:
+        text.pack_start(styled(_label(detail), "keeper-event-caption"), False, False, 0)
+    row.pack_start(text, True, True, 0)
+    container.pack_start(row, False, False, 0)
 
 
 def activity_location(row, workspace):

@@ -236,8 +236,10 @@ def main(root):
                 assert not expander.get_expanded()
                 summary = [label.get_text() for label in labels
                            if label.get_mapped() and not label.is_ancestor(expander)]
-                assert expected_identity(profile) in summary, summary
+                assert app.grants.records[token_ids[profile]].identity in summary, summary
+                assert "Requested by · agent-reported" in summary
                 assert "Disposable project" in summary, summary
+                assert "Permissions if approved" in summary
                 assert all(token_ids[profile] not in text and "verified" not in text for text in summary)
                 details = [child.get_text() for child in descendants(expander) if isinstance(child, Gtk.Label)]
                 assert token_ids[profile] in details, details
@@ -245,20 +247,20 @@ def main(root):
                 assert "Disposable project (reported)" in details, details
                 if profile == "alpha":
                     assert fixture[0]["title"] in summary, summary
-                    assert "Read entry title and group" in summary, summary
-                    assert f"Read username · {USERNAME}" in summary, summary
+                    assert "Read entry details" in summary and "Entry ID, title and group path" in summary
+                    assert "Read username" in summary and USERNAME in summary
                     assert "Run Imported fixture action" in summary, summary
                     assert first_entry in details and all(first_entry not in text for text in summary)
                     assert not any(isinstance(child, Gtk.ComboBoxText) for child in descendants(dialog))
                 elif profile == "expanded":
                     assert "Requested entries (3)" in summary
-                    assert f"Read stored URL · {STORED_URL}" in summary
+                    assert "Read stored URL" in summary and STORED_URL in summary
                 elif profile == "bearer":
                     assert any("HTTPS Bearer token GET" in label and url + "/first" in label for label in summary)
                 if vault:
                     combo, = [child for child in descendants(dialog) if isinstance(child, Gtk.ComboBoxText)]
                     assert len(combo.get_model()) == 4
-                    assert "Choose the exact entry" in summary
+                    assert "Choose the exact entry before approving." in summary
                     assert not dialog.get_widget_for_response(Gtk.ResponseType.ACCEPT).get_sensitive()
                     choices = app.grants.choices(next(row for row in app.grants.rows() if row.status == "pending").items[0])
                     index = next(i for i, choice in enumerate(choices)
