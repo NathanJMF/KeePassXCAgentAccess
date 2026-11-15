@@ -2,8 +2,8 @@
 
 ## 1. Owner-side vault and lifecycle
 
-- [ ] 1.1 Add a read-only KeePass backend for password and optional key-file unlock. Verify supported synthetic fixtures open, invalid factors fail, and opening and closing leave the database bytes unchanged.
-- [ ] 1.2 Add a vault controller for setup, locked, and unlocked states. Verify that failed unlocks keep the vault locked, closing an unlocked session releases backend state, and a lock or shutdown invalidates an in-flight unlock.
+- [x] 1.1 Add a read-only KeePass backend for password and optional key-file unlock. Verify supported synthetic fixtures open, invalid factors fail, and opening and closing leave the database bytes unchanged.
+- [x] 1.2 Add a vault controller for setup, locked, and unlocked states. Verify that failed unlocks keep the vault locked, closing an unlocked session releases backend state, and a lock or shutdown invalidates an in-flight unlock.
 
 ## 2. Setup and keyring
 
