@@ -221,7 +221,9 @@ class WorkspaceApplication(Gtk.Application):
         self.browser = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=18)
         self.stack.add_named(self.browser, "browse")
         header, titles, self.browse_title, self.browse_icon = section_heading("Vaults", "drive-harddisk-symbolic")
-        self.browse_path = styled(Gtk.Label(xalign=0, ellipsize=Pango.EllipsizeMode.START), "keeper-muted")
+        self.browse_path = styled(
+            Gtk.Label(xalign=0, ellipsize=Pango.EllipsizeMode.START, single_line_mode=True), "keeper-muted",
+        )
         titles.pack_start(self.browse_path, False, False, 0)
         titles.reorder_child(self.browse_path, 0)
         self.browser.pack_start(header, False, False, 0)
@@ -493,8 +495,7 @@ class WorkspaceApplication(Gtk.Application):
             title = f"{record.name} · Locked"
             empty = "Unlock this vault to view its groups and entries."
         self.browse_title.set_text(title)
-        self.browse_path.set_text(path)
-        self.browse_path.set_visible(bool(path))
+        self.browse_path.set_text(path or " ")
         self.entry_tools.set_visible(bool(session))
         self.entry_search.set_visible(bool(session))
         self.entry_search.set_tooltip_text("Filter the selected group (Ctrl+F)" if group_id else "Filter this vault (Ctrl+F)")

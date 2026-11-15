@@ -232,6 +232,18 @@ def main(root):
             app.tree.row_activated(path, app.tree.get_column(0))
             return path
 
+        def browse_positions(vault, group=""):
+            select_tree(vault, group)
+            clock = app.browser.get_frame_clock()
+            frame = clock.get_frame_counter()
+            app.browser.queue_draw()
+            wait_for(lambda: clock.get_frame_counter() > frame, "Vault browser did not repaint")
+            widgets = {
+                "icon": app.browse_icon, "title": app.browse_title, "lock": app.vault_buttons["lock"],
+                "filter": app.entry_search, "table": app.entry_scroll, "columns": app.entries.get_column(0).get_button(),
+            }
+            return {name: widget.translate_coordinates(app.window, 0, 0)[1] for name, widget in widgets.items()}
+
         def use(profile, vault, entry=first_entry, expected=0):
             return invoke(profile, "use", "--vault", vault, "--entry", entry, "--action", "check", expected=expected)
 
@@ -798,6 +810,10 @@ def main(root):
                 first_groups = app.workspace.session(first).groups
                 outer = next(row["id"] for row in first_groups if row["name"] == "Harbor Lab")
                 inner = next(row["id"] for row in first_groups if row["name"] == "Field Notes")
+                vault_positions = browse_positions(first)
+                group_positions = browse_positions(first, outer)
+                assert vault_positions == group_positions, (vault_positions, group_positions)
+                assert browse_positions(first, inner) == vault_positions
                 select_tree(first, outer)
                 assert context_menu(app.tree) == [
                     "New entry…", "Edit group…", "Copy group reference", "Delete…",
