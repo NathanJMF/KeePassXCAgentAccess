@@ -145,7 +145,7 @@ def empty_state(icon, text):
 
 def pane_table(model, titles, widths, *, lead_icon=None, status=None, expand_columns=(1, 2), muted_columns=(),
                time_columns=None, text_renderers=None, icon_columns=None, full_text_columns=(),
-               sort_group=None, replace_rows=_replace_rows):
+               indent_rows=False, sort_group=None, replace_rows=_replace_rows):
     time_columns = time_columns or {}
     text_renderers = text_renderers or {}
     icon_columns = icon_columns or {}
@@ -159,6 +159,10 @@ def pane_table(model, titles, widths, *, lead_icon=None, status=None, expand_col
         column.set_resizable(True)
         column.set_expand(index in expand_columns)
         column.set_min_width(widths[index])
+        if indent_rows and index != 0:
+            spacer = Gtk.CellRendererPixbuf(visible=False)
+            column.pack_start(spacer, False)
+            column.set_cell_data_func(spacer, _indent_cell, table)
         full_text = index in time_columns or index in full_text_columns
         ellipsize = Pango.EllipsizeMode.NONE if full_text else Pango.EllipsizeMode.END
         renderer = text_renderers.get(index, Gtk.CellRendererText)
@@ -185,6 +189,15 @@ def pane_table(model, titles, widths, *, lead_icon=None, status=None, expand_col
     scroll = _scroll(table)
     scroll.set_shadow_type(Gtk.ShadowType.NONE)
     return table, scroll
+
+
+def _indent_cell(_column, spacer, model, row, table):
+    depth = model.iter_depth(row)
+    spacer.set_visible(depth > 0)
+    if depth:
+        # Match GTK 3's native indentation in the expander column.
+        step = table.style_get_property("expander-size") + table.style_get_property("horizontal-separator") // 2
+        spacer.set_fixed_size(depth * (step + table.get_level_indentation()), 0)
 
 
 def _status_icon(_column, cell, model, row, status):
@@ -378,13 +391,13 @@ class AccessView(Gtk.Box):
             self.TITLES, (138, 138, 122, 106, 109, 106, 119),
             status=(self.STATUS, ACCESS_STATES), muted_columns=(0, 1), expand_columns=(2, 3, 4, 5),
             time_columns={0: self.REQUESTED_TIME, 1: self.LAST_USED_TIME},
-            text_renderers={self.IDENTITY: AccessIdentityRenderer}, sort_group=self.REVIEW_GROUP,
-            replace_rows=replace_tree_rows,
+            text_renderers={self.IDENTITY: AccessIdentityRenderer}, indent_rows=True,
+            sort_group=self.REVIEW_GROUP, replace_rows=replace_tree_rows,
         )
         self.table.set_enable_tree_lines(True)
         self.table.set_expander_column(self.table.get_column(0))
         identity = self.table.get_column(self.IDENTITY)
-        identity.set_cell_data_func(identity.get_cells()[0], self._scope_label)
+        identity.set_cell_data_func(identity.get_cells()[-1], self._scope_label)
         self.table.connect_after("draw", self._draw_scope_labels)
         self.table.connect("row-activated", self._open)
         attach_row_context(self.table, self._context, destructive_labels=(self.REMOVE,))
@@ -978,10 +991,10 @@ class ActivityView(Gtk.Box):
         self.pack_start(self.filter_panel, False, False, 0)
         self.table, scroll = pane_table(
             Gtk.TreeStore(*([str] * (self.ACTION_ICON + 1)), object, object, object), self.TITLES,
-            (144, 144, 110, 78, 86, 84, 166), status=(self.OUTCOME, ACTIVITY_STATES),
+            (144, 144, 110, 78, 86, 84, 180), status=(self.OUTCOME, ACTIVITY_STATES),
             expand_columns=(1, 2, 3, 4, 5), muted_columns=(0,), time_columns={0: self.TIME},
             icon_columns={self.ACTION: self.ACTION_ICON}, full_text_columns=(self.OUTCOME,),
-            replace_rows=replace_tree_rows,
+            indent_rows=True, replace_rows=replace_tree_rows,
         )
         self.table.set_enable_tree_lines(True)
         self.table.set_expander_column(self.table.get_column(0))

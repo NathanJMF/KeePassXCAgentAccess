@@ -329,6 +329,7 @@ def main(root):
             if not first_locked:
                 assert not table.row_expanded(token.path)
             table.expand_row(token.path, False)
+            check_child_indentation(table, token, next(token.iterchildren()))
 
             def scope_label(path):
                 vault, *groups, entry = path
@@ -413,10 +414,25 @@ def main(root):
             for column in table.get_columns():
                 if column.get_title() not in titles:
                     continue
-                cell, = column.get_cells()
                 column.cell_set_cell_data(row.model, row.iter, False, False)
-                _, required = cell.get_preferred_width(table)
+                required = sum(cell.get_preferred_width(table)[1] for cell in column.get_cells()
+                               if cell.get_visible())
                 assert column.get_width() >= required, (column.get_title(), column.get_width(), required)
+
+        def check_child_indentation(table, parent, child):
+            expander = table.get_expander_column()
+            parent_area = table.get_cell_area(parent.path, expander)
+            child_area = table.get_cell_area(child.path, expander)
+            expected = parent_area.width - child_area.width
+            assert expected > 0
+            for column in table.get_columns():
+                if column == expander:
+                    continue
+                spacer = column.get_cells()[0]
+                column.cell_set_cell_data(parent.model, parent.iter, False, False)
+                assert not spacer.get_visible(), column.get_title()
+                column.cell_set_cell_data(child.model, child.iter, False, False)
+                assert spacer.get_visible() and spacer.get_fixed_size()[0] == expected, column.get_title()
 
         def browse_positions(vault, group=""):
             select_tree(vault, group)
@@ -1409,18 +1425,20 @@ def main(root):
                 table.row_activated(token_summary.path, table.get_column(0))
                 assert table.row_expanded(token_summary.path)
                 pending = activity_leaf(token_events[-1]["id"])
+                check_child_indentation(table, token_summary, pending)
                 action_column = table.get_column(view.ACTION)
-                action_icon, action_text = action_column.get_cells()
+                _, action_icon, action_text = action_column.get_cells()
                 action_column.cell_set_cell_data(pending.model, pending.iter, False, False)
                 assert action_icon.get_property("icon-name") == "dialog-question-symbolic"
                 assert action_text.get_property("text") == "Request token"
                 wait_for_paint(table)
                 outcome_column = table.get_column(view.OUTCOME)
                 outcome_column.cell_set_cell_data(pending.model, pending.iter, False, False)
-                outcome_icon, outcome_text = outcome_column.get_cells()
+                outcome_indent, outcome_icon, outcome_text = outcome_column.get_cells()
                 assert outcome_icon.get_property("icon-name") == "appointment-soon-symbolic"
                 assert outcome_text.get_property("text") == "Pending approval"
-                required = sum(cell.get_preferred_width(table)[1] for cell in (outcome_icon, outcome_text))
+                required = sum(cell.get_preferred_width(table)[1]
+                               for cell in (outcome_indent, outcome_icon, outcome_text))
                 assert outcome_column.get_width() >= required, (outcome_column.get_width(), required)
                 table.row_activated(token_summary.path, table.get_column(0))
                 assert not table.row_expanded(token_summary.path)
