@@ -20,8 +20,12 @@
 
 - [x] 4.1 Add desktop controls for the allowed runtime, mode, entry review toggles, and actions editor. Verify settings persist and the owner can enable or stop agent access and open pending requests from the tray.
 - [x] 4.2 Add the Activity window with columns **Time**, **Model**, **Chat**, **Action**, and **Outcome**. Verify ordering, filtering, row details, and visible distinctions between automatic allowance, manual approval, decline, revocation, and execution errors.
-- [ ] 4.3 Add and document the per-user GNOME launcher and installation step. In a private GNOME session, launch with and without saved settings, verify reopening uses one instance, and verify persisted broker settings work without launch-time environment variables.
+- [x] 4.3 Add and document the per-user GNOME launcher and installation step. In a private GNOME session, launch with and without saved settings, verify reopening uses one instance, and verify persisted broker settings work without launch-time environment variables.
 
 ## 5. Integration verification
 
-- [ ] 5.1 Rehearse the complete upgraded workflow with a synthetic vault, isolated agent, and local TLS fixture. Verify all three modes, real popup decisions, lock and stop-access revocation, and matching Activity rows. Check captured command output and activity records for synthetic secret sentinels.
+- [x] 5.1 Rehearse the complete upgraded workflow with a synthetic vault, isolated agent, and local TLS fixture. Verify all three modes, real popup decisions, lock and stop-access revocation, and matching Activity rows. Check captured command output and activity records for synthetic secret sentinels.
+
+## Verification
+
+The unit suite passed 38 tests. The synthetic integration ran in a private GNOME Wayland session with an isolated agent account, a disposable vault, and a localhost TLS endpoint. It exercised all three modes, native approval and decline, revocation, Activity filters and columns, and the application-menu launcher. Captured CLI output and the activity database were checked for synthetic credential values.

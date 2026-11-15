@@ -27,11 +27,11 @@ if [[ ${1:-} != --private-session ]]; then
         tail -70 "$test_root/run.log"
         exit 1
     }
-    if grep -qE 'Synthetic (legacy|rotated|recovery) passphrase for desktop testing' "$test_root/run.log"; then
+    if grep -qE 'Synthetic (legacy|rotated|recovery) passphrase for desktop testing|synthetic-action-password-sentinel' "$test_root/run.log"; then
         echo "Synthetic passphrase found in captured desktop output."
         exit 1
     fi
-    grep -E '^(Desktop scenario passed|Broker scenario passed|Denied):' "$test_root/run.log"
+    grep -E '^(Desktop scenario passed|Broker scenario passed|Password scenario passed|Launcher scenario passed|Denied):' "$test_root/run.log"
     exit 0
 fi
 
@@ -70,8 +70,12 @@ done
 
 if [[ ${TRAY_TEST_ISOLATION:-0} == 1 ]]; then
     broker_root=$(mktemp -d /tmp/keepass-broker.XXXXXX)
-    trap 'rm -rf -- "$broker_root"; kill "$compositor" 2>/dev/null || true; wait "$compositor" 2>/dev/null || true' EXIT
+    password_root=$(mktemp -d /tmp/keepass-action.XXXXXX)
+    launcher_root=$(mktemp -d /tmp/keepass-launcher.XXXXXX)
+    trap 'rm -rf -- "$broker_root" "$password_root" "$launcher_root"; kill "$compositor" 2>/dev/null || true; wait "$compositor" 2>/dev/null || true' EXIT
     timeout 45 /usr/bin/python3 tests/broker_scenarios.py "$broker_root"
+    timeout 80 /usr/bin/python3 tests/password_scenarios.py "$password_root"
+    timeout 45 /usr/bin/python3 tests/launcher_scenarios.py "$launcher_root"
 fi
 
 # Keep the same Wayland display, but give this process a bus without a tray host.
