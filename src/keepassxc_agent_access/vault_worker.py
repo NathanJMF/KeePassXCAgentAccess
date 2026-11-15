@@ -11,7 +11,7 @@ from threading import Thread
 from .access_settings import ActionType
 from .entry_projection import active_entry, entry_listing, owner_snapshot
 from .https_action import authenticate, failure, prepare_https
-from .protocol import encode
+from .protocol import RESPONSE_LIMIT, encode
 from .vault_edits import EDIT_LIMIT, EditError, database_file, file_stamp, stage_edit
 
 
@@ -55,6 +55,7 @@ def load_vault():
                 response = encode({"error": "save_failed"})
             finally:
                 data.pop("password", None)
+                data.pop("notes", None)
             reply(response)
             continue
         if data["operation"] == "owner_snapshot":
@@ -66,10 +67,23 @@ def load_vault():
         entry, metadata = active_entry(vault, data["entry"])
         if data["operation"] == "entry":
             reply(encode({"entry": metadata}))
+        elif data["operation"] == "owner_entry_notes":
+            reply(entry_notes_frame(entry))
         elif data["operation"] == "use_password":
             use(entry, data["url"], ActionType(data["kind"]))
         else:
             return
+
+
+def entry_notes_frame(entry):
+    if entry is None:
+        return encode({"error": "unavailable"})
+    notes = entry.notes or ""
+    if len(notes) <= RESPONSE_LIMIT:
+        frame = encode({"notes": notes})
+        if len(frame) <= RESPONSE_LIMIT:
+            return frame
+    return encode({"error": "too_large"})
 
 
 def reply(data):

@@ -13,7 +13,7 @@ from .entry_projection import active_entry, active_group, owner_snapshot
 from .protocol import RESPONSE_LIMIT, decode, encode
 
 
-EDIT_LIMIT = 64 * 1024
+EDIT_LIMIT = RESPONSE_LIMIT
 EDIT_TIMEOUT = 30
 
 
@@ -34,8 +34,8 @@ def database_file(path):
         yield database
 
 
-def edit_text(value, *, required=False):
-    if not isinstance(value, str) or len(value) > 4096 or required and not value.strip():
+def edit_text(value, *, required=False, limit=4096):
+    if not isinstance(value, str) or len(value) > limit or required and not value.strip():
         raise EditError("invalid")
     # Match the XML character range that the KeePass format can preserve.
     if not all(char in "\t\n\r" or 0x20 <= ord(char) <= 0xD7FF
@@ -65,6 +65,9 @@ def _put_entry(vault, request):
     title = edit_text(request["title"], required=True)
     username = edit_text(request["username"])
     url = edit_text(request["url"])
+    notes = request.get("notes")
+    if notes is not None:
+        notes = edit_text(notes, limit=EDIT_LIMIT)
     password = request["password"]
     if request.get("generate_password"):
         if request["entry"] is None or password is not None:
@@ -73,16 +76,21 @@ def _put_entry(vault, request):
     if password is not None:
         password = edit_text(password)
     if request["entry"] is None:
-        return vault.add_entry(destination, title, username, password or "", url=url, force_creation=True).uuid
+        return vault.add_entry(
+            destination, title, username, password or "", url=url, notes=notes, force_creation=True,
+        ).uuid
 
     entry = _entry(vault, request["entry"])
-    if (entry.title or "", entry.username or "", entry.url or "") != (title, username, url) or (
-        password is not None and password != (entry.password or "")
-    ):
+    metadata_changed = (entry.title or "", entry.username or "", entry.url or "") != (title, username, url)
+    password_changed = password is not None and password != (entry.password or "")
+    notes_changed = notes is not None and notes != (entry.notes or "")
+    if metadata_changed or password_changed or notes_changed:
         entry.save_history()
         entry.title, entry.username, entry.url = title, username, url
         if password is not None:
             entry.password = password
+        if notes_changed:
+            entry.notes = notes
         entry.touch(modify=True)
     if entry.group.uuid != destination.uuid:
         vault.move_entry(entry, destination)

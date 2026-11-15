@@ -12,6 +12,7 @@ from uuid import UUID
 from pykeepass import PyKeePass, create_database
 
 from keepassxc_agent_access import vault_edits
+from keepassxc_agent_access.protocol import RESPONSE_LIMIT
 from keepassxc_agent_access.vault import VaultChanged, VaultError, VaultTarget, open_vault
 from keepassxc_agent_access.workspace import Workspace
 
@@ -88,6 +89,49 @@ class VaultEditsTests(unittest.TestCase):
         inner_before = self.fixture.kdbx.body.payload.inner_header
         inner_after = current.kdbx.body.payload.inner_header
         self.assertNotEqual(inner_before.protected_stream_key.data, inner_after.protected_stream_key.data)
+
+    def test_owner_notes_are_saved_and_read_privately(self):
+        vault = self._open()
+        existing = str(self.entry.uuid)
+        self.assertEqual(self.workspace.entry_notes(vault, existing), "Preserve notes")
+        notes = "First line <tag> & more\nSecond line — café"
+        created = self.workspace.put_entry(vault, None, title="With notes", notes=notes)
+        self.assertEqual(self.workspace.entry_notes(vault, created), notes)
+
+        with self.assertRaisesRegex(VaultError, "invalid"):
+            self.workspace.put_entry(vault, None, title="With notes", entry=created, notes="invalid\x00note")
+        self.assertEqual(self.workspace.entry_notes(vault, created), notes)
+        owner_session = self.workspace.owner_session(vault)
+        self.assertNotIn("notes", owner_session.worker.scoped_entries([created])["entries"][0])
+        self.assertTrue(all("notes" not in row for row in owner_session.entries))
+
+        self.workspace.put_entry(vault, None, title="With notes", entry=created, notes="")
+        self.assertEqual(self.workspace.entry_notes(vault, created), "")
+        saved = PyKeePass(self.path, password=self.unlock, keyfile=str(self.key))
+        entry = saved.find_entries(uuid=UUID(created), first=True)
+        self.assertEqual(entry.history[0].notes, notes)
+        self.assertFalse(entry.notes)
+
+        self.workspace.lock(vault)
+        with self.assertRaisesRegex(VaultError, "Unlock the vault"):
+            self.workspace.entry_notes(vault, created)
+        self.workspace.unlock(vault, self.unlock)
+        self.assertEqual(self.workspace.entry_notes(vault, created), "")
+
+    def test_oversized_existing_notes_remain_intact_during_unrelated_edits(self):
+        self.entry.notes = "X" * RESPONSE_LIMIT
+        self.fixture.save()
+        vault = self._open()
+        existing = str(self.entry.uuid)
+        self.assertIsNone(self.workspace.entry_notes(vault, existing))
+        self.assertEqual(self.workspace.put_entry(
+            vault, None, title="Changed title", username=self.entry.username, entry=existing,
+        ), existing)
+        self.assertIsNone(self.workspace.entry_notes(vault, existing))
+        saved = PyKeePass(self.path, password=self.unlock, keyfile=str(self.key))
+        entry = saved.find_entries(uuid=self.entry.uuid, first=True)
+        self.assertEqual(entry.title, "Changed title")
+        self.assertTrue(entry.notes == self.entry.notes)
 
     def test_owner_deletes_entries_and_subtrees_permanently(self):
         group = self.fixture.add_group(self.fixture.root_group, "Group to delete")

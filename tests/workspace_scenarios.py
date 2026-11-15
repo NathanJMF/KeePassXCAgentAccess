@@ -117,7 +117,7 @@ def main(root):
                 "identity": f"Agent {profile}", "project": "Disposable project", "items": items,
             })
 
-        def drive_dialog(action, callback):
+        def drive_dialog(action, callback, *, opens_async=False):
             failures = []
 
             def fill():
@@ -132,6 +132,9 @@ def main(root):
 
             source = GLib.timeout_add(20, fill)
             action()
+            if opens_async:
+                wait_for(lambda: not GLib.MainContext.default().find_source_by_id(source) or not app.busy,
+                         "Waiting for a GTK dialog timed out")
             if GLib.MainContext.default().find_source_by_id(source):
                 GLib.source_remove(source)
                 raise AssertionError("Expected a GTK dialog")
@@ -281,6 +284,9 @@ def main(root):
             table.row_activated(path, next(column for column in table.get_columns() if column.get_title() == "Title"))
 
         def check_editors(vault):
+            original_notes = "Synthetic notes on line one\nSynthetic notes on line two"
+            updated_notes = original_notes + "\nUpdated in Keeper"
+
             def fill_group(dialog, name):
                 field = next(child for child in descendants(dialog) if child.get_name() == "group-name")
                 assert not any(child.get_name() == "group-location" for child in descendants(dialog))
@@ -288,7 +294,16 @@ def main(root):
                 dialog.response(Gtk.ResponseType.OK)
 
             def fields(dialog, title, create=False):
+                grid, = [child for child in descendants(dialog) if isinstance(child, Gtk.Grid)]
+                captions = sorted((grid.child_get_property(child, "top-attach"), child.get_text())
+                                  for child in grid.get_children() if isinstance(child, Gtk.Label))
+                assert [label for _, label in captions] == ["Group", "Title", "URL", "Username", "Password", "Notes"]
                 controls = {child.get_name(): child for child in descendants(dialog) if isinstance(child, Gtk.Entry)}
+                notes = next(child for child in descendants(dialog) if child.get_name() == "entry-notes")
+                assert isinstance(notes, Gtk.TextView)
+                buffer = notes.get_buffer()
+                assert buffer.get_text(*buffer.get_bounds(), True) == ("" if create else original_notes)
+                buffer.set_text(original_notes if create else updated_notes)
                 controls["entry-title"].set_text(title)
                 controls["entry-username"].set_text("fixture-editor")
                 controls["entry-url"].set_text("https://fixture.example.test/new")
@@ -314,8 +329,9 @@ def main(root):
             wait_for(lambda: not app.busy, "Creating an entry timed out")
             entry, = app.entry_rows.values()
             assert entry["title"] == "Created entry"
-            assert "password" not in entry
-            drive_dialog(lambda: edit_entry(app, vault, group, entry), lambda dialog: fields(dialog, "Edited entry"))
+            assert "password" not in entry and "notes" not in entry
+            drive_dialog(lambda: edit_entry(app, vault, group, entry), lambda dialog: fields(dialog, "Edited entry"),
+                         opens_async=True)
             wait_for(lambda: not app.busy, "Editing an entry timed out")
             edited, = app.entry_rows.values()
             assert edited["id"] == entry["id"] and edited["title"] == "Edited entry"
@@ -327,6 +343,8 @@ def main(root):
             owner = PyKeePass(target.database, password=UNLOCK, keyfile=str(target.key_file))
             actual = owner.find_entries(uuid=UUID(entry["id"]), first=True)
             assert actual and actual.title == "Edited entry" and actual.password == EDIT_PASSWORD
+            assert actual.notes == updated_notes
+            assert original_notes.encode() not in old_activity.path.read_bytes()
 
             def decide(response):
                 def check(dialog):

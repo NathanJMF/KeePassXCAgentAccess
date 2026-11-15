@@ -236,9 +236,25 @@ class Workspace:
         session = self.sessions.get(identifier)
         return session if session and session.worker.available else None
 
-    def put_entry(self, identifier, parent, *, title, username="", url="", password=None, entry=None):
+    def entry_notes(self, identifier, entry):
+        """Read one active entry’s notes, or return None if the text exceeds the worker response limit."""
+        with self.mutex:
+            session = self.owner_session(identifier)
+            if session is None:
+                raise VaultError("Unlock the vault before reading entry notes.")
+            if identifier in self.editing or identifier in self.opening:
+                raise VaultError("This vault is already being opened or edited.")
+            if not any(row["id"] == entry for row in session.entries):
+                raise VaultError("The entry is unavailable.")
+        notes = session.worker.owner_entry_notes(entry)
+        with self.mutex:
+            if self.owner_session(identifier) is not session:
+                raise VaultError("The vault changed while loading the entry notes. Try again.")
+        return notes
+
+    def put_entry(self, identifier, parent, *, title, username="", url="", password=None, notes=None, entry=None):
         return self._edit(identifier, "put_entry", parent=parent, title=title,
-                          username=username, url=url, password=password, entry=entry)
+                          username=username, url=url, password=password, notes=notes, entry=entry)
 
     def remove_entry(self, identifier, entry):
         return self._edit(identifier, "remove_entry", entry=entry)

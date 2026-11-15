@@ -24,8 +24,10 @@ def _require_name(dialog, field):
     validate()
 
 
-def _field(grid, row, label, widget):
-    caption = Gtk.Label(label=label, xalign=0, mnemonic_widget=widget, use_underline=True)
+def _field(grid, row, label, widget, *, focus=None):
+    caption = Gtk.Label(label=label, xalign=0, mnemonic_widget=focus or widget, use_underline=True)
+    if focus is not None:
+        caption.set_valign(Gtk.Align.START)
     widget.set_hexpand(True)
     grid.attach(caption, 0, row, 1, 1)
     grid.attach(widget, 1, row, 1, 1)
@@ -62,14 +64,24 @@ def _locations(app, vault, current):
 def edit_entry(app, vault, group, entry=None):
     if app.busy or app.desktop.locked or not app.workspace.owner_session(vault):
         return
+    if entry is None:
+        _entry_form(app, vault, group, None, "")
+        return
+    app._background(lambda: app.workspace.entry_notes(vault, entry["id"]),
+                    after=lambda notes: _entry_form(app, vault, group, entry, notes))
+
+
+def _entry_form(app, vault, group, entry, saved_notes):
+    if not app.workspace.owner_session(vault):
+        return
     dialog, grid = _form(app, "Edit entry" if entry else "New entry")
+    root, location = _locations(app, vault, entry["group"] if entry else group)
+    _field(grid, 0, "_Group", location)
     fields = {}
-    for index, (name, label) in enumerate((("title", "_Title"), ("username", "_Username"), ("url", "_URL"))):
+    for index, (name, label) in enumerate((("title", "_Title"), ("url", "U_RL"), ("username", "_Username")), 1):
         control = Gtk.Entry(text=entry[name] if entry else "", activates_default=True)
         control.set_name(f"entry-{name}")
         fields[name] = _field(grid, index, label, control)
-    root, location = _locations(app, vault, entry["group"] if entry else group)
-    _field(grid, 3, "_Group", location)
 
     change_password = Gtk.CheckButton(label="Replace saved password", no_show_all=not bool(entry))
     grid.attach(change_password, 1, 4, 1, 1)
@@ -78,6 +90,21 @@ def edit_entry(app, vault, group, entry=None):
     password.set_placeholder_text("Entry password")
     password.set_sensitive(entry is None)
     _field(grid, 5, "_Password", password)
+
+    notes = Gtk.TextView(wrap_mode=Gtk.WrapMode.WORD_CHAR, accepts_tab=False,
+                         left_margin=8, right_margin=8, top_margin=6, bottom_margin=6)
+    notes.set_name("entry-notes")
+    notes_buffer = notes.get_buffer()
+    if saved_notes is None:
+        notes.set_editable(False)
+        notes.set_cursor_visible(False)
+        notes_buffer.set_text("These notes are too large to display.")
+    else:
+        notes_buffer.set_text(saved_notes)
+    notes_scroll = Gtk.ScrolledWindow(vexpand=True, min_content_height=90, shadow_type=Gtk.ShadowType.IN)
+    notes_scroll.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+    notes_scroll.add(notes)
+    _field(grid, 6, "_Notes", notes_scroll, focus=notes)
 
     def change(box):
         password.set_sensitive(box.get_active())
@@ -90,13 +117,19 @@ def edit_entry(app, vault, group, entry=None):
     response = app.run_dialog(dialog)
     updated_password = password.get_text() if entry is None or change_password.get_active() else None
     password.set_text("")
+    updated_notes = None
+    if response == Gtk.ResponseType.OK and saved_notes is not None:
+        value = notes_buffer.get_text(*notes_buffer.get_bounds(), True)
+        if entry is None or value != saved_notes:
+            updated_notes = value
+    notes_buffer.set_text("")
     if response != Gtk.ResponseType.OK:
         return
     destination = location.get_active_id()
     values = {name: field.get_text() for name, field in fields.items()}
     app._background(
         lambda: app.workspace.put_entry(vault, destination, **values, password=updated_password,
-                                        entry=entry["id"] if entry else None),
+                                        notes=updated_notes, entry=entry["id"] if entry else None),
         after=lambda _: app._show_group(vault, "" if destination == root else destination),
     )
 

@@ -112,6 +112,19 @@ class VaultSession:
         except (ListingError, ValueError):
             raise VaultError("Could not load the vault groups and entries.") from None
 
+    def owner_entry_notes(self, identifier):
+        request = encode({"operation": "owner_entry_notes", "entry": identifier})
+        try:
+            with self._exchange(request, WORKER_TIMEOUT) as read:
+                response = decode(read())
+                if isinstance(response.get("notes"), str):
+                    return response["notes"]
+                if response.get("error") == "too_large":
+                    return None
+        except (ListingError, ValueError, AttributeError):
+            pass
+        raise VaultError("Could not load the entry notes.")
+
     def owner_edit(self, change, gate):
         request = encode({"operation": "owner_edit", **change})
         if len(request) > EDIT_LIMIT:
