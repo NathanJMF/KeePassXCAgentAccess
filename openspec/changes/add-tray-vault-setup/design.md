@@ -20,24 +20,26 @@ Agent registration, approval modes, activity history, credential delivery, and e
 
 ### Use an owner-side desktop process
 
-Run the tray, setup dialogs, keyring access, and read-only KeePass adapter in the trusted desktop session. Keep the vault session behind the adapter, with one place to close it on lock or shutdown. A future broker endpoint can accept narrowly scoped requests without exposing the adapter or administrative controls. An agent deployment uses an isolated account or sandbox with access to approved workspaces and only the endpoints that are explicitly exposed to it.
+Run the tray, setup dialogs, keyring access, and read-only KeePass adapter in the owner's Ubuntu GNOME Wayland session. Keep the vault session behind the adapter, with one place to close it on lock or shutdown. Run the supported agent runtime under a separate, unprivileged OS account with access to approved workspaces. Keep the owner-side vault, optional key file, session endpoints, and administrative controls inaccessible to that account. A future broker endpoint can grant the account narrowly scoped access to approved operations.
 
-An unlocked desktop keyring is accessible according to the platform's session permissions. The isolation test must show that the supported agent runtime cannot reach the database or key file, desktop session bus, UI controls, or owner process memory. Privileged processes on the host are outside this deployment boundary. [Secret Service access control](https://specifications.freedesktop.org/secret-service/latest/ch10.html)
+An unlocked desktop keyring is accessible according to the platform's session permissions. Test from the separate account while the owner session and vault are unlocked. Check access to the database and key file, the owner's session bus and keyring, the Wayland socket and desktop controls, and owner process memory. The guarantee applies to this deployment and assumes the agent account cannot elevate to the owner or root. [Secret Service access control](https://specifications.freedesktop.org/secret-service/latest/ch10.html)
 
 ### Use the system keyring for remembered passwords
 
 On Linux, use the desktop's Secret Service provider. Store a random item identifier with local vault settings and use it to address the keyring item. Keep file locations and keyring references in owner-only local settings. Store the password in the keyring only after the proposed configuration opens the database. Report save success after settings and the keyring item are both usable. Preserve the previous configuration on failure and clean up any unreferenced item created during the failed attempt. A failed keyring write leaves the owner with the retry and session-only paths.
 
+When replacing a saved password or switching to session-only use, save the new configuration together with the IDs of obsolete app-owned items that still need deletion. Start deletion after that save succeeds. Persist pending deletions across restarts and let the owner retry them from Settings. Unlock only uses the active item. **Forget saved password** first locks the vault and marks the active item for removal, then deletes that item and retries any pending removals before reporting that the password was forgotten.
+
 Treat password entry and saved-password retrieval as transient. Discard plaintext input once the backend has opened the vault, using the backend's session state for the rest of the unlock. Closing that session drops its keys and decrypted state. Manual desktop entry is the recovery path if the keyring is unavailable or the password has changed. An optional key file remains a separate owner-side file.
 
 ### Use a tray state that reflects actual vault availability
 
-Target AppIndicator or StatusNotifierItem on supported Linux desktops. Keep the setup window available as the fallback where a tray is unavailable. Derive the visible state from the vault controller. Route tray actions, desktop lock notifications, and shutdown through that controller. An unlock finishing after a lock or quit event must have its result discarded and any opened session closed. [AppIndicator support](https://github.com/ubuntu/gnome-shell-extension-appindicator)
+Use Ubuntu GNOME on Wayland with AppIndicator support enabled as the first tray and session-lock test environment. Keep the setup window available where a tray is unavailable. Derive the visible state from the vault controller. Route tray actions, desktop lock notifications, and shutdown through that controller. An unlock finishing after a lock or quit event must have its result discarded and any opened session closed. [AppIndicator support](https://github.com/ubuntu/gnome-shell-extension-appindicator)
 
 ## Risks / Trade-offs
 
 - **Locked keyring or changed vault password.** Show why the vault stayed locked and offer a verified manual unlock. The owner can save a replacement only after the new password works.
-- **Interrupted keyring or settings update.** Track partial saves and offer cleanup on the next launch. If keyring deletion fails, keep the vault locked and show that removal still needs attention.
+- **Interrupted keyring or settings update.** Track partial saves and surface pending deletion on the next launch. A failed deletion leaves the item disabled for unlock and available for a cleanup retry in Settings.
 - **Unavailable desktop session signals.** Document the supported desktop baseline and verify lock and logout behavior on it before release.
 - **Earlier copies of the database.** Rotate the old password in KeePassXC and review backups separately. Older copies can still open with the credential in use when they were created.
 

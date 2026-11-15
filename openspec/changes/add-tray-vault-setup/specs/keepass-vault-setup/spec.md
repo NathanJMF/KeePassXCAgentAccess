@@ -38,17 +38,37 @@ The app SHALL persist a database password only in the OS keyring and only after 
 - **WHEN** the keyring denies or cancels retrieval, the item is missing, or the saved password no longer opens the vault
 - **THEN** the vault stays locked and the app shows a recovery path to retry or enter and verify the current password
 
+### Requirement: Remove obsolete app-owned keyring items
+
+The app SHALL preserve the active saved credential until a replacement or session-only configuration is committed. It SHALL remove obsolete app-owned items after the commit. If removal fails, the app SHALL keep those items ineligible for unlock, show cleanup as pending across restarts, and let the owner retry from Settings.
+
+#### Scenario: Replace a saved password
+- **WHEN** the owner successfully saves a verified replacement password
+- **THEN** the app uses the replacement for subsequent unlocks and removes the obsolete item
+
+#### Scenario: Switch an existing configuration to session-only use
+- **WHEN** the owner successfully switches from a saved password to session-only use
+- **THEN** the app removes the former saved item and asks for the password on the next unlock
+
+#### Scenario: Commit a configuration change fails
+- **WHEN** the app cannot save the replacement or session-only configuration
+- **THEN** the previously saved configuration and its active item remain available
+
+#### Scenario: Obsolete item deletion fails after save
+- **WHEN** the keyring rejects obsolete item deletion after the configuration is saved
+- **THEN** the new configuration stays active and Settings shows pending cleanup after restart until deletion succeeds
+
 ### Requirement: Forget the saved password
 
-The app SHALL provide a desktop action to remove its saved password from the OS keyring and lock the vault. It SHALL report whether removal succeeded.
+The app SHALL lock the vault and disable the active saved item for unlock when the owner selects **Forget saved password**. It SHALL report success after the active item and any pending obsolete items have been removed or confirmed absent.
 
 #### Scenario: Removal succeeds
-- **WHEN** the owner selects **Forget saved password** and the item is removed or already absent
+- **WHEN** the owner selects **Forget saved password** and the active item and all pending obsolete items are deleted or already absent
 - **THEN** the vault is locked, the app shows the password as unsaved, and the next unlock requires password entry
 
 #### Scenario: Removal fails
 - **WHEN** the OS keyring rejects deletion
-- **THEN** the vault is locked and the app reports that the saved password may still exist and offers a retry
+- **THEN** the vault is locked, the next unlock requires password entry, and the app reports pending cleanup and offers a retry
 
 ### Requirement: Verify keyring cutover before retiring plaintext
 
@@ -64,10 +84,10 @@ The app SHALL provide a desktop way to verify a fresh unlock from the keyring an
 
 ### Requirement: Keep unlock material in the owner session
 
-The app SHALL confine unlock credentials to the owner-side setup, keyring, and vault backend. Agent runtime permissions SHALL exclude direct access to the owner's vault files, keyring session, broker memory, and desktop controls. Passwords SHALL be absent from configuration, logs, command arguments, and exported results.
+The app SHALL confine unlock credentials to the owner-side setup, keyring, and vault backend. The supported deployment SHALL run agents under a separate, unprivileged OS account and deny that account direct access to the owner's vault files, keyring session, process memory, and desktop controls. Passwords SHALL be absent from configuration, logs, command arguments, and exported results.
 
 #### Scenario: Inspect a configured deployment from the agent runtime
-- **WHEN** a process in the supported isolated agent runtime attempts to read the vault files, retrieve the OS keyring item, inspect the owner process, or use its desktop controls
+- **WHEN** a process under the separate agent account attempts to read the vault or key file, retrieve the OS keyring item, inspect the owner process, or use its desktop controls while the owner's desktop and vault are unlocked
 - **THEN** the deployment denies those attempts
 
 #### Scenario: Check local data for plaintext after setup

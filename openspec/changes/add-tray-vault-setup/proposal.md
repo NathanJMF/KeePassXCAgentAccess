@@ -6,10 +6,11 @@ A plaintext unlock file lets any process with read access attempt to open the Ke
 
 ## What Changes
 
-- Add a Linux system tray app with a setup or settings window, visible vault lock status, and explicit unlock and lock actions.
+- Add a system tray app for Ubuntu GNOME on Wayland with a setup or settings window, visible vault lock status, and explicit unlock and lock actions.
 - Add first-run setup for one existing KeePass database, with an optional key file. Verify the supplied unlock credentials before completing setup.
-- Offer **Remember on this device** to save the verified password in the OS keyring. Support unlocking from the tray after restart and forgetting the saved password from Settings.
+- Offer **Remember on this device** to save the verified password in the OS keyring. Support unlocking after restart, forgetting the saved password, and cleaning up obsolete items when replacing a password or switching to session-only use.
 - Provide a guided cutover that verifies a fresh unlock using the keyring before the owner retires the legacy plaintext file. Keep the vault and unlock material behind the owner-side process boundary.
+- Use a separate, unprivileged OS account for the first supported agent runtime and verify that it cannot directly reach the owner-side vault or desktop session.
 
 ## Capabilities
 

@@ -8,7 +8,7 @@ Give the desktop owner a persistent place to see vault status and start or end a
 
 ### Requirement: Show vault status in the system tray
 
-The Linux desktop app SHALL provide a system tray item on supported desktops. It SHALL indicate whether setup is required or the vault is locked or unlocked, and expose the actions appropriate to the current state.
+The desktop app SHALL provide a system tray item on Ubuntu GNOME on Wayland with AppIndicator support enabled. It SHALL indicate whether setup is required or the vault is locked or unlocked, and expose the actions appropriate to the current state.
 
 #### Scenario: First launch
 - **WHEN** the app starts without a saved vault configuration
