@@ -711,6 +711,7 @@ def main(root):
                 assert app.window.get_visible()
                 assert app.window.get_title() == "Keeper"
                 assert app.workspace.paused and app.grants.rows() == []
+                assert app.indicator.get_icon() == "keeper-agent-access-paused"
                 assert old_activity.rows(action="Legacy fixture")[0]["token"] is None
                 first, = app.workspace.registrations
                 assert app.workspace.registrations[first].item == original_item
@@ -1115,6 +1116,7 @@ def main(root):
                 check_agent_edits(first, second)
                 app.tray_items["pause"].activate()
                 assert app.workspace.paused and app.workspace.session(second)
+                assert app.indicator.get_icon() == "keeper-agent-access-paused"
                 assert "paused" in invoke("beta", "entries", "list", expected=1)
                 listings = [row for row in old_activity.rows(agent="Agent beta", action="List entries")
                             if row["vault_id"] == second and row["chat_id"] == "test-chat"]
@@ -1125,6 +1127,7 @@ def main(root):
                 app.activity_view.refresh()
                 activity_group(same_scope, "Paused")
                 app.tray_items["pause"].activate()
+                assert app.indicator.get_icon() == "keeper-agent-access-active"
                 set_screen_active(True)
                 wait_for(lambda: app.desktop.locked and not app.workspace.sessions, "Desktop lock did not close both workers")
                 assert app.workspace.paused and "paused" in invoke("beta", "vaults", "list", expected=1)

@@ -37,6 +37,9 @@ from .workspace_views import (
 OWNER_ERRORS = (ActivityError, KeyringError, ListingError, OSError, SettingsError, ValueError, VaultError)
 ENTRY_FOLDER_COLUMN = 5
 ENTRY_ID_COLUMN = 6
+TRAY_ICON_DIRECTORY = Path(__file__).resolve().with_name("icons")
+TRAY_PAUSED_ICON = "keeper-agent-access-paused"
+TRAY_ACTIVE_ICON = "keeper-agent-access-active"
 
 
 class WorkspaceApplication(Gtk.Application):
@@ -298,8 +301,9 @@ class WorkspaceApplication(Gtk.Application):
             from gi.repository import AyatanaAppIndicator3
         except (ImportError, ValueError):
             return
-        self.indicator = AyatanaAppIndicator3.Indicator.new(
-            "keepassxc-agent-access", "changes-prevent", AyatanaAppIndicator3.IndicatorCategory.APPLICATION_STATUS,
+        self.indicator = AyatanaAppIndicator3.Indicator.new_with_path(
+            "keepassxc-agent-access", TRAY_PAUSED_ICON, AyatanaAppIndicator3.IndicatorCategory.APPLICATION_STATUS,
+            str(TRAY_ICON_DIRECTORY),
         )
         self.indicator.set_title(APP_TITLE)
         self.menu = Gtk.Menu()
@@ -376,7 +380,10 @@ class WorkspaceApplication(Gtk.Application):
                 self.tray_items["pause"].set_label(pause_label)
                 self.tray_items["pause"].set_sensitive(self.pause_button.get_sensitive())
                 self.tray_items["access"].set_label(access_label)
-                self.indicator.set_icon("changes-prevent" if paused else "changes-allow")
+                self.indicator.set_icon_full(
+                    TRAY_PAUSED_ICON if paused else TRAY_ACTIVE_ICON,
+                    "Agent access paused" if paused else "Agent access active",
+                )
             if self.stack.get_visible_child_name() == "access":
                 self.access_view.refresh()
             elif self.stack.get_visible_child_name() == "activity":
