@@ -1,0 +1,67 @@
+#!/bin/bash
+set -euo pipefail
+repo=$(cd -- "$(dirname -- "$0")/.." && pwd)
+cd "$repo"
+
+if [[ ${1:-} != --private-session ]]; then
+    test_root=$(mktemp -d)
+    cleanup() {
+        # Desktop helpers can leave these private FUSE mounts while exiting.
+        for directory in "$test_root/runtime/doc" "$test_root/runtime/gvfs"; do
+            if mountpoint -q "$directory" && command -v fusermount3 >/dev/null; then
+                fusermount3 -uz "$directory" 2>/dev/null || true
+            fi
+        done
+        rm -rf --one-file-system -- "$test_root"
+    }
+    trap cleanup EXIT
+    export HOME="$test_root" XDG_DATA_HOME="$test_root/data" XDG_CONFIG_HOME="$test_root/config"
+    export XDG_RUNTIME_DIR="$test_root/runtime" XDG_CACHE_HOME="$test_root/cache"
+    export PYTHONPATH="$repo/src${PYTHONPATH:+:$PYTHONPATH}"
+    export NO_AT_BRIDGE=1 LIBGL_ALWAYS_SOFTWARE=1 XDG_CURRENT_DESKTOP=ubuntu:GNOME
+    export GIO_USE_VFS=local GTK_USE_PORTAL=0 GVFS_DISABLE_FUSE=1
+    export GDK_BACKEND=wayland WAYLAND_DISPLAY=tray-test
+    unset DISPLAY XDG_SESSION_ID
+    mkdir -m 700 "$XDG_RUNTIME_DIR"
+    dbus-run-session -- "$repo/tests/run-linux-integration" --private-session > "$test_root/run.log" 2>&1 || {
+        tail -70 "$test_root/run.log"
+        exit 1
+    }
+    if grep -qE 'Synthetic (legacy|rotated|recovery) passphrase for desktop testing' "$test_root/run.log"; then
+        echo "Synthetic passphrase found in captured desktop output."
+        exit 1
+    fi
+    grep -E '^(Desktop scenario passed|Denied):' "$test_root/run.log"
+    exit 0
+fi
+
+gnome_settings=org.gnome.shell
+gsettings set "$gnome_settings" enabled-extensions '["ubuntu-appindicators@ubuntu.com"]'
+printf %s 'Synthetic keyring password' | gnome-keyring-daemon --unlock >/dev/null
+gnome-shell --mode=ubuntu --headless --no-x11 --virtual-monitor=1024x768 \
+    --wayland-display="$WAYLAND_DISPLAY" > "$HOME/compositor.log" 2>&1 &
+compositor=$!
+trap 'kill "$compositor" 2>/dev/null || true; wait "$compositor" 2>/dev/null || true' EXIT
+
+watcher_active() {
+    gdbus call --session --dest org.freedesktop.DBus --object-path /org/freedesktop/DBus \
+        --method org.freedesktop.DBus.NameHasOwner org.kde.StatusNotifierWatcher | grep -q true
+}
+
+for _ in {1..80}; do
+    if [[ -S "$XDG_RUNTIME_DIR/$WAYLAND_DISPLAY" ]] && watcher_active; then
+        break
+    fi
+    sleep .15
+done
+if ! watcher_active; then
+    tail -30 "$HOME/compositor.log"
+    exit 1
+fi
+
+for phase in configure verify recover; do
+    timeout 35 /usr/bin/python3 tests/desktop_scenarios.py "$phase" "$HOME"
+done
+
+# Keep the same Wayland display, but give this process a bus without a tray host.
+dbus-run-session -- timeout 20 /usr/bin/python3 tests/desktop_scenarios.py fallback "$HOME"

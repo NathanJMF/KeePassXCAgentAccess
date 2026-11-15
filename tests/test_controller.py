@@ -47,6 +47,7 @@ class ControllerTests(unittest.TestCase):
         thread.start()
         self.assertTrue(started.wait(2))
         controller.lock()
+        self.assertTrue(attempt.keyring_request.is_cancelled())
         finish.set()
         thread.join(2)
         self.assertTrue(cancelled.is_set())

@@ -1,8 +1,10 @@
 import hashlib
+import subprocess
 from pathlib import Path
 import tempfile
 from threading import Event
 import unittest
+from unittest.mock import patch
 
 from pykeepass import create_database
 
@@ -44,6 +46,21 @@ class VaultTests(unittest.TestCase):
         self.database.write_bytes(b"Synthetic invalid database")
         with self.assertRaisesRegex(VaultError, "could not be opened"):
             open_vault(VaultTarget(self.database), self.password, Event())
+
+    def test_worker_arguments_and_errors_exclude_passwords(self):
+        create_database(self.database, self.password)
+        target = VaultTarget(self.database)
+        wrong = "Synthetic wrong password"
+        with patch("keepassxc_agent_access.vault.subprocess.Popen", wraps=subprocess.Popen) as popen:
+            with open_vault(target, self.password, Event()):
+                pass
+            with self.assertRaises(VaultError) as error:
+                open_vault(target, wrong, Event())
+        for call in popen.call_args_list:
+            self.assertNotIn(self.password, repr(call))
+            self.assertNotIn(wrong, repr(call))
+            self.assertIs(call.kwargs["stderr"], subprocess.DEVNULL)
+        self.assertNotIn(wrong, str(error.exception))
 
     def test_cancelled_unlock(self):
         cancelled = Event()

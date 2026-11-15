@@ -3,6 +3,8 @@
 from enum import Enum
 from threading import Event, Lock
 
+from gi.repository import Gio
+
 from .vault import UnlockCancelled, open_vault
 
 
@@ -12,11 +14,21 @@ class VaultState(Enum):
     UNLOCKED = "Unlocked"
 
 
+class UnlockAttempt(Event):
+    def __init__(self):
+        super().__init__()
+        self.keyring_request = Gio.Cancellable()
+
+    def set(self):
+        super().set()
+        self.keyring_request.cancel()
+
+
 class VaultController:
     def __init__(self, opener=open_vault):
         self._opener = opener
         self._mutex = Lock()
-        self._attempt = Event()
+        self._attempt = UnlockAttempt()
         self._session = None
         self._source = None
 
@@ -35,7 +47,7 @@ class VaultController:
         """Issue a cancellation token before dispatching work to a thread."""
         with self._mutex:
             self._attempt.set()
-            self._attempt = Event()
+            self._attempt = UnlockAttempt()
             return self._attempt
 
     def verify(self, attempt, target, password):
