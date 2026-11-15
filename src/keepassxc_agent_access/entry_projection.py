@@ -28,11 +28,13 @@ def active_entry(vault, identifier):
     return (entry, row) if row is not None else (None, None)
 
 
-def entry_listing(vault):
+def entry_listing(vault, identifiers=None):
     recycle_id = _recycle_id(vault)
     output = bytearray(b'{"entries":[')
     separator = b""
     for entry in vault.entries:
+        if identifiers is not None and str(entry.uuid) not in identifiers:
+            continue
         projected = _project(entry, recycle_id)
         if projected is None:
             continue
@@ -44,3 +46,24 @@ def entry_listing(vault):
         separator = b","
     output.extend(b"]}\n")
     return bytes(output)
+
+def owner_snapshot(vault):
+    recycle_id = _recycle_id(vault)
+    def active(group):
+        while group is not None:
+            if group.uuid == recycle_id:
+                return False
+            group = group.parentgroup
+        return True
+
+    groups = [{"id": str(group.uuid), "name": group.name or "",
+               "parent": None if group.is_root_group else str(group.parentgroup.uuid)}
+              for group in vault.groups if active(group)]
+    entries = []
+    for entry in vault.entries:
+        row = _project(entry, recycle_id)
+        if row is not None:
+            entries.append(dict(row, group=str(entry.group.uuid),
+                                username=entry.username or "", url=entry.url or ""))
+    response = encode({"groups": groups, "entries": entries})
+    return response if len(response) <= RESPONSE_LIMIT else encode({"error": "too_large"})

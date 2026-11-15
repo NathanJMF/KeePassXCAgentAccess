@@ -2,7 +2,7 @@
 
 ## 1. Vault registry and workspace
 
-- [ ] 1.1 Add a versioned owner-side registry with local vault IDs, per-vault keyring references, and independent worker sessions. Verify migration of the existing registration, duplicate path aliases, two vaults with matching internal IDs, relinking, and keyring cleanup on removal.
+- [x] 1.1 Add a versioned owner-side registry with local vault IDs, per-vault keyring references, and independent worker sessions. Verify migration of the existing registration, duplicate path aliases, two vaults with matching internal IDs, relinking, and keyring cleanup on removal.
 - [ ] 1.2 Build the persistent vault and group tree, entry table, entry details, and bottom-right view controls. Verify nested navigation, direct entries, locked nodes, selection restoration, and locking one vault while the other stays usable.
 
 ## 2. Token enrollment and management

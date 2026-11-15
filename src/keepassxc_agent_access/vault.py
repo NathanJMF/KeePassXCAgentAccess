@@ -91,6 +91,22 @@ class VaultSession:
         with self._exchange(b"list_entries\n", WORKER_TIMEOUT) as read:
             return read()
 
+    def scoped_entries(self, entries):
+        request = encode({"operation": "scoped_entries", "entries": sorted(entries)})
+        with self._exchange(request, WORKER_TIMEOUT) as read:
+            return decode(read())
+
+    def owner_snapshot(self):
+        request = encode({"operation": "owner_snapshot"})
+        try:
+            with self._exchange(request, WORKER_TIMEOUT) as read:
+                snapshot = decode(read())
+                if "error" in snapshot:
+                    raise ListingError(snapshot["error"])
+                return snapshot
+        except (ListingError, ValueError):
+            raise VaultError("Could not load the vault groups and entries.") from None
+
     def entry(self, identifier):
         request = encode({"operation": "entry", "entry": identifier})
         with self._exchange(request, WORKER_TIMEOUT) as read:

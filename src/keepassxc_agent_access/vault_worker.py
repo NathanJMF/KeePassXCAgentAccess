@@ -8,7 +8,7 @@ from select import select
 import sys
 from threading import Thread
 
-from .entry_projection import active_entry, entry_listing
+from .entry_projection import active_entry, entry_listing, owner_snapshot
 from .https_action import authenticate, failure, prepare_https
 from .protocol import REQUEST_LIMIT, encode
 
@@ -34,6 +34,12 @@ def load_vault():
             reply(entry_listing(vault))
             continue
         data = json.loads(line)
+        if data["operation"] == "owner_snapshot":
+            reply(owner_snapshot(vault))
+            continue
+        if data["operation"] == "scoped_entries":
+            reply(entry_listing(vault, frozenset(data["entries"])))
+            continue
         entry, metadata = active_entry(vault, data["entry"])
         if data["operation"] == "entry":
             reply(encode({"entry": metadata}))
