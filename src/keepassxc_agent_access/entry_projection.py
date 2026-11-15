@@ -47,18 +47,24 @@ def entry_listing(vault, identifiers=None):
     output.extend(b"]}\n")
     return bytes(output)
 
+def _active_group(group, recycle_id):
+    while group is not None:
+        if group.uuid == recycle_id:
+            return False
+        group = group.parentgroup
+    return True
+
+
+def active_group(vault, identifier):
+    group = vault.find_groups(uuid=UUID(identifier), first=True)
+    return group if group is not None and _active_group(group, _recycle_id(vault)) else None
+
+
 def owner_snapshot(vault):
     recycle_id = _recycle_id(vault)
-    def active(group):
-        while group is not None:
-            if group.uuid == recycle_id:
-                return False
-            group = group.parentgroup
-        return True
-
     groups = [{"id": str(group.uuid), "name": group.name or "",
                "parent": None if group.is_root_group else str(group.parentgroup.uuid)}
-              for group in vault.groups if active(group)]
+              for group in vault.groups if _active_group(group, recycle_id)]
     entries = []
     for entry in vault.entries:
         row = _project(entry, recycle_id)

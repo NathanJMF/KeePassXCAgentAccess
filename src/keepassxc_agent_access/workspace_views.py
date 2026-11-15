@@ -5,6 +5,7 @@ from gi.repository import Gtk, Pango
 from .access_settings import Action
 from .activity import ActivityError
 from .owner_views import _dialog, _label, _scroll, _table, _time
+from .workspace_editor import edit_entry, recycle_entry
 from .workspace_style import styled
 
 
@@ -238,8 +239,13 @@ class ActivityView(Gtk.Box):
         self.app.run_dialog(dialog)
 
 
+EDIT_ENTRY_RESPONSE = 1
+RECYCLE_ENTRY_RESPONSE = 2
+
+
 def entry_details(app, vault, entry):
-    while app.workspace.session(vault) and not app.desktop.locked:
+    group = app.selection[1]
+    while app.workspace.owner_session(vault) and not app.desktop.locked and not app.busy:
         record = app.workspace.registrations[vault]
         dialog, body = _dialog(app, entry["title"] or "(Untitled entry)", 650, 390)
         dialog.set_modal(True)
@@ -247,6 +253,10 @@ def entry_details(app, vault, entry):
                            "Edit action", Gtk.ResponseType.ACCEPT, "Remove action", Gtk.ResponseType.REJECT)
         add_label(body, f"{record.name} · {' / '.join(entry['group_path']) or 'Root'}\nEntry  {entry['id']}")
         add_label(body, f"Username  {entry['username'] or '—'}\nURL  {entry['url'] or '—'}")
+        entry_actions = Gtk.Box(spacing=8)
+        button(entry_actions, "Edit entry…", lambda *_: dialog.response(EDIT_ENTRY_RESPONSE))
+        button(entry_actions, "Move entry to recycle bin…", lambda *_: dialog.response(RECYCLE_ENTRY_RESPONSE))
+        body.pack_start(entry_actions, False, False, 0)
         add_label(body, "Credential actions · HTTPS Basic-auth GET")
         store = Gtk.ListStore(str, str, str, str)
         for binding in record.bindings:
@@ -266,6 +276,12 @@ def entry_details(app, vault, entry):
         table.connect("row-activated", lambda *_: dialog.response(Gtk.ResponseType.ACCEPT))
         response = app.run_dialog(dialog)
         identifier = selected_key(table, 0)
+        if response == EDIT_ENTRY_RESPONSE:
+            edit_entry(app, vault, entry["group"], entry)
+            return
+        if response == RECYCLE_ENTRY_RESPONSE:
+            recycle_entry(app, vault, group, entry)
+            return
         if response == Gtk.ResponseType.REJECT and identifier:
             if app.confirm("Remove this action?", "Existing tokens will lose permission to run this binding."):
                 app.owner_operation(lambda: app.workspace.remove_binding(vault, entry["id"], identifier))

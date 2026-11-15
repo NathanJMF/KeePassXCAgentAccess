@@ -1,6 +1,6 @@
 # Keeper
 
-Keeper is a Linux tray app for browsing existing KeePass databases and granting agents access to specific entries and credential actions. The desktop opens KeePass files read-only and can independently remember each database password in the owner's OS keyring.
+Keeper is a Linux tray app for browsing existing KeePass databases and granting agents access to specific entries and credential actions. The desktop can edit KDBX 4 vaults and independently remember each database password in the owner's OS keyring.
 
 ## Run on Ubuntu GNOME
 
@@ -22,6 +22,12 @@ Run `./install-launcher` from the owner-controlled checkout to add **Keeper** to
 Use **Enter password…** to unlock manually or update a remembered password after rotating it in KeePassXC. **Forget password** deletes the app's saved credential. **Relink** checks the last verified contents of a moved vault before retaining its local identity and token scopes. **Remove…** removes the registration and its saved credential while keeping the database file.
 
 Existing installations retain their registered vault, keyring reference, broker admission settings, and Activity. Unlock the migrated vault to see its existing action bindings in entry details. Startup pauses agent access, and agent use requires an approved token.
+
+## Edit entries and groups
+
+Open an unlocked vault and use **New** to create an entry or group. Double-click an entry to edit it, move it to another group, or send it to the recycle bin. The vault options menu provides the same controls for the selected group. An entry edit keeps its current password until you select **Replace saved password**.
+
+Keeper checks for external changes before replacing the encrypted file. If Keeper detects an external save, unlock that vault again to load the latest version before editing. Older KDBX formats and files you cannot write remain available for browsing. Recycling requires the vault's recycle bin to be enabled.
 
 ## Replace a plaintext unlock file
 

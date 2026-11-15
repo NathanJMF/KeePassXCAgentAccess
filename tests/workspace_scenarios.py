@@ -24,12 +24,14 @@ from keepassxc_agent_access.settings import SettingsStore
 from keepassxc_agent_access.setup import VaultSetup
 from keepassxc_agent_access.tray import GLib, Gtk
 from keepassxc_agent_access.workspace_app import WorkspaceApplication
+from keepassxc_agent_access.workspace_editor import edit_entry, recycle_entry
 from keepassxc_agent_access.keyring import SystemKeyring
 from tls_fixture import AUTHORIZATION, PASSWORD, USERNAME, tls_service
 
 
 OTHER_PASSWORD = "synthetic-second-password-sentinel"
 STORED_URL = "https://fixture.example.test/owner-preview"
+EDIT_PASSWORD = "synthetic-owner-edit-password"
 
 
 def main(root):
@@ -173,6 +175,59 @@ def main(root):
 
         def use(profile, vault, entry=first_entry, expected=0):
             return invoke(profile, "use", "--vault", vault, "--entry", entry, "--action", "check", expected=expected)
+
+        def check_editors(vault):
+            def fill_group(dialog, name):
+                field = next(child for child in descendants(dialog) if child.get_name() == "group-name")
+                field.set_text(name)
+                dialog.response(Gtk.ResponseType.OK)
+
+            def fields(dialog, title, create=False):
+                controls = {child.get_name(): child for child in descendants(dialog) if isinstance(child, Gtk.Entry)}
+                controls["entry-title"].set_text(title)
+                controls["entry-username"].set_text("fixture-editor")
+                controls["entry-url"].set_text("https://fixture.example.test/new")
+                field = controls["entry-password"]
+                assert not field.get_visibility()
+                if create:
+                    field.set_text(EDIT_PASSWORD)
+                else:
+                    assert not field.get_sensitive() and not field.get_text()
+                dialog.response(Gtk.ResponseType.OK)
+
+            select_tree(vault)
+            drive_dialog(app.new_group_item.activate, lambda dialog: fill_group(dialog, "New fixture group"))
+            wait_for(lambda: not app.busy, "Creating a group timed out")
+            group = app.selection[1]
+            assert group and app.browse_title.get_text() == "New fixture group"
+            drive_dialog(app.new_entry_item.activate, lambda dialog: fields(dialog, "Created entry", create=True))
+            wait_for(lambda: not app.busy, "Creating an entry timed out")
+            entry, = app.entry_rows.values()
+            assert entry["title"] == "Created entry"
+            assert "password" not in entry
+            drive_dialog(lambda: edit_entry(app, vault, group, entry), lambda dialog: fields(dialog, "Edited entry"))
+            wait_for(lambda: not app.busy, "Editing an entry timed out")
+            edited, = app.entry_rows.values()
+            assert edited["id"] == entry["id"] and edited["title"] == "Edited entry"
+            drive_dialog(app._edit_group, lambda dialog: fill_group(dialog, "Edited fixture group"))
+            wait_for(lambda: not app.busy, "Editing a group timed out")
+            assert app.selection == (vault, group)
+            assert app.browse_title.get_text() == "Edited fixture group"
+
+            owner = PyKeePass(target.database, password=UNLOCK, keyfile=str(target.key_file))
+            actual = owner.find_entries(uuid=UUID(entry["id"]), first=True)
+            assert actual and actual.title == "Edited entry" and actual.password == EDIT_PASSWORD
+
+            def accept(dialog):
+                dialog.response(Gtk.ResponseType.OK)
+
+            drive_dialog(lambda: recycle_entry(app, vault, group, edited), accept)
+            wait_for(lambda: not app.busy, "Recycling an entry timed out")
+            assert not app.entry_rows
+            drive_dialog(app._recycle_group, accept)
+            wait_for(lambda: not app.busy, "Recycling a group timed out")
+            assert app.selection == (vault, "")
+            assert all(row["id"] != group for row in app.workspace.owner_session(vault).groups)
 
         def exercise():
             nonlocal result
@@ -339,6 +394,8 @@ def main(root):
                 assert invoke("alpha", "entries", "list", expected=1) == denied
                 assert invoke("beta", "entries", "list")["entries"] == fixture[2:]
 
+                check_editors(first)
+                assert invoke("beta", "entries", "list")["entries"] == fixture[2:]
                 app.activity_button.clicked()
                 assert [column.get_title() for column in app.activity_view.table.get_columns()] == list(app.activity_view.TITLES)
                 app.activity_view.filters["agent"].set_text("Agent beta")
@@ -364,10 +421,10 @@ def main(root):
                     raw = subprocess.check_output([*NAMESPACE, "cat", str(profiles / name / "token")]).strip()
                     assert all(raw not in data for data in persisted)
                     assert all(raw not in data for call in captured for data in call)
-                for sentinel in (UNLOCK, PASSWORD, OTHER_PASSWORD, AUTHORIZATION, other_header):
+                for sentinel in (UNLOCK, PASSWORD, OTHER_PASSWORD, EDIT_PASSWORD, AUTHORIZATION, other_header):
                     assert all(sentinel.encode() not in data for data in persisted)
                     assert all(sentinel.encode() not in data for call in captured for data in call)
-                print("Workspace scenario passed: two vaults, scoped CLI, GNOME review, migration, locks and Activity", flush=True)
+                print("Workspace scenario passed: two vaults, scoped CLI, GNOME review and edits, migration, locks and Activity", flush=True)
                 result = 0
             except Exception:
                 traceback.print_exc()

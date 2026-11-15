@@ -10,7 +10,8 @@ from threading import Thread
 
 from .entry_projection import active_entry, entry_listing, owner_snapshot
 from .https_action import authenticate, failure, prepare_https
-from .protocol import REQUEST_LIMIT, encode
+from .protocol import encode
+from .vault_edits import EDIT_LIMIT, EditError, database_file, file_stamp, stage_edit
 
 
 def load_vault():
@@ -18,10 +19,14 @@ def load_vault():
     from pykeepass.exceptions import CredentialsError
 
     request = json.loads(sys.stdin.buffer.readline())
+    path = request["database"]
+    writable = request.get("writable") is True
     try:
-        # Passing a read-only stream prevents the session from saving the database.
-        with open(request["database"], "rb") as database:
+        with (database_file(path) if writable else open(path, "rb")) as database:
+            stamp = file_stamp(os.fstat(database.fileno()))
             vault = PyKeePass(database, password=request["password"], keyfile=request["key_file"])
+            if file_stamp(os.fstat(database.fileno())) != stamp:
+                return
     except CredentialsError:
         print("credentials", flush=True)
         return
@@ -29,11 +34,28 @@ def load_vault():
         request.pop("password", None)
     vault.password = None
     print("ready", vault.root_group.uuid, flush=True)
-    while line := sys.stdin.buffer.readline(REQUEST_LIMIT):
+    while line := sys.stdin.buffer.readline(EDIT_LIMIT):
         if line == b"list_entries\n":
             reply(entry_listing(vault))
             continue
         data = json.loads(line)
+        if data["operation"] == "owner_edit":
+            if not writable:
+                reply(encode({"error": "read_only"}))
+                continue
+            try:
+                vault, stamp, response = stage_edit(
+                    vault, path, stamp, data, lambda: reply(encode({"ready": True})),
+                    lambda: sys.stdin.buffer.readline(16) == b"commit\n",
+                )
+            except EditError as error:
+                response = encode({"error": str(error)})
+            except Exception:
+                response = encode({"error": "save_failed"})
+            finally:
+                data.pop("password", None)
+            reply(response)
+            continue
         if data["operation"] == "owner_snapshot":
             reply(owner_snapshot(vault))
             continue

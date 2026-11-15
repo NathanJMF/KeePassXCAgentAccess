@@ -2,6 +2,7 @@
 
 from contextlib import nullcontext
 from dataclasses import asdict, dataclass, replace
+from functools import partial
 from hashlib import file_digest
 import json
 from pathlib import Path
@@ -11,7 +12,7 @@ from uuid import uuid4
 from .access_settings import Action, AccessStore, label, uuid_text
 from .keyring import KeyringError
 from .settings import SettingsError, SettingsStore, write_private_json
-from .vault import UnlockCancelled, VaultError, VaultTarget, open_vault
+from .vault import UnlockCancelled, VaultChanged, VaultError, VaultTarget, open_vault
 
 
 def new_id():
@@ -46,7 +47,7 @@ class Unlocked:
 
 
 class Workspace:
-    def __init__(self, directory, keyring, opener=open_vault):
+    def __init__(self, directory, keyring, opener=partial(open_vault, writable=True)):
         self.directory = Path(directory)
         self.path = self.directory / "workspace.json"
         self.legacy_access = AccessStore(self.directory / "access.json")
@@ -58,6 +59,7 @@ class Workspace:
         self.registrations = {}
         self.sessions = {}
         self.opening = {}
+        self.editing = set()
         self.pending = ()
         self.paused = True
         self.generation = 0
@@ -148,8 +150,8 @@ class Workspace:
         with self.mutex:
             if cycle is not None and cycle != self.owner_generation:
                 raise UnlockCancelled
-            if identifier in self.opening:
-                raise VaultError("This vault is already being opened.")
+            if identifier in self.opening or identifier in self.editing:
+                raise VaultError("This vault is already being opened or edited.")
             record = self.registrations.get(identifier)
             if record is None and not adding:
                 raise UnlockCancelled
@@ -223,8 +225,71 @@ class Workspace:
                 pass
 
     def session(self, identifier):
+        if identifier in self.editing:
+            return None
+        return self.owner_session(identifier)
+
+    def owner_session(self, identifier):
         session = self.sessions.get(identifier)
         return session if session and session.worker.available else None
+
+    def put_entry(self, identifier, parent, *, title, username="", url="", password=None, entry=None):
+        return self._edit(identifier, "put_entry", parent=parent, title=title,
+                          username=username, url=url, password=password, entry=entry)
+
+    def remove_entry(self, identifier, entry):
+        return self._edit(identifier, "remove_entry", entry=entry)
+
+    def put_group(self, identifier, parent, *, name, group=None):
+        return self._edit(identifier, "put_group", parent=parent, name=name, group=group)
+
+    def remove_group(self, identifier, group):
+        return self._edit(identifier, "remove_group", group=group)
+
+    def _edit(self, identifier, change, **values):
+        with self.mutex:
+            if identifier in self.editing or identifier in self.opening:
+                raise VaultError("This vault is already being opened or edited.")
+            session = self.owner_session(identifier)
+            if session is None:
+                raise VaultError("Unlock the vault before editing.")
+            self.editing.add(identifier)
+
+        def gate(send):
+            with self.mutex:
+                if self.sessions.get(identifier) is not session:
+                    return False
+                send()
+                return True
+
+        try:
+            result = session.worker.owner_edit({"change": change, **values}, gate)
+            with self.mutex:
+                record = self.registrations.get(identifier)
+                current = self.sessions.get(identifier)
+                if current is session:
+                    snapshot = result["snapshot"]
+                    self.sessions[identifier] = Unlocked(session.worker, tuple(snapshot["groups"]),
+                                                         tuple(snapshot["entries"]))
+                if record is not None and (current is session or current is None):
+                    try:
+                        self._replace(replace(record, fingerprint=result["fingerprint"]))
+                    except SettingsError:
+                        raise VaultError("The edit was saved, but Keeper could not update its vault registry.") from None
+            if not result["durable"]:
+                raise VaultError("The edit was saved, but the filesystem did not confirm its disk flush.")
+            return result["id"]
+        except VaultChanged:
+            with self.mutex:
+                if self.sessions.get(identifier) is session:
+                    self.sessions.pop(identifier)
+            session.worker.close()
+            raise
+        finally:
+            with self.mutex:
+                if self.sessions.get(identifier) is session and not session.worker.available:
+                    self.sessions.pop(identifier)
+                self.editing.remove(identifier)
 
     def lock(self, identifier):
         with self.mutex:

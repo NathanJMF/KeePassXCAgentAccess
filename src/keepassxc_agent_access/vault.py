@@ -1,4 +1,4 @@
-"""Read-only access to a KeePass database in a disposable worker process."""
+"""Access to a KeePass database in a disposable worker process."""
 
 from contextlib import contextmanager
 import json
@@ -12,10 +12,15 @@ from threading import Event, Lock
 from time import monotonic
 
 from .protocol import ListingError, RESPONSE_LIMIT, WORKER_TIMEOUT, decode, encode, read_frame, remaining
+from .vault_edits import EDIT_LIMIT, EDIT_TIMEOUT
 
 
 class VaultError(Exception):
     """A safe, user-facing vault error."""
+
+
+class VaultChanged(VaultError):
+    """The database changed outside the current session."""
 
 
 class UnlockCancelled(Exception):
@@ -107,6 +112,38 @@ class VaultSession:
         except (ListingError, ValueError):
             raise VaultError("Could not load the vault groups and entries.") from None
 
+    def owner_edit(self, change, gate):
+        request = encode({"operation": "owner_edit", **change})
+        if len(request) > EDIT_LIMIT:
+            raise VaultError("The edit is too large.")
+        try:
+            with self._exchange(request, EDIT_TIMEOUT) as read:
+                response = decode(read())
+                if response == {"ready": True}:
+                    if not gate(lambda: self._send(b"commit\n")):
+                        self._send(b"abort\n")
+                    response = decode(read())
+        except ListingError as error:
+            if error.code == "busy":
+                raise VaultError("Another operation is using this vault. Try again.") from None
+            raise VaultError("Could not confirm the edit. Reopen the vault to check it.") from None
+        error = response.get("error")
+        if error == "changed":
+            raise VaultChanged("The KeePass file changed on disk. Unlock it again before editing.")
+        if error:
+            messages = {
+                "invalid": "The name, entry, or destination group is invalid.",
+                "cycle": "Choose a destination outside the group you are moving.",
+                "read_only": "This vault file is read-only.",
+                "recycle_disabled": "Enable the vault’s recycle bin before removing items.",
+                "version": "Keeper edits KDBX 4 vaults. This vault remains read-only.",
+                "busy": "Another process is saving this vault. Try again.",
+                "cancelled": "The vault locked before the edit could be saved.",
+                "too_large": "The resulting vault snapshot is too large.",
+            }
+            raise VaultError(messages.get(error, "Could not save the vault."))
+        return response
+
     def entry(self, identifier):
         request = encode({"operation": "entry", "entry": identifier})
         with self._exchange(request, WORKER_TIMEOUT) as read:
@@ -139,7 +176,7 @@ class VaultSession:
         self.close()
 
 
-def open_vault(target: VaultTarget, password: str, cancelled: Event) -> VaultSession:
+def open_vault(target: VaultTarget, password: str, cancelled: Event, *, writable=False) -> VaultSession:
     if cancelled.is_set():
         raise UnlockCancelled
     for label, path in (("database", target.database), ("key file", target.key_file)):
@@ -162,6 +199,7 @@ def open_vault(target: VaultTarget, password: str, cancelled: Event) -> VaultSes
             "database": str(target.database),
             "key_file": str(target.key_file) if target.key_file else None,
             "password": password,
+            "writable": writable,
         })
         process.stdin.write(request.encode("ascii") + b"\n")
         process.stdin.flush()

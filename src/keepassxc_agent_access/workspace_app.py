@@ -24,6 +24,7 @@ from .settings import SettingsError, SettingsStore
 from .tray import APP_ID, APP_TITLE, SetupDialog, password_entry
 from .vault import UnlockCancelled, VaultError
 from .workspace import Workspace
+from .workspace_editor import edit_entry, edit_group, recycle_group
 from .workspace_style import install_style, styled
 from .workspace_views import AccessView, ActivityView, add_label, button, entry_details, selected_key
 
@@ -204,6 +205,18 @@ class WorkspaceApplication(Gtk.Application):
             self.vault_buttons[name] = button(self.vault_tools, title, handler)
         styled(self.vault_buttons["unlock"], "suggested-action")
 
+        self.new_item = Gtk.MenuButton(label="New")
+        new_menu = Gtk.Menu()
+        self.new_entry_item = Gtk.MenuItem(label="Entry…")
+        self.new_entry_item.connect("activate", lambda *_: self._new_entry())
+        new_menu.append(self.new_entry_item)
+        self.new_group_item = Gtk.MenuItem(label="Group…")
+        self.new_group_item.connect("activate", lambda *_: self._new_group())
+        new_menu.append(self.new_group_item)
+        new_menu.show_all()
+        self.new_item.set_popup(new_menu)
+        self.vault_tools.pack_start(self.new_item, False, False, 0)
+
         self.vault_menu = Gtk.MenuButton()
         self.vault_menu.set_image(Gtk.Image.new_from_icon_name("view-more-symbolic", Gtk.IconSize.BUTTON))
         self.vault_menu.set_tooltip_text("Vault options")
@@ -219,6 +232,14 @@ class WorkspaceApplication(Gtk.Application):
             item.connect("activate", handler)
             menu.append(item)
             self.vault_buttons[name] = item
+        self.group_separator = Gtk.SeparatorMenuItem()
+        menu.append(self.group_separator)
+        self.group_actions = []
+        for label, handler in (("Edit group…", self._edit_group), ("Move group to recycle bin…", self._recycle_group)):
+            item = Gtk.MenuItem(label=label)
+            item.connect("activate", handler)
+            menu.append(item)
+            self.group_actions.append(item)
         menu.show_all()
         self.vault_menu.set_popup(menu)
         self.vault_tools.pack_end(self.vault_menu, False, False, 0)
@@ -340,7 +361,7 @@ class WorkspaceApplication(Gtk.Application):
 
     def _refresh_tree(self):
         with self.workspace.mutex:
-            records = [(record, self.workspace.session(record.id)) for record in self.workspace.registrations.values()]
+            records = [(record, self.workspace.owner_session(record.id)) for record in self.workspace.registrations.values()]
         signature = [(record.id, record.name, id(session) if session else None) for record, session in records]
         if signature == self.tree_signature:
             return
@@ -407,7 +428,7 @@ class WorkspaceApplication(Gtk.Application):
 
     def _browse(self):
         record = self._record()
-        session = self.workspace.session(record.id) if record else None
+        session = self.workspace.owner_session(record.id) if record else None
         group_id = self.selection[1] if record else ""
         title, path, empty = "Vaults", "", "Add a KeePass vault to begin."
         matches, total = [], 0
@@ -456,6 +477,10 @@ class WorkspaceApplication(Gtk.Application):
                 row = model.append(value)
                 if value[3] == selected:
                     self.entries.get_selection().select_iter(row)
+        self.new_item.set_visible(bool(session))
+        self.new_item.set_sensitive(not self.busy and not self.desktop.locked)
+        for item in (self.group_separator, *self.group_actions):
+            item.set_visible(bool(session and group_id))
         self.vault_menu.set_visible(bool(record))
         self.vault_menu.set_sensitive(not self.busy and not self.desktop.locked)
         for key, control in self.vault_buttons.items():
@@ -467,8 +492,31 @@ class WorkspaceApplication(Gtk.Application):
             control.set_visible(visible)
             control.set_sensitive(not self.busy and not self.desktop.locked)
 
+    def _show_group(self, identifier, group):
+        self.selection = (identifier, group)
+        self.entry_search.set_text("")
+        self.tree_signature = None
+        self._view("browse")
+
+    def _new_entry(self):
+        if self.selection:
+            edit_entry(self, *self.selection)
+
+    def _new_group(self):
+        if self.selection:
+            vault, parent = self.selection
+            edit_group(self, vault, None, parent=parent)
+
+    def _edit_group(self, *_):
+        if self.selection and self.selection[1]:
+            edit_group(self, *self.selection)
+
+    def _recycle_group(self, *_):
+        if self.selection and self.selection[1]:
+            recycle_group(self, *self.selection)
+
     def _entry(self, _table, path, _column):
-        if not self.desktop.locked and self.selection:
+        if not self.busy and not self.desktop.locked and self.selection:
             identifier = self.entries.get_model()[path][3]
             if identifier in self.entry_rows:
                 entry_details(self, self.selection[0], self.entry_rows[identifier])
@@ -502,30 +550,31 @@ class WorkspaceApplication(Gtk.Application):
             self.message = str(error) or "The operation could not be completed."
         self._refresh()
 
-    def _background(self, operation, *, select=False):
+    def _background(self, operation, *, select=False, after=None):
         if self.busy or self.exiting or self.desktop.locked:
             return
         self.busy = True
 
         def work():
-            identifier, message = None, ""
+            value, message, completed = None, "", False
             try:
-                identifier = operation()
+                value = operation()
+                completed = True
             except UnlockCancelled:
                 pass
             except OWNER_ERRORS as error:
                 message = str(error) or "The operation could not be completed."
-            GLib.idle_add(done, identifier, message)
+            GLib.idle_add(done, value, message, completed)
 
-        def done(identifier, message):
+        def done(value, message, completed):
             self.busy = False
             if not self.exiting:
                 self.message = message
-                if select and identifier and not self.desktop.locked:
-                    self.selection = (identifier, "")
-                    self.entry_search.set_text("")
-                    self.tree_signature = None
-                    self._view("browse")
+                if completed and not self.desktop.locked:
+                    if select and value:
+                        self._show_group(value, "")
+                    elif after:
+                        after(value)
                 self._refresh()
 
         Thread(target=work, daemon=True).start()
