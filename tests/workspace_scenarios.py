@@ -300,11 +300,16 @@ def main(root):
                     assert not field.get_sensitive() and not field.get_text()
                 dialog.response(Gtk.ResponseType.OK)
 
-            select_tree(vault)
+            session = app.workspace.owner_session(vault)
+            root, = (group["id"] for group in session.groups if group["parent"] is None)
+            folder = next(group["id"] for group in session.groups if group["parent"] == root)
+            select_tree(vault, folder)
             drive_dialog(app.new_group_item.activate, lambda dialog: fill_group(dialog, "New fixture group"))
             wait_for(lambda: not app.busy, "Creating a group timed out")
             group = app.selection[1]
             assert group and app.browse_title.get_text() == "New fixture group"
+            created_group = next(row for row in app.workspace.owner_session(vault).groups if row["id"] == group)
+            assert created_group["parent"] == root
             drive_dialog(app.new_entry_item.activate, lambda dialog: fields(dialog, "Created entry", create=True))
             wait_for(lambda: not app.busy, "Creating an entry timed out")
             entry, = app.entry_rows.values()
@@ -564,7 +569,8 @@ def main(root):
                 assert app.tree.row_expanded(root_path)
                 wait_for(lambda: app.new_item.get_allocated_height() > 1, "New button was not laid out")
                 assert app.new_item.get_allocated_height() == app.vault_buttons["lock"].get_allocated_height()
-                assert app.new_group_item.get_visible()
+                new_menu = app.new_item.get_popup()
+                assert [item.get_label() for item in new_menu.get_children() if item.get_visible()] == ["Group…", "Entry…"]
                 assert app.workspace.registrations[first].bindings[0].action == imported
                 assert {row[ENTRY_ID_COLUMN]: row[ENTRY_FOLDER_COLUMN] for row in app.entries.get_model()} == {
                     first_entry: "Root", direct_entry: "Harbor Lab", nested_entry: "Harbor Lab / Field Notes",
@@ -649,9 +655,7 @@ def main(root):
                 assert context_menu(app.tree) == [
                     "New entry…", "Edit group…", "Copy group reference", "Delete…",
                 ]
-                assert not app.new_group_item.get_visible()
-                app.new_group_item.activate()
-                assert not app.dialog and not app.busy
+                assert [item.get_label() for item in new_menu.get_children() if item.get_visible()] == ["Group…", "Entry…"]
                 assert [row[ENTRY_ID_COLUMN] for row in app.entries.get_model()] == [direct_entry]
                 assert [column.get_title() for column in app.entries.get_columns() if column.get_visible()] == [
                     "Created", "Modified", "Title", "Username", "URL",

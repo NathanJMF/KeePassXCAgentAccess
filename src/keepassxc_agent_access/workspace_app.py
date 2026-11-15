@@ -226,7 +226,7 @@ class WorkspaceApplication(Gtk.Application):
         titles.reorder_child(self.browse_path, 0)
         self.browser.pack_start(header, False, False, 0)
 
-        self.vault_tools = Gtk.Box(spacing=6, valign=Gtk.Align.CENTER)
+        self.vault_tools = styled(Gtk.Box(spacing=6, valign=Gtk.Align.CENTER), "keeper-vault-tools")
         header.pack_end(self.vault_tools, False, False, 0)
         self.vault_buttons = {}
         for name, title, handler in (
@@ -240,12 +240,12 @@ class WorkspaceApplication(Gtk.Application):
         self.new_item = styled(Gtk.MenuButton(label="New", always_show_image=True), "keeper-primary")
         self.new_item.set_image(Gtk.Image.new_from_icon_name("list-add-symbolic", Gtk.IconSize.BUTTON))
         new_menu = Gtk.Menu()
-        self.new_entry_item = Gtk.MenuItem(label="Entry…")
-        self.new_entry_item.connect("activate", lambda *_: self._new_entry())
-        new_menu.append(self.new_entry_item)
         self.new_group_item = Gtk.MenuItem(label="Group…")
         self.new_group_item.connect("activate", lambda *_: self._new_group())
         new_menu.append(self.new_group_item)
+        self.new_entry_item = Gtk.MenuItem(label="Entry…")
+        self.new_entry_item.connect("activate", lambda *_: self._new_entry())
+        new_menu.append(self.new_entry_item)
         new_menu.show_all()
         self.new_item.set_popup(new_menu)
         self.vault_tools.pack_start(self.new_item, False, False, 0)
@@ -526,7 +526,6 @@ class WorkspaceApplication(Gtk.Application):
                            table_time(created, compact=True), table_time(modified, compact=True),
                            folder, row["id"], created, modified))
         fill_table(self.entries, values, ENTRY_ID_COLUMN)
-        self.new_group_item.set_visible(bool(session and not group_id))
         self.new_item.set_visible(bool(session))
         self.new_item.set_sensitive(not self.busy and not self.desktop.locked)
         for key, control in self.vault_buttons.items():
@@ -624,7 +623,7 @@ class WorkspaceApplication(Gtk.Application):
             edit_entry(self, *self.selection)
 
     def _new_group(self):
-        if self.selection and not self.selection[1]:
+        if self.selection:
             edit_group(self, self.selection[0], None)
 
     def _edit_group(self, *_):

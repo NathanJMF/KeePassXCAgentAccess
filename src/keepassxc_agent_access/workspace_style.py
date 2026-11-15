@@ -78,18 +78,11 @@ CSS = b"""
     background-color: transparent;
     border-color: transparent;
 }
-#keeper-workspace button.keeper-primary,
-#keeper-workspace button.keeper-primary:hover {
-    color: white;
-    background-color: #3e63d5;
-    border-color: transparent;
-    font-weight: 700;
+#keeper-workspace .keeper-vault-tools button {
+    margin: 0;
 }
-#keeper-workspace button.keeper-primary:hover {
-    background-color: #3253c0;
-}
-#keeper-workspace button.keeper-primary:focus {
-    outline-color: white;
+#keeper-workspace button.keeper-primary {
+    color: @keeper_accent;
 }
 menuitem.keeper-delete,
 menuitem.keeper-delete label,
