@@ -14,4 +14,16 @@
 ## 3. Independent acceptance test
 
 - [x] 3.1 Prepare a private synthetic vault, enable listing for an isolated runtime, and put the CLI on its PATH. Verify the runtime cannot reach the fixture files, owner's keyring or desktop, and that listing stops after the owner revokes access.
-- [ ] 3.2 Give a fresh subagent only the skill and a task to list entry titles and groups. Verify it called the CLI and returned the independently expected titles and group paths from the synthetic vault. Record the result using synthetic data.
+- [x] 3.2 Give a fresh subagent only the skill and a task to list entry titles and groups. Verify it called the CLI and returned the independently expected titles and group paths from the synthetic vault. Record the result using synthetic data.
+
+## Verification
+
+A fresh subagent received only the KeePass skill and the listing task. It used the execution tool's normal approval flow for the local CLI call. The CLI ran under a separate host UID in a disposable namespace. The harness recorded its successful broker response and matched it against the private fixture.
+
+| Synthetic entry | Group path |
+| --- | --- |
+| Quartz Relay accb | Harbor Lab / Field Notes |
+| Quartz Relay accb | Harbor Lab |
+| Juniper Index accb | Database root |
+
+The subagent reported all three rows. After listing was stopped in the tray, the CLI exited nonzero with empty standard output.
