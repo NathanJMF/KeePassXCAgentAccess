@@ -1,14 +1,12 @@
 """GTK views for request review, entry actions, and local activity."""
 
-from datetime import datetime
-
 from gi.repository import Gtk, Pango
 
 from .access_settings import Action, ActionType
 from .activity import ActivityError
 from .activity_grouping import EDIT_STAGES, ActivityResources, activity_groups, activity_matches, event_time
 from .edit_request_view import review_edit
-from .owner_views import _dialog, _label, _scroll, _table, _time
+from .owner_views import _dialog, _label, _scroll, _table, _time, table_time
 from .workspace_context import DELETE_LABEL, attach_row_context
 from .workspace_editor import delete_entry, edit_entry
 from .workspace_style import styled
@@ -16,13 +14,6 @@ from .workspace_style import styled
 
 def reported(value):
     return f"{value} (reported)" if value else "—"
-
-
-def table_time(timestamp, *, compact=False):
-    if timestamp is None:
-        return "—"
-    pattern = "%H:%M %d/%m/%y" if compact else "%b %d · %H:%M:%S"
-    return datetime.fromtimestamp(timestamp).astimezone().strftime(pattern)
 
 
 def add_label(container, text):
@@ -337,13 +328,13 @@ class AccessView(Gtk.Box):
         for grant in grants:
             other = grant.status != "pending"
             rows.append((other, -grant.requested,
-                         (table_time(grant.requested, compact=True), table_time(grant.last_used, compact=True),
+                         (table_time(grant.requested), table_time(grant.last_used),
                           reported(grant.identity), reported(grant.project), grant.status.capitalize(), grant.id, "grant",
                           grant.requested, grant.last_used, other)))
         for edit in edits:
             state = "Edit pending" if edit.status == "pending" else "Applying edit"
             rows.append((False, -edit.requested,
-                         (table_time(edit.requested, compact=True), "—", reported(edit.identity),
+                         (table_time(edit.requested), "—", reported(edit.identity),
                           reported(edit.project), state, f"{edit.token_id}/{edit.id}", "edit", edit.requested, None, False)))
         rows.sort()
         fill_table(self.table, [columns for _, _, columns in rows], self.RECORD_ID)
@@ -475,8 +466,8 @@ class AccessView(Gtk.Box):
         body.pack_start(status, False, False, 0)
         body.pack_start(activity_facts((
             ("Identity", reported(grant.identity)), ("Project", reported(grant.project)),
-            ("Requested", table_time(grant.requested, compact=True)),
-            ("Last used", table_time(grant.last_used, compact=True) if grant.last_used is not None else "Never"),
+            ("Requested", table_time(grant.requested)),
+            ("Last used", table_time(grant.last_used) if grant.last_used is not None else "Never"),
         )), False, False, 0)
         body.pack_start(styled(Gtk.Label(label="Approved entries", xalign=0), "keeper-event-section-title"),
                         False, False, 0)
@@ -734,7 +725,7 @@ class ActivityView(Gtk.Box):
     @staticmethod
     def _values(row, resource, key, *, action=None, children=()):
         timestamp = event_time(row)
-        return (table_time(timestamp, compact=True), reported(row["model"]), reported(row["chat"]),
+        return (table_time(timestamp), reported(row["model"]), reported(row["chat"]),
                 action or row["action"], *(value or "—" for value in resource),
                 row["outcome"], str(row["id"]), timestamp, key, children)
 
@@ -768,8 +759,8 @@ def entry_details(app, vault, entry):
                            "Edit action", Gtk.ResponseType.ACCEPT, "Remove action", Gtk.ResponseType.REJECT)
         add_label(body, f"{record.name} · {' / '.join(entry['group_path']) or 'Root'}\nEntry  {entry['id']}")
         add_label(body, f"Username  {entry['username'] or '—'}\nURL  {entry['url'] or '—'}")
-        created = table_time(entry.get("created"), compact=True)
-        modified = table_time(entry.get("modified"), compact=True)
+        created = table_time(entry.get("created"))
+        modified = table_time(entry.get("modified"))
         add_label(body, f"Created  {created}\nModified  {modified}")
         entry_actions = Gtk.Box(spacing=8)
         button(entry_actions, "Copy entry reference", lambda *_: app.copy_reference(vault, "entry", entry["id"]))

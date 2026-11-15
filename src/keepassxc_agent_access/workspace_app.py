@@ -19,7 +19,7 @@ from .desktop import DesktopSession
 from .edit_requests import EditRequests
 from .grants import Grants
 from .keyring import KeyringError, SystemKeyring
-from .owner_views import _dialog, _label, _scroll
+from .owner_views import _dialog, _label, _scroll, table_time
 from .protocol import ListingError
 from .scoped_broker import ScopedBroker
 from .settings import SettingsError, SettingsStore
@@ -30,7 +30,7 @@ from .workspace_context import DELETE_LABEL, attach_row_context
 from .workspace_editor import delete_entry, delete_group, edit_entry, edit_group
 from .workspace_style import install_style, styled
 from .workspace_views import (
-    AccessView, ActivityView, add_label, button, empty_state, entry_details, fill_table, pane_table, section_heading, table_time,
+    AccessView, ActivityView, add_label, button, empty_state, entry_details, fill_table, pane_table, section_heading,
 )
 
 
@@ -517,7 +517,7 @@ class WorkspaceApplication(Gtk.Application):
         for row, folder in matches:
             created, modified = row.get("created"), row.get("modified")
             values.append((row["title"] or "(Untitled entry)", row["username"], row["url"],
-                           table_time(created, compact=True), table_time(modified, compact=True),
+                           table_time(created), table_time(modified),
                            folder, row["id"], created, modified))
         fill_table(self.entries, values, ENTRY_ID_COLUMN)
         self.new_item.set_visible(bool(session))

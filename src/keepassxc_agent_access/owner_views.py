@@ -342,7 +342,7 @@ class OwnerViews:
                 })
                 model.clear()
                 for row in rows:
-                    model.append([_time(row["requested"]), row["model"] or "Unavailable",
+                    model.append([table_time(row["requested"]), row["model"] or "Unavailable",
                                   row["chat"] or "Unavailable", row["action"], row["outcome"], row])
                 detail.set_text("" if rows else "No matching activity.")
             except ActivityError:
@@ -379,6 +379,12 @@ class OwnerViews:
 
 def _entry_name(row):
     return " / ".join([*row["group_path"], row["title"]])
+
+
+def table_time(timestamp):
+    if timestamp is None:
+        return "—"
+    return datetime.fromtimestamp(timestamp).strftime("%H:%M · %d-%m-%y")
 
 
 def _time(timestamp):

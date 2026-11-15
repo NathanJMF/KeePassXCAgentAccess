@@ -1,5 +1,6 @@
 """Exercise the ordering used by the Keeper workspace tables."""
 
+from datetime import datetime
 from types import SimpleNamespace
 from unittest import TestCase
 
@@ -8,8 +9,8 @@ import gi
 gi.require_version("Gtk", "3.0")
 from gi.repository import Gtk
 
-from keepassxc_agent_access.owner_views import _time
-from keepassxc_agent_access.workspace_views import TableSort, sorted_table_rows, table_time
+from keepassxc_agent_access.owner_views import _time, table_time
+from keepassxc_agent_access.workspace_views import TableSort, sorted_table_rows
 
 
 class Header:
@@ -45,11 +46,14 @@ class TableSortingTests(TestCase):
         self.assertEqual(sorted_table_rows(default, 1), [default[2], default[0], default[1]])
         self.assertEqual(sorted_table_rows(default, 1, descending=True), [default[0], default[2], default[1]])
 
-    def test_epoch_zero_is_a_real_timestamp_in_one_or_both_formats(self):
+    def test_table_time_uses_dot_between_time_and_hyphenated_date(self):
+        local_time = datetime(2026, 11, 15, 14, 5, 23)
+        self.assertEqual(table_time(local_time.timestamp()), "14:05 · 15-11-26")
+
+    def test_epoch_zero_is_a_real_timestamp_in_both_formats(self):
         self.assertNotEqual(table_time(0), "—")
-        self.assertNotEqual(table_time(0, compact=True), "—")
         self.assertNotEqual(_time(0), "—")
-        self.assertEqual(table_time(None, compact=True), "—")
+        self.assertEqual(table_time(None), "—")
         self.assertEqual(_time(None), "—")
 
     def test_click_cycles_sort_arrows_and_restores_row_order(self):

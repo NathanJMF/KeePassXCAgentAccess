@@ -725,7 +725,7 @@ def main(root):
                 assert [column.get_title() for column in app.entries.get_columns() if column.get_visible()] == [
                     "Created", "Modified", "Folder", "Title", "Username", "URL",
                 ]
-                timestamp = re.compile(r"\d{2}:\d{2} \d{2}/\d{2}/\d{2}")
+                timestamp = re.compile(r"\d{2}:\d{2} · \d{2}-\d{2}-\d{2}")
                 assert all(timestamp.fullmatch(row[index]) for row in app.entries.get_model() for index in (3, 4))
                 app.entry_search.set_text("harbor lab / FIELD")
                 assert [row[ENTRY_ID_COLUMN] for row in app.entries.get_model()] == [nested_entry]
@@ -1053,8 +1053,10 @@ def main(root):
                 assert len(table.get_model()) > 0
                 allowed = {str(row["id"]) for row in old_activity.rows(agent="Agent beta")}
                 for root in table.get_model():
+                    assert timestamp.fullmatch(root[0])
                     assert root[view.RECORD_ID] in allowed
-                    assert all(row[view.RECORD_ID] in allowed for row in root.iterchildren())
+                    assert all(timestamp.fullmatch(row[0]) and row[view.RECORD_ID] in allowed
+                               for row in root.iterchildren())
                 access = next(row for row in old_activity.rows(vault="second", action="Use password")
                               if row["entry"] == first_entry and row["entry_title"])
                 assert access["folder"] == "Root" and access["entry_title"] == fixture[0]["title"]
