@@ -120,9 +120,27 @@ class VaultSession:
             with self._exchange(request, EDIT_TIMEOUT) as read:
                 response = decode(read())
                 if response == {"ready": True}:
-                    if not gate(lambda: self._send(b"commit\n")):
-                        self._send(b"abort\n")
-                    response = decode(read())
+                    attempted = False
+
+                    def publish():
+                        nonlocal attempted, response
+                        attempted = True
+                        self._send(b"commit\n")
+                        response = decode(read())
+
+                    try:
+                        # The workspace can keep its final authorization guard held
+                        # until publication is confirmed by the edit worker.
+                        accepted = gate(publish)
+                    finally:
+                        if not attempted:
+                            try:
+                                self._send(b"abort\n")
+                                read()
+                            except (ListingError, OSError, EOFError, ValueError):
+                                self.close()
+                    if not accepted:
+                        raise VaultError("The vault locked or access changed before the edit could be saved.")
         except ListingError as error:
             if error.code == "busy":
                 raise VaultError("Another operation is using this vault. Try again.") from None

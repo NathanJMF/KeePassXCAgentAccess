@@ -5,6 +5,7 @@ from dataclasses import asdict, dataclass, replace
 from functools import partial
 from hashlib import file_digest
 import json
+import os
 from pathlib import Path
 from threading import Event, RLock
 from uuid import uuid4
@@ -44,6 +45,7 @@ class Unlocked:
     worker: object
     groups: tuple
     entries: tuple
+    recycle_bin: dict | None = None
 
 
 class Workspace:
@@ -178,7 +180,8 @@ class Workspace:
                 raise VaultError("The selected file does not match the last verified vault.")
             worker = self.opener(target, password, cancelled)
             snapshot = worker.owner_snapshot()
-            session = Unlocked(worker, tuple(snapshot["groups"]), tuple(snapshot["entries"]))
+            session = Unlocked(worker, tuple(snapshot["groups"]), tuple(snapshot["entries"]),
+                               snapshot.get("recycle_bin"))
             with self.keyring_mutex if remember else nullcontext():
                 with self.mutex:
                     if cancelled.is_set() or self.registrations.get(identifier) != record:
@@ -246,20 +249,26 @@ class Workspace:
     def remove_group(self, identifier, group):
         return self._edit(identifier, "remove_group", group=group)
 
-    def _edit(self, identifier, change, **values):
+    def _edit(self, identifier, change, *, expected=None, may_commit=None, before_commit=None, **values):
         with self.mutex:
             if identifier in self.editing or identifier in self.opening:
                 raise VaultError("This vault is already being opened or edited.")
             session = self.owner_session(identifier)
             if session is None:
                 raise VaultError("Unlock the vault before editing.")
+            if expected is not None and session is not expected:
+                raise VaultChanged("The vault changed. Reopen the request and review it again.")
             self.editing.add(identifier)
 
-        def gate(send):
+        def gate(publish):
             with self.mutex:
-                if self.sessions.get(identifier) is not session:
+                if self.sessions.get(identifier) is not session or may_commit is not None and not may_commit():
                     return False
-                send()
+                if change == "put_entry":
+                    self._invalidate_changed_credentials(identifier, session, values)
+                if before_commit is not None:
+                    before_commit()
+                publish()
                 return True
 
         try:
@@ -270,7 +279,7 @@ class Workspace:
                 if current is session:
                     snapshot = result["snapshot"]
                     self.sessions[identifier] = Unlocked(session.worker, tuple(snapshot["groups"]),
-                                                         tuple(snapshot["entries"]))
+                                                         tuple(snapshot["entries"]), snapshot.get("recycle_bin"))
                 if record is not None and (current is session or current is None):
                     try:
                         self._replace(replace(record, fingerprint=result["fingerprint"]))
@@ -290,6 +299,31 @@ class Workspace:
                 if self.sessions.get(identifier) is session and not session.worker.available:
                     self.sessions.pop(identifier)
                 self.editing.remove(identifier)
+
+    def _invalidate_changed_credentials(self, identifier, session, values):
+        entry_id = values.get("entry")
+        if entry_id is None:
+            return
+        old = next((entry for entry in session.entries if entry["id"] == entry_id), None)
+        if (old is None or values.get("username") == old["username"]
+                and values.get("password") is None and not values.get("generate_password")):
+            return
+        record = self.registrations[identifier]
+        bindings = tuple(replace(binding, revision=new_id()) if binding.action.entry == entry_id else binding
+                         for binding in record.bindings)
+        if bindings != record.bindings:
+            # Invalidate before releasing the worker's commit gate. A crash cannot
+            # reconnect old grants to the new credentials; a failed write may still
+            # require fresh action approval.
+            self._replace(replace(record, bindings=bindings))
+            try:
+                directory = os.open(self.path.parent, os.O_RDONLY | os.O_DIRECTORY)
+                try:
+                    os.fsync(directory)
+                finally:
+                    os.close(directory)
+            except OSError:
+                raise SettingsError("Could not save the new credential approval revision safely.") from None
 
     def lock(self, identifier):
         with self.mutex:

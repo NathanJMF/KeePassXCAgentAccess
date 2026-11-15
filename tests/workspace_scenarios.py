@@ -10,11 +10,11 @@ import shutil
 import subprocess
 import sys
 import traceback
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from pykeepass import PyKeePass
 
-from broker_scenarios import NAMESPACE, PASSWORD as UNLOCK, isolated_uid, prepare, verify_isolation
+from broker_scenarios import NAMESPACE, PASSWORD as UNLOCK, REPO, isolated_uid, prepare, verify_isolation
 from desktop_scenarios import set_screen_active, wait_for
 from password_scenarios import button, descendants
 from keepassxc_agent_access.access_settings import AccessMode, AccessStore, Action, ActionType, VaultPolicy
@@ -23,6 +23,7 @@ from keepassxc_agent_access.controller import VaultController
 from keepassxc_agent_access.settings import SettingsStore
 from keepassxc_agent_access.setup import VaultSetup
 from keepassxc_agent_access.tray import GLib, Gtk
+from keepassxc_agent_access.edit_request_view import OPERATION_LABELS
 from keepassxc_agent_access.workspace_app import WorkspaceApplication
 from keepassxc_agent_access.workspace_editor import edit_entry, recycle_entry
 from keepassxc_agent_access.keyring import SystemKeyring
@@ -33,10 +34,15 @@ OTHER_PASSWORD = "synthetic-second-password-sentinel"
 STORED_URL = "https://fixture.example.test/owner-preview"
 BEARER_AUTHORIZATION = f"Bearer {PASSWORD}"
 EDIT_PASSWORD = "synthetic-owner-edit-password"
+REQUESTED_PASSWORD = "synthetic-approval-only-password"
 
 
 def main(root):
     target, endpoint, private, fixture = prepare(root)
+    runtime = root / "cli"
+    shutil.copy2(REPO / "keeper-agent-runner", runtime / "keeper-agent-runner")
+    shutil.copyfile(REPO / "src/keepassxc_agent_access/agent_runner.py",
+                    runtime / "src/keepassxc_agent_access/agent_runner.py")
     first_entry, direct_entry, nested_entry = [row["id"] for row in fixture]
     duplicate_title = fixture[1]["title"]
     primary = PyKeePass(target.database, password=UNLOCK, keyfile=str(target.key_file))
@@ -231,6 +237,122 @@ def main(root):
             wait_for(lambda: not app.busy, "Recycling a group timed out")
             assert app.selection == (vault, "")
             assert all(row["id"] != group for row in app.workspace.owner_session(vault).groups)
+
+        def check_agent_edits(first, second):
+            def runner(profile, tool, arguments, *, error=False):
+                message = {"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                           "params": {"name": tool, "arguments": arguments}}
+                args = [*NAMESPACE, "/usr/bin/env", "-i", "PATH=/usr/bin:/bin",
+                        "KEEPASSXC_AGENT_MODEL=Synthetic test model",
+                        "KEEPASSXC_AGENT_CHAT=Edit acceptance", str(runtime / "keeper-agent-runner"),
+                        "--socket", str(endpoint), "--profile-dir", str(profiles / profile)]
+                process = subprocess.run(args, input=(json.dumps(message) + "\n").encode(), cwd="/tmp",
+                                         capture_output=True, check=True, timeout=12)
+                captured.append((repr(args).encode(), process.stdout, process.stderr))
+                result = json.loads(process.stdout)["result"]
+                assert result["isError"] == error
+                text = result["content"][0]["text"]
+                return text if error else json.loads(text)
+
+            def status(proposal, profile="beta"):
+                return runner(profile, "edit_status", {"id": proposal["id"]})
+
+            def propose(operation, vault=first, **fields):
+                proposal = {"id": str(uuid4()), "operation": operation, "vault": vault, **fields}
+                assert runner("beta", "request_edit", {"request": proposal}) == {
+                    "id": proposal["id"], "status": "pending",
+                }
+                return proposal
+
+            def decide(proposal, response, *, strings=(), password=None, before=None, allow=True):
+                app.access_button.clicked()
+                table = app.access_view.table
+                path = next(row.path for row in table.get_model() if row[5].endswith("/" + proposal["id"]))
+                table.get_selection().select_path(path)
+
+                def check(dialog):
+                    assert dialog.get_title() == OPERATION_LABELS[proposal["operation"]]
+                    labels = [child.get_text() for child in descendants(dialog) if isinstance(child, Gtk.Label)]
+                    assert all(any(expected.casefold() in label.casefold() for label in labels) for expected in strings)
+                    if password:
+                        entry = next(child for child in descendants(dialog) if child.get_name() == "edit-owner-password")
+                        assert not entry.get_visibility() and not entry.get_text()
+                        entry.set_text(password)
+                    assert dialog.get_widget_for_response(Gtk.ResponseType.ACCEPT).get_sensitive() == allow
+                    if before:
+                        before()
+                    dialog.response(response)
+
+                drive_dialog(lambda: table.row_activated(path, table.get_column(0)), check)
+                wait_for(lambda: not app.busy, "Approved agent edit did not finish")
+
+            def apply(proposal, **kwargs):
+                decide(proposal, Gtk.ResponseType.ACCEPT, **kwargs)
+                result = status(proposal)
+                assert result["status"] == "applied", (result, app.message)
+                return result.get("result")
+
+            session = app.workspace.owner_session(first)
+            root_group, = [item["id"] for item in session.groups if item["parent"] is None]
+            first_group = propose("create_group", parent=root_group, fields={"name": "Reviewed group"})
+            duplicate = runner("beta", "request_edit", {"request": first_group})
+            assert duplicate["status"] == "pending"
+            assert runner("expanded", "edit_status", {"id": first_group["id"]}, error=True)
+            group = apply(first_group, strings=("Reviewed group", "Proposed"))
+            assert runner("beta", "request_edit", {"request": first_group}) == {
+                "id": first_group["id"], "status": "applied", "result": group,
+            }
+            assert sum(item["id"] == group for item in app.workspace.owner_session(first).groups) == 1
+
+            rename = propose("rename_group", group=group, fields={"name": "Approved group"})
+            apply(rename, strings=("Reviewed group", "Approved group"))
+            new = propose("create_entry", parent=group, fields={"title": "Agent fixture", "username": "fixture"})
+            entry = apply(new, strings=("Agent fixture", "Approved group"))
+            assert invoke("beta", "entries", "list")["entries"] == fixture[2:]
+            assert invoke("beta", "entries", "list", "--vault", first, expected=1)
+            proposal = propose("update_entry", entry=entry, fields={"title": "Approved edit"})
+            decide(proposal, Gtk.ResponseType.REJECT, strings=("Agent fixture", "Approved edit"))
+            assert status(proposal) == {"id": proposal["id"], "status": "denied"}
+
+            def external_change():
+                app.workspace.put_entry(first, group, title="Saved by owner", entry=entry)
+
+            stale = propose("update_entry", entry=entry, fields={"title": "Stale proposal"})
+            decide(stale, Gtk.ResponseType.ACCEPT, strings=("Agent fixture", "Stale proposal"), before=external_change)
+            assert status(stale)["status"] == "stale"
+            apply(propose("update_entry", entry=entry, fields={"url": "https://fixture.example.test/approved"}),
+                  strings=("https://fixture.example.test/approved", "Saved by owner"))
+
+            second_group = apply(propose("create_group", parent=root_group, fields={"name": "Move destination"}))
+            apply(propose("move_entry", entry=entry, parent=second_group), strings=("Move destination",))
+            apply(propose("move_group", group=second_group, parent=group), strings=("Affected contents", "1 entry"))
+            apply(propose("recycle_entry", entry=entry), strings=("Recycle bin", "Saved by owner"))
+            apply(propose("recycle_group", group=group), strings=("Affected contents", "Recycle bin"))
+
+            generated = propose("replace_password", vault=second, entry=first_entry, password_source="generate")
+            apply(generated, strings=("Keeper will generate",))
+            owner = PyKeePass(second_path, password=UNLOCK, keyfile=str(target.key_file))
+            password = owner.find_entries(uuid=UUID(first_entry), first=True).password
+            assert password and password != OTHER_PASSWORD
+            assert use("expanded", second, expected=1)
+            replaced = propose("replace_password", vault=second, entry=first_entry, password_source="owner")
+            apply(replaced, password=REQUESTED_PASSWORD)
+            owner.reload()
+            assert owner.find_entries(uuid=UUID(first_entry), first=True).password == REQUESTED_PASSWORD
+
+            private_state = [path.read_bytes() for path in private.glob("*.json")] + [old_activity.path.read_bytes()]
+            assert all(password.encode() not in content and REQUESTED_PASSWORD.encode() not in content
+                       for content in private_state)
+            assert all(password.encode() not in data for call in captured for data in call)
+            rows = old_activity.rows(chat="Edit acceptance")
+            assert rows and all(row.get("token") for row in rows)
+            outcomes = {row["outcome"].lower() for row in rows}
+            assert "denied" in outcomes and "stale" in outcomes and {"applied", "succeeded"} & outcomes
+            app.activity_button.clicked()
+            app.activity_view.filters["chat"].set_text("Edit acceptance")
+            app.activity_view.refresh()
+            assert len(app.activity_view.table.get_model()) >= 3
+            app.activity_view.filters["chat"].set_text("")
 
         def exercise():
             nonlocal result
@@ -437,6 +559,7 @@ def main(root):
                 assert old_activity.rows(vault="second", action="Use password")
                 assert old_activity.rows(action="Remove token")[0]["token"] == alpha_record.id
                 assert old_activity.rows(action="Legacy fixture")[0]["vault"] is None
+                check_agent_edits(first, second)
                 app.tray_items["pause"].activate()
                 assert app.workspace.paused and app.workspace.session(second)
                 assert "paused" in invoke("beta", "entries", "list", expected=1)
@@ -453,10 +576,10 @@ def main(root):
                     raw = subprocess.check_output([*NAMESPACE, "cat", str(profiles / name / "token")]).strip()
                     assert all(raw not in data for data in persisted)
                     assert all(raw not in data for call in captured for data in call)
-                for sentinel in (UNLOCK, PASSWORD, OTHER_PASSWORD, EDIT_PASSWORD, AUTHORIZATION, BEARER_AUTHORIZATION, other_header):
+                for sentinel in (UNLOCK, PASSWORD, OTHER_PASSWORD, EDIT_PASSWORD, REQUESTED_PASSWORD, AUTHORIZATION, BEARER_AUTHORIZATION, other_header):
                     assert all(sentinel.encode() not in data for data in persisted)
                     assert all(sentinel.encode() not in data for call in captured for data in call)
-                print("Workspace scenario passed: two vaults, scoped CLI, GNOME review and edits, credential types, migration, locks and Activity", flush=True)
+                print("Workspace scenario passed: two vaults, scoped CLI, GNOME owner and agent edits, credential types, migration, locks and Activity", flush=True)
                 result = 0
             except Exception:
                 traceback.print_exc()

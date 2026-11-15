@@ -1,9 +1,12 @@
 """GTK views for request review, entry actions, and local activity."""
 
+from datetime import datetime
+
 from gi.repository import Gtk, Pango
 
 from .access_settings import Action, ActionType
 from .activity import ActivityError
+from .edit_request_view import review_edit
 from .owner_views import _dialog, _label, _scroll, _table, _time
 from .workspace_editor import edit_entry, recycle_entry
 from .workspace_style import styled
@@ -13,12 +16,19 @@ def reported(value):
     return f"{value} (reported)" if value else "—"
 
 
+def table_time(timestamp):
+    return datetime.fromtimestamp(timestamp).astimezone().strftime("%b %d · %H:%M:%S") if timestamp else "—"
+
+
 def add_label(container, text):
     container.pack_start(_label(text), False, False, 0)
 
 
-def button(container, label, callback):
+def button(container, label, callback, *, icon=None):
     widget = Gtk.Button(label=label)
+    if icon:
+        widget.set_image(Gtk.Image.new_from_icon_name(icon, Gtk.IconSize.BUTTON))
+        widget.set_always_show_image(True)
     widget.connect("clicked", callback)
     container.pack_start(widget, False, False, 0)
     return widget
@@ -41,16 +51,104 @@ def fill_table(table, rows, key_column):
             table.get_selection().select_iter(row)
 
 
-def pane_table(model, titles):
-    table = styled(_table(model, titles), "keeper-table")
-    for column, title in zip(table.get_columns(), titles):
-        column.set_expand(True)
+def section_heading(title, icon):
+    header = Gtk.Box(spacing=13)
+    mark = styled(Gtk.Box(valign=Gtk.Align.CENTER), "keeper-section-icon")
+    image = Gtk.Image.new_from_icon_name(icon, Gtk.IconSize.LARGE_TOOLBAR)
+    mark.pack_start(image, False, False, 0)
+    header.pack_start(mark, False, False, 0)
+    titles = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=1, valign=Gtk.Align.CENTER)
+    header.pack_start(titles, True, True, 0)
+    label = styled(Gtk.Label(label=title, xalign=0, ellipsize=Pango.EllipsizeMode.END), "keeper-title")
+    titles.pack_start(label, False, False, 0)
+    return header, titles, label, image
+
+
+def empty_state(icon, text):
+    block = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10, halign=Gtk.Align.CENTER,
+                    valign=Gtk.Align.CENTER, margin=18)
+    image = styled(Gtk.Image.new_from_icon_name(icon, Gtk.IconSize.DIALOG), "keeper-empty-icon")
+    image.set_pixel_size(30)
+    label = styled(Gtk.Label(label=text, wrap=True, justify=Gtk.Justification.CENTER), "keeper-muted")
+    block.pack_start(image, False, False, 0)
+    block.pack_start(label, False, False, 0)
+    return block, label, image
+
+
+def pane_table(model, titles, widths, *, lead_icon=None, status=None, expand_columns=(1, 2), muted_columns=()):
+    table = styled(Gtk.TreeView(model=model), "keeper-table")
+    table.set_grid_lines(Gtk.TreeViewGridLines.HORIZONTAL)
+    for index, title in enumerate(titles):
+        column = Gtk.TreeViewColumn(title)
         column.set_resizable(True)
-        column.set_min_width(124 if title in ("Requested", "Last used", "Time") else 85)
-        column.get_cells()[0].set_properties(xpad=8, ypad=8, ellipsize=Pango.EllipsizeMode.END)
+        column.set_expand(index in expand_columns)
+        column.set_min_width(widths[index])
+        text = Gtk.CellRendererText(xpad=10, ypad=9, ellipsize=Pango.EllipsizeMode.END)
+        colored = status is not None and index == status[0]
+        if colored or (index == 0 and lead_icon):
+            icon = Gtk.CellRendererPixbuf(xpad=5, stock_size=Gtk.IconSize.MENU)
+            column.pack_start(icon, False)
+            if colored:
+                column.set_cell_data_func(icon, _status_icon, status)
+            else:
+                icon.set_property("icon-name", lead_icon)
+            text.set_property("xpad", 3)
+            text.set_property("weight", Pango.Weight.SEMIBOLD)
+        column.pack_start(text, True)
+        column.add_attribute(text, "text", index)
+        if colored or index in muted_columns:
+            column.set_cell_data_func(text, _table_text_color, (table, status if colored else None))
+        table.append_column(column)
     scroll = _scroll(table)
     scroll.set_shadow_type(Gtk.ShadowType.NONE)
     return table, scroll
+
+
+def _status_icon(_column, cell, model, row, status):
+    symbol, _ = status[1].get(model[row][status[0]], (None, None))
+    cell.set_property("icon-name", symbol)
+
+
+def _table_text_color(_column, cell, model, row, context):
+    table, status = context
+    palette = "keeper_muted"
+    if status:
+        _, palette = status[1].get(model[row][status[0]], (None, palette))
+    found, color = table.get_style_context().lookup_color(palette)
+    tint = found and not table.get_selection().iter_is_selected(row)
+    if tint:
+        cell.set_property("foreground-rgba", color)
+    cell.set_property("foreground-set", tint)
+
+
+ACCESS_STATES = {
+    "Pending": ("appointment-soon-symbolic", "keeper_warning"),
+    "Edit pending": ("appointment-soon-symbolic", "keeper_warning"),
+    "Applying edit": ("content-loading-symbolic", "keeper_accent"),
+    "Active": ("emblem-default-symbolic", "keeper_success"),
+    "Disabled": ("action-unavailable-symbolic", "keeper_muted"),
+}
+ACTIVITY_STATES = {
+    "Approved": ("emblem-ok-symbolic", "keeper_success"),
+    "Succeeded": ("emblem-ok-symbolic", "keeper_success"),
+    "Pending approval": ("appointment-soon-symbolic", "keeper_warning"),
+    "Pending review": ("appointment-soon-symbolic", "keeper_warning"),
+    "Stale": ("action-unavailable-symbolic", "keeper_muted"),
+    "Failed": ("dialog-error-symbolic", "keeper_failure"),
+    "Denied": ("action-unavailable-symbolic", "keeper_failure"),
+    "Paused": ("media-playback-pause-symbolic", "keeper_warning"),
+    "Revoked": ("action-unavailable-symbolic", "keeper_muted"),
+}
+
+
+def table_card(scroll, empty):
+    card = styled(Gtk.Box(orientation=Gtk.Orientation.VERTICAL), "keeper-card")
+    overlay = Gtk.Overlay()
+    overlay.add(scroll)
+    overlay.add_overlay(empty)
+    overlay.set_overlay_pass_through(empty, True)
+    card.pack_start(overlay, True, True, 0)
+    return card
 
 
 def metadata_labels(permission):
@@ -62,34 +160,57 @@ class AccessView(Gtk.Box):
     TITLES = ("Requested", "Identity", "Project", "Status", "Last used")
 
     def __init__(self, app):
-        super().__init__(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        super().__init__(orientation=Gtk.Orientation.VERTICAL, spacing=18)
         self.app = app
-        header = Gtk.Box(spacing=10)
-        header.pack_start(styled(Gtk.Label(label="Agent access", xalign=0, hexpand=True), "keeper-title"),
-                          True, True, 0)
-        self.review_button = button(header, "Review or manage", self._open)
+        header, _, _, _ = section_heading("Agent access", "changes-prevent-symbolic")
+        tools = Gtk.Box(valign=Gtk.Align.CENTER)
+        header.pack_end(tools, False, False, 0)
+        self.review_button = button(tools, "Review or manage", self._open, icon="view-reveal-symbolic")
         self.review_button.set_sensitive(False)
         self.pack_start(header, False, False, 0)
-        self.table, scroll = pane_table(Gtk.ListStore(*([str] * 6)), self.TITLES)
+        self.table, scroll = pane_table(Gtk.ListStore(*([str] * 7)), self.TITLES,
+                                       (138, 122, 122, 119, 136), status=(3, ACCESS_STATES), muted_columns=(0, 4))
         self.table.connect("row-activated", self._open)
         self.table.get_selection().connect("changed", lambda *_: self.review_button.set_sensitive(
             selected_key(self.table, 5) is not None))
-        self.pack_start(scroll, True, True, 0)
+        self.empty, _, _ = empty_state("changes-prevent-symbolic", "No access requests or tokens")
+        self.pack_start(table_card(scroll, self.empty), True, True, 0)
 
     def refresh(self):
-        rows = self.app.grants.rows() if self.app.grants else []
-        fill_table(self.table, [(_time(row.requested), reported(row.identity), reported(row.project),
-                                 row.status.capitalize(), _time(row.last_used), row.id) for row in rows], 5)
+        grants = self.app.grants.rows() if self.app.grants else []
+        edits = self.app.pending_edits()
+        rows = []
+        for grant in grants:
+            rows.append((grant.status != "pending", -grant.requested,
+                         (table_time(grant.requested), reported(grant.identity), reported(grant.project),
+                          grant.status.capitalize(), table_time(grant.last_used), grant.id, "grant")))
+        for edit in edits:
+            state = "Edit pending" if edit.status == "pending" else "Applying edit"
+            rows.append((False, -edit.requested,
+                         (table_time(edit.requested), reported(edit.identity), reported(edit.project),
+                          state, "—", f"{edit.token_id}/{edit.id}", "edit")))
+        rows.sort()
+        fill_table(self.table, [columns for _, _, columns in rows], 5)
+        self.empty.set_visible(not rows)
 
     def _open(self, *_):
-        identifier = selected_key(self.table, 5)
-        if not identifier or self.app.desktop.locked:
+        model, selected = self.table.get_selection().get_selected()
+        if selected is None or self.app.desktop.locked:
             return
-        grant = self.app.grants.records[identifier]
-        if grant.status == "pending":
-            self._review(grant)
-        else:
-            self._manage(grant)
+        identifier, kind = model[selected][5:7]
+        if kind == "edit":
+            token_id, request_id = identifier.split("/")
+            record = next((edit for edit in self.app.pending_edits()
+                           if edit.token_id == token_id and edit.id == request_id), None)
+            if record is not None:
+                review_edit(self.app, record)
+            return
+        grant = self.app.grants.records.get(identifier)
+        if grant:
+            if grant.status == "pending":
+                self._review(grant)
+            else:
+                self._manage(grant)
 
     def _header(self, title, grant):
         dialog, body = _dialog(self.app, title, 640, 430)
@@ -196,23 +317,45 @@ class ActivityView(Gtk.Box):
     TITLES = ("Time", "Model", "Chat", "Action", "Outcome")
 
     def __init__(self, app):
-        super().__init__(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        super().__init__(orientation=Gtk.Orientation.VERTICAL, spacing=18)
         self.app = app
         self.rows = {}
-        self.pack_start(styled(Gtk.Label(label="Activity", xalign=0), "keeper-title"), False, False, 0)
-        filters = Gtk.Grid(column_spacing=8, row_spacing=6)
+        header, _, _, _ = section_heading("Activity", "document-open-recent-symbolic")
+        tools = Gtk.Box(valign=Gtk.Align.CENTER)
+        header.pack_end(tools, False, False, 0)
+        filters = Gtk.Grid(column_spacing=8, row_spacing=8, margin=12)
         self.filters = {}
         for index, name in enumerate(("Vault", "Agent", "Model", "Chat", "Action", "Outcome")):
-            field = Gtk.SearchEntry(placeholder_text=name, hexpand=True)
+            field = styled(Gtk.SearchEntry(placeholder_text=name, hexpand=True), "keeper-search")
             field.connect("search-changed", self.refresh)
             filters.attach(field, index % 3, index // 3, 1, 1)
             self.filters[name.lower()] = field
-        expander = Gtk.Expander(label="Filters")
-        expander.add(filters)
-        self.pack_start(expander, False, False, 0)
-        self.table, scroll = pane_table(Gtk.ListStore(str, str, str, str, str, str), self.TITLES)
+        self.filter_panel = styled(Gtk.Revealer(transition_type=Gtk.RevealerTransitionType.SLIDE_DOWN), "keeper-card")
+        self.filter_panel.add(filters)
+        filters.show_all()
+        self.filter_panel.set_visible(False)
+        self.filter_panel.set_no_show_all(True)
+        self.filter_panel.connect("notify::child-revealed", self._filters_revealed)
+        button(tools, "Filters", self._toggle_filters, icon="system-search-symbolic")
+        self.pack_start(header, False, False, 0)
+        self.pack_start(self.filter_panel, False, False, 0)
+        self.table, scroll = pane_table(Gtk.ListStore(str, str, str, str, str, str), self.TITLES,
+                                       (138, 110, 106, 140, 145), status=(4, ACTIVITY_STATES),
+                                       expand_columns=(1, 2, 3), muted_columns=(0,))
         self.table.connect("row-activated", self._details)
-        self.pack_start(scroll, True, True, 0)
+        self.empty, self.empty_label, _ = empty_state("document-open-recent-symbolic", "No activity recorded")
+        self.pack_start(table_card(scroll, self.empty), True, True, 0)
+
+    def _toggle_filters(self, *_):
+        opened = self.filter_panel.get_reveal_child()
+        self.filter_panel.set_visible(True)
+        self.filter_panel.set_reveal_child(not opened)
+        if not opened:
+            self.filters["vault"].grab_focus()
+
+    def _filters_revealed(self, panel, _property):
+        if not panel.get_reveal_child() and not panel.get_child_revealed():
+            panel.hide()
 
     def refresh(self, *_):
         try:
@@ -220,8 +363,11 @@ class ActivityView(Gtk.Box):
         except ActivityError:
             rows = []
         self.rows = {str(row["id"]): row for row in rows}
-        fill_table(self.table, [(_time(row["requested"]), reported(row["model"]), reported(row["chat"]),
+        fill_table(self.table, [(table_time(row["requested"]), reported(row["model"]), reported(row["chat"]),
                                  row["action"], row["outcome"], str(row["id"])) for row in rows], 5)
+        filtered = any(field.get_text() for field in self.filters.values())
+        self.empty_label.set_text("No activity matches these filters" if filtered else "No activity recorded")
+        self.empty.set_visible(not rows)
 
     def _details(self, *_):
         row = self.rows.get(selected_key(self.table, 5))
@@ -259,6 +405,7 @@ def entry_details(app, vault, entry):
         add_label(body, f"{record.name} · {' / '.join(entry['group_path']) or 'Root'}\nEntry  {entry['id']}")
         add_label(body, f"Username  {entry['username'] or '—'}\nURL  {entry['url'] or '—'}")
         entry_actions = Gtk.Box(spacing=8)
+        button(entry_actions, "Copy entry reference", lambda *_: app.copy_reference(vault, "entry", entry["id"]))
         button(entry_actions, "Edit entry…", lambda *_: dialog.response(EDIT_ENTRY_RESPONSE))
         button(entry_actions, "Move entry to recycle bin…", lambda *_: dialog.response(RECYCLE_ENTRY_RESPONSE))
         body.pack_start(entry_actions, False, False, 0)

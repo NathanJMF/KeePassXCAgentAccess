@@ -9,6 +9,7 @@ from tempfile import TemporaryDirectory
 from threading import Thread
 from unittest import TestCase
 
+from keepassxc_agent_access.agent_runner import inherited_directory_fds, invocation
 from keepassxc_agent_access.protocol import decode, encode
 from keepassxc_agent_access.runner_token import credential
 
@@ -58,7 +59,8 @@ class RunnerTests(TestCase):
         self.assertEqual(replies[0]["result"]["serverInfo"]["name"], "Keeper")
         self.assertEqual(replies[0]["result"]["protocolVersion"], "2025-06-18")
         self.assertEqual({tool["name"] for tool in replies[1]["result"]["tools"]},
-                         {"access_status", "request_access", "list_vaults", "list_entries", "use_password"})
+                         {"access_status", "request_access", "request_edit", "edit_status",
+                          "list_vaults", "list_entries", "use_password"})
         self.assertEqual(payload(replies[2]), MISSING)
         self.assertEqual(stat.S_IMODE(self.profile.stat().st_mode), 0o700)
         self.assertEqual(list(self.profile.iterdir()), [])
@@ -97,6 +99,25 @@ class RunnerTests(TestCase):
                               "isError": True})
         self.assertEqual(list(self.profile.iterdir()), [])
 
+    def test_edit_tools_pass_only_typed_arguments_to_the_cli(self):
+        request_id = "229b7a79-bcb0-450c-a320-bfccdd672f75"
+        example = {"id": request_id, "operation": "replace_password", "vault": request_id,
+                   "entry": request_id, "password_source": "generate"}
+        args, data = invocation("request_edit", {"request": example})
+        self.assertEqual(args[1:], ["edits", "request", "--json"])
+        self.assertEqual(decode(data), example)
+        args, data = invocation("edit_status", {"id": request_id})
+        self.assertEqual(args[1:], ["edits", "status", "--json", f"--request={request_id}"])
+        self.assertEqual(data, b"")
+        result, replies = self.run_server(
+            call_tool("request_edit", {"request": {**example, "password": "synthetic-secret"}}, identifier=1),
+            call_tool("edit_status", {"id": "--help"}, identifier=2),
+        )
+        self.assertEqual((result.returncode, result.stderr), (0, b""))
+        self.assertNotIn(b"synthetic-secret", result.stdout)
+        self.assertTrue(all(row["result"]["isError"] for row in replies))
+        self.assertEqual(list(self.profile.iterdir()), [])
+
     def test_enrollment_retains_the_same_credential_across_runner_restarts(self):
         with socket.socket(socket.AF_UNIX) as listener:
             listener.bind(str(self.endpoint))
@@ -125,6 +146,52 @@ class RunnerTests(TestCase):
             self.assertEqual(observed[1]["credential"], token)
             self.assertEqual(stat.S_IMODE((self.profile / "token").stat().st_mode), 0o600)
             self.assertNotIn(token.encode(), enrolled.stdout + checked.stdout + enrolled.stderr + checked.stderr)
+
+    def test_tool_child_inherits_only_configured_directory_descriptors(self):
+        directories = [self.root / name for name in ("broker-path", "profile-path")]
+        for path in directories:
+            path.mkdir(mode=0o700)
+        socket_anchor, profile_anchor = fds = tuple(os.open(path, os.O_PATH | os.O_DIRECTORY) for path in directories)
+        for fd in fds:
+            self.addCleanup(os.close, fd)
+        endpoint = Path(f"/proc/self/fd/{socket_anchor}/keeper.sock")
+        profile = Path(f"/proc/self/fd/{profile_anchor}/agent-profile")
+        self.assertEqual(inherited_directory_fds(endpoint, profile, fds), tuple(sorted(fds)))
+        invalid = ((), (socket_anchor,), (*fds, profile_anchor))
+        for supplied in invalid:
+            with self.subTest(supplied=supplied), self.assertRaises(ValueError):
+                inherited_directory_fds(endpoint, profile, supplied)
+        with open(self.root / "regular-file", "w") as file:
+            with self.assertRaises(ValueError):
+                inherited_directory_fds(Path(f"/proc/self/fd/{file.fileno()}/keeper.sock"), profile,
+                                        (file.fileno(), profile_anchor))
+
+        with socket.socket(socket.AF_UNIX) as listener:
+            listener.bind(str(directories[0] / "keeper.sock"))
+            listener.listen()
+            listener.settimeout(8)
+            calls = []
+
+            def serve():
+                connection, _ = listener.accept()
+                with connection, connection.makefile("rb") as stream:
+                    calls.append(decode(stream.readline())["operation"])
+                    connection.sendall(encode({"status": "pending"}))
+
+            thread = Thread(target=serve, daemon=True)
+            thread.start()
+            request = call_tool("request_access", {"request": {"identity": "Fixture", "project": "Fixture",
+                                                               "items": [{"label": "Fixture", "metadata": True}]}})
+            result = subprocess.run(
+                [RUNNER, "--socket", endpoint, "--profile-dir", profile,
+                 "--inherit-directory-fd", str(socket_anchor), "--inherit-directory-fd", str(profile_anchor)],
+                input=encode(request), pass_fds=fds, capture_output=True, check=False, timeout=12,
+            )
+            self.assertEqual((result.returncode, result.stderr), (0, b""))
+            self.assertEqual(payload(decode(result.stdout)), {"status": "pending"})
+            thread.join(8)
+            self.assertEqual(calls, ["request_access"])
+            self.assertEqual(stat.S_IMODE((directories[1] / "agent-profile" / "token").stat().st_mode), 0o600)
 
     def test_concurrent_initialization_yields_one_private_token(self):
         self.profile.mkdir(mode=0o700)

@@ -71,5 +71,18 @@ def owner_snapshot(vault):
         if row is not None:
             entries.append(dict(row, group=str(entry.group.uuid),
                                 username=entry.username or "", url=entry.url or ""))
-    response = encode({"groups": groups, "entries": entries})
+    recycle_group = next((group for group in vault.groups if group.uuid == recycle_id), None)
+    if recycle_group is None:
+        recycle_path = [vault.root_group.name or "", "Recycle Bin"]
+    else:
+        recycle_path = []
+        while recycle_group is not None:
+            recycle_path.append(recycle_group.name or "")
+            recycle_group = recycle_group.parentgroup
+        recycle_path.reverse()
+    recycle_bin = {
+        "enabled": vault.tree.findtext("Meta/RecycleBinEnabled") == "True",
+        "path": recycle_path,
+    }
+    response = encode({"groups": groups, "entries": entries, "recycle_bin": recycle_bin})
     return response if len(response) <= RESPONSE_LIMIT else encode({"error": "too_large"})

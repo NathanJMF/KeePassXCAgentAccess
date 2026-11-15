@@ -70,6 +70,16 @@ Use **Resume agent access** in the tray or main window to let approved tokens ru
 
 Credential use requires an enabled action on the selected entry. **HTTPS Basic-auth GET** uses the entry's username and password. **HTTPS Bearer token GET** uses the password field as the bearer token. Both use fixed HTTPS destinations. Changing the type or destination requires fresh approval. **Activity** shows Time, Model, Chat, Action, and Outcome. Filter by vault, agent, or other columns, and double-click a row for more context. `KEEPASSXC_AGENT_MODEL`, `KEEPASSXC_AGENT_CHAT`, and `KEEPASSXC_AGENT_CHAT_ID` supply optional agent-reported attribution.
 
+## Review agent edit requests
+
+An active runner token can submit one edit request with a new UUID and exact vault, entry or group references. In **Access**, open the pending edit to see its target, destination, and changed fields. Choose **Approve and apply** or **Deny**. Keeper requires a fresh request if the reviewed vault state changes.
+
+Use **Copy group reference** in the vault menu or **Copy entry reference** in entry details to give the agent the exact target.
+
+The CLI submits proposals with `keepassxc-agent edits request --json` and checks their status with `keepassxc-agent edits status --request REQUEST_UUID --json`. The stdio runner offers `request_edit` and `edit_status`. See the KeePass skill for the request format. Reuse the same UUID for transport retries. Each approval applies to a single change.
+
+Supported requests create entries or groups, edit entry metadata or rename groups, move or recycle an item within its vault, and replace an entry password. A password request selects **Keeper-generated** or **owner-entered** in the request. Keeper handles the actual password inside the owner account. Changes to an entry's username or password invalidate its existing credential action approvals. Edit outcomes and changed field names are recorded in **Activity**.
+
 ## Test with synthetic data
 
 ```sh

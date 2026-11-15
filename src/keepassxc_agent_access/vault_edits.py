@@ -6,7 +6,7 @@ from fcntl import flock, LOCK_EX, LOCK_NB
 from hashlib import file_digest
 import os
 from pathlib import Path
-from secrets import token_bytes, token_hex
+from secrets import token_bytes, token_hex, token_urlsafe
 import stat
 
 from .entry_projection import active_entry, active_group, owner_snapshot
@@ -34,7 +34,7 @@ def database_file(path):
         yield database
 
 
-def _text(value, *, required=False):
+def edit_text(value, *, required=False):
     if not isinstance(value, str) or len(value) > 4096 or required and not value.strip():
         raise EditError("invalid")
     # Match the XML character range that the KeePass format can preserve.
@@ -62,12 +62,16 @@ def _entry(vault, identifier):
 
 def _put_entry(vault, request):
     destination = _group(vault, request["parent"])
-    title = _text(request["title"], required=True)
-    username = _text(request["username"])
-    url = _text(request["url"])
+    title = edit_text(request["title"], required=True)
+    username = edit_text(request["username"])
+    url = edit_text(request["url"])
     password = request["password"]
+    if request.get("generate_password"):
+        if request["entry"] is None or password is not None:
+            raise EditError("invalid")
+        password = token_urlsafe(32)
     if password is not None:
-        password = _text(password)
+        password = edit_text(password)
     if request["entry"] is None:
         return vault.add_entry(destination, title, username, password or "", url=url, force_creation=True).uuid
 
@@ -88,7 +92,7 @@ def _put_entry(vault, request):
 
 def _put_group(vault, request):
     destination = _group(vault, request["parent"])
-    name = _text(request["name"], required=True)
+    name = edit_text(request["name"], required=True)
     if request["group"] is None:
         return vault.add_group(destination, name).uuid
 

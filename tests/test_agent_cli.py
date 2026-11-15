@@ -6,7 +6,8 @@ from tempfile import TemporaryDirectory
 from threading import Thread
 from unittest import TestCase
 
-from keepassxc_agent_access.protocol import LIST_REQUEST, decode
+from keepassxc_agent_access.protocol import LIST_REQUEST, decode, encode
+from keepassxc_agent_access.runner_token import credential
 
 
 CLI = Path(__file__).resolve().parents[1] / "keepassxc-agent"
@@ -86,3 +87,107 @@ class AgentCliTests(TestCase):
         result = self.reply(payload, ("username", "url"))
         self.assertEqual(result.returncode, 0)
         self.assertEqual(result.stdout, payload)
+
+
+class EditCliTests(TestCase):
+    identifier = "16a1c7bd-72e4-45a7-bdb0-6fef1918e21a"
+    vault = "115e5c59-fa17-4176-a0da-21467b723cbb"
+    entry = "349de400-f0c7-4cf7-829b-e6b17b753fb8"
+
+    def setUp(self):
+        temp = TemporaryDirectory(dir="/tmp")
+        self.addCleanup(temp.cleanup)
+        self.root = Path(temp.name)
+        self.endpoint = self.root / "keeper.sock"
+        self.token_file = self.root / "token"
+        self.token = credential(self.token_file, create=True)
+
+    def invoke(self, *args, stdin=b""):
+        return subprocess.run(
+            [CLI, "edits", *args, "--json"], input=stdin, capture_output=True, check=False, timeout=8,
+            env={"PATH": "/usr/bin:/bin", "KEEPASSXC_AGENT_SOCKET": str(self.endpoint),
+                 "KEEPASSXC_AGENT_TOKEN_FILE": str(self.token_file)},
+        )
+
+    def serve(self, *replies):
+        listener = socket.socket(socket.AF_UNIX)
+        self.addCleanup(listener.close)
+        listener.bind(str(self.endpoint))
+        listener.listen()
+        listener.settimeout(8)
+        observed = []
+
+        def dispatch():
+            for reply in replies:
+                connection, _ = listener.accept()
+                with connection, connection.makefile("rb") as stream:
+                    observed.append(decode(stream.readline()))
+                    connection.sendall(encode(reply))
+
+        server = Thread(target=dispatch, daemon=True)
+        server.start()
+        return observed, server
+
+    def test_requests_can_be_replayed_and_checked_by_id(self):
+        created = {"id": self.identifier, "status": "applied", "result": self.entry}
+        pending = {"id": self.identifier, "status": "pending"}
+        observed, server = self.serve(pending, created, created)
+        edit = {"id": self.identifier, "operation": "create_entry", "vault": self.vault,
+                "parent": self.entry, "fields": {"title": "Sample"}}
+        responses = [self.invoke("request", stdin=encode(edit)),
+                     self.invoke("request", stdin=encode(edit)),
+                     self.invoke("status", "--request", self.identifier)]
+        server.join(8)
+        self.assertEqual([process.returncode for process in responses], [0, 0, 0])
+        self.assertEqual([decode(process.stdout) for process in responses], [pending, created, created])
+        self.assertEqual(observed, [
+            {"version": 1, "operation": "request_edit", "request": edit, "credential": self.token},
+            {"version": 1, "operation": "request_edit", "request": edit, "credential": self.token},
+            {"version": 1, "operation": "edit_status", "id": self.identifier, "credential": self.token},
+        ])
+        for process in responses:
+            self.assertNotIn(self.token.encode(), process.stdout + process.stderr)
+
+    def test_malformed_edits_fail_before_the_broker_and_never_echo_content(self):
+        known = {"id": self.identifier, "operation": "replace_password", "vault": self.vault, "entry": self.entry,
+                 "password_source": "owner"}
+        references = {"id": self.identifier, "vault": self.vault, "entry": self.entry}
+        malformed = (
+            encode({**known, "password": "synthetic-password"}),
+            encode({**known, "fields": {"password": "synthetic-password"}}),
+            encode({**references, "operation": "update_entry", "fields": {"username": ["sample"]}}),
+            encode({**references, "operation": "move_entry"}),
+            encode({**known, "entry": "broken-id"}),
+            encode(known)[:-2] + b',"operation":"replace_password"}\n',
+            b'[]\n',
+        )
+        for request in malformed:
+            with self.subTest(request=request):
+                process = self.invoke("request", stdin=request)
+                self.assertEqual(process.returncode, 1)
+                self.assertEqual(process.stdout, b"")
+                self.assertNotIn(b"synthetic-password", process.stderr)
+                self.assertIn(b"The broker rejected", process.stderr)
+
+    def test_edit_status_rejects_response_secrets_and_wrong_references(self):
+        secret = {"id": self.identifier, "status": "applied", "password": "synthetic-response-secret"}
+        wrong = {"id": self.entry, "status": "pending"}
+        wrong_result_status = {"id": self.identifier, "status": "denied", "result": self.entry}
+        bad_create_id = {"id": self.identifier, "status": "applied", "result": "synthetic-response-secret"}
+        observed, server = self.serve(secret, wrong, wrong_result_status, bad_create_id)
+        for _ in range(4):
+            process = self.invoke("status", "--request", self.identifier)
+            self.assertEqual(process.returncode, 1)
+            self.assertEqual(process.stdout, b"")
+            self.assertNotIn(b"synthetic-response-secret", process.stderr)
+        server.join(8)
+        self.assertEqual(len(observed), 4)
+
+    def test_replayed_non_create_cannot_return_a_result_id(self):
+        _, server = self.serve({"id": self.identifier, "status": "applied", "result": self.entry})
+        edit = {"id": self.identifier, "operation": "replace_password", "vault": self.vault, "entry": self.entry,
+                "password_source": "generate"}
+        process = self.invoke("request", stdin=encode(edit))
+        server.join(8)
+        self.assertEqual(process.returncode, 1)
+        self.assertEqual(process.stdout, b"")

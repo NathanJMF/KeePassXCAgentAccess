@@ -1,6 +1,7 @@
 """The owner desktop and tray for the multi-vault workspace."""
 
 from dataclasses import replace
+import json
 from pathlib import Path
 import pwd
 import signal
@@ -15,9 +16,10 @@ from gi.repository import Gdk, Gio, GLib, Gtk, Pango
 from .activity import ActivityError, ActivityStore
 from .broker import BrokerConfig, ListingBroker
 from .desktop import DesktopSession
+from .edit_requests import EditRequests
 from .grants import Grants
 from .keyring import KeyringError, SystemKeyring
-from .owner_views import _dialog, _label, _scroll, _table
+from .owner_views import _dialog, _label, _scroll
 from .protocol import ListingError
 from .scoped_broker import ScopedBroker
 from .settings import SettingsError, SettingsStore
@@ -26,7 +28,9 @@ from .vault import UnlockCancelled, VaultError
 from .workspace import Workspace
 from .workspace_editor import edit_entry, edit_group, recycle_group
 from .workspace_style import install_style, styled
-from .workspace_views import AccessView, ActivityView, add_label, button, entry_details, selected_key
+from .workspace_views import (
+    AccessView, ActivityView, add_label, button, empty_state, entry_details, pane_table, section_heading, selected_key,
+)
 
 
 OWNER_ERRORS = (ActivityError, KeyringError, ListingError, OSError, SettingsError, ValueError, VaultError)
@@ -41,6 +45,7 @@ class WorkspaceApplication(Gtk.Application):
         self.show_window = show_window
         self.workspace = None
         self.grants = None
+        self.edit_requests = None
         self.broker = None
         self.window = None
         self.dialog = None
@@ -63,7 +68,8 @@ class WorkspaceApplication(Gtk.Application):
             previous = self.workspace.legacy_access.read()
             self.activity.recover(previous.retention_days)
             self.grants = Grants(self.workspace, self.activity)
-            engine = ScopedBroker(self.workspace, self.grants, self.activity)
+            self.edit_requests = EditRequests(self.workspace, self.grants, self.activity)
+            engine = ScopedBroker(self.workspace, self.grants, self.activity, edits=self.edit_requests)
             self.broker = ListingBroker(previous.broker_config(BrokerConfig.from_environment()), lambda: engine, engine)
             if self.broker.config:
                 self.broker.start()
@@ -107,12 +113,12 @@ class WorkspaceApplication(Gtk.Application):
 
         outer = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
         self.window.add(outer)
-        pane = Gtk.Paned(orientation=Gtk.Orientation.HORIZONTAL, position=245)
+        pane = styled(Gtk.Paned(orientation=Gtk.Orientation.HORIZONTAL, position=236), "keeper-divider")
         outer.pack_start(pane, True, True, 0)
         pane.pack1(self._build_sidebar(), resize=False, shrink=False)
 
         main = styled(Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=16), "keeper-pane")
-        main.set_border_width(18)
+        main.set_border_width(24)
         pane.pack2(main, resize=True, shrink=False)
         self.notice = styled(_label(""), "keeper-notice")
         main.pack_start(self.notice, False, False, 0)
@@ -126,21 +132,32 @@ class WorkspaceApplication(Gtk.Application):
         self.stack.add_named(self.activity_view, "activity")
         footer = styled(Gtk.Box(spacing=8), "keeper-footer")
         outer.pack_start(footer, False, False, 0)
-        self.entry_count = styled(Gtk.Label(xalign=0, hexpand=True), "keeper-muted")
-        footer.pack_start(self.entry_count, True, True, 0)
-        self.activity_button = button(footer, "Activity", lambda *_: self._view("activity"))
-        self.access_button = button(footer, "Access", lambda *_: self._view("access"))
+        self.entry_count = styled(Gtk.Label(xalign=0), "keeper-muted")
+        footer.pack_start(self.entry_count, False, False, 0)
+        footer.pack_start(Gtk.Box(hexpand=True), True, True, 0)
+        self.activity_button = button(footer, "Activity", lambda *_: self._view("activity"),
+                                      icon="document-open-recent-symbolic")
+        self.access_button = button(footer, "Access", lambda *_: self._view("access"), icon="changes-prevent-symbolic")
         outer.show_all()
         self._view("browse")
 
     def _build_header(self):
         header = styled(Gtk.HeaderBar(title=APP_TITLE, show_close_button=True), "keeper-header")
+        header.set_custom_title(Gtk.Box())
         self.window.set_titlebar(header)
-        add = Gtk.Button(label="Add vault…", always_show_image=True)
+        self.window.set_title(APP_TITLE)
+        brand = styled(Gtk.Box(spacing=7, valign=Gtk.Align.CENTER), "keeper-brand")
+        badge = styled(Gtk.Box(valign=Gtk.Align.CENTER), "keeper-brand-mark")
+        badge.pack_start(Gtk.Image.new_from_icon_name("dialog-password-symbolic", Gtk.IconSize.BUTTON),
+                         False, False, 0)
+        brand.pack_start(badge, False, False, 0)
+        brand.pack_start(Gtk.Label(label=APP_TITLE, xalign=0), False, False, 0)
+        header.pack_start(brand)
+        add = styled(Gtk.Button(label="Add vault…", always_show_image=True), "keeper-control")
         add.set_image(Gtk.Image.new_from_icon_name("list-add-symbolic", Gtk.IconSize.BUTTON))
         add.connect("clicked", lambda *_: self._configure())
         header.pack_start(add)
-        settings = Gtk.MenuButton()
+        settings = styled(Gtk.MenuButton(), "keeper-control", "keeper-quiet")
         settings.set_tooltip_text("Keeper settings")
         settings.get_accessible().set_name("Keeper settings")
         settings.set_image(Gtk.Image.new_from_icon_name("open-menu-symbolic", Gtk.IconSize.BUTTON))
@@ -152,7 +169,8 @@ class WorkspaceApplication(Gtk.Application):
         settings_menu.show_all()
         settings.set_popup(settings_menu)
         header.pack_end(settings)
-        self.pause_button = Gtk.Button(label="Resume agent access", always_show_image=True)
+        self.pause_button = styled(Gtk.Button(label="Resume agent access", always_show_image=True),
+                                   "keeper-control", "keeper-paused")
         self.pause_icon = Gtk.Image.new_from_icon_name("changes-prevent-symbolic", Gtk.IconSize.BUTTON)
         self.pause_button.set_image(self.pause_icon)
         self.pause_button.connect("clicked", self._toggle_pause)
@@ -160,18 +178,27 @@ class WorkspaceApplication(Gtk.Application):
         header.show_all()
 
     def _build_sidebar(self):
-        sidebar = styled(Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8), "keeper-sidebar")
-        heading = styled(Gtk.Label(label="Vaults", xalign=0, margin_top=16, margin_start=16, margin_bottom=4),
+        sidebar = styled(Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=11), "keeper-sidebar")
+        sidebar.set_size_request(165, -1)
+        heading = styled(Gtk.Label(label="Vaults", xalign=0, margin_top=24, margin_start=18),
                          "keeper-sidebar-title")
         sidebar.pack_start(heading, False, False, 0)
         self.tree = Gtk.TreeView(model=Gtk.TreeStore(str, str, str, str), headers_visible=False)
-        labels = Gtk.CellRendererText(ellipsize=Pango.EllipsizeMode.END, ypad=7)
+        self.tree.set_level_indentation(5)
+        labels = Gtk.CellRendererText(ellipsize=Pango.EllipsizeMode.END, ypad=9)
         icons = Gtk.CellRendererPixbuf(xpad=6)
         column = Gtk.TreeViewColumn("Vaults")
         column.pack_start(icons, False)
         column.add_attribute(icons, "icon-name", 3)
         column.pack_start(labels, True)
         column.add_attribute(labels, "text", 0)
+
+        def vault_weight(_column, cell, model, row, _data):
+            selected = self.tree.get_selection().iter_is_selected(row)
+            emphasized = selected or not model[row][2]
+            cell.set_property("weight", Pango.Weight.SEMIBOLD if emphasized else Pango.Weight.NORMAL)
+
+        column.set_cell_data_func(labels, vault_weight)
         self.tree.append_column(column)
         self.tree.get_selection().connect("changed", self._select)
         self.tree.connect("button-release-event", self._tree_click)
@@ -179,20 +206,19 @@ class WorkspaceApplication(Gtk.Application):
         scroll = _scroll(self.tree)
         scroll.set_shadow_type(Gtk.ShadowType.NONE)
         scroll.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+        scroll.set_margin_start(9)
+        scroll.set_margin_end(9)
         sidebar.pack_start(scroll, True, True, 0)
         return sidebar
 
     def _build_browser(self):
-        self.browser = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=14)
+        self.browser = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=18)
         self.stack.add_named(self.browser, "browse")
-        header = Gtk.Box(spacing=10)
-        self.browser.pack_start(header, False, False, 0)
-        titles = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=3, hexpand=True)
-        header.pack_start(titles, True, True, 0)
-        self.browse_title = styled(Gtk.Label(xalign=0, ellipsize=Pango.EllipsizeMode.END), "keeper-title")
+        header, titles, self.browse_title, self.browse_icon = section_heading("Vaults", "drive-harddisk-symbolic")
         self.browse_path = styled(Gtk.Label(xalign=0, ellipsize=Pango.EllipsizeMode.START), "keeper-muted")
-        titles.pack_start(self.browse_title, False, False, 0)
         titles.pack_start(self.browse_path, False, False, 0)
+        titles.reorder_child(self.browse_path, 0)
+        self.browser.pack_start(header, False, False, 0)
 
         self.vault_tools = Gtk.Box(spacing=6, valign=Gtk.Align.CENTER)
         header.pack_end(self.vault_tools, False, False, 0)
@@ -205,7 +231,8 @@ class WorkspaceApplication(Gtk.Application):
             self.vault_buttons[name] = button(self.vault_tools, title, handler)
         styled(self.vault_buttons["unlock"], "suggested-action")
 
-        self.new_item = Gtk.MenuButton(label="New")
+        self.new_item = styled(Gtk.MenuButton(label="New", always_show_image=True), "keeper-primary")
+        self.new_item.set_image(Gtk.Image.new_from_icon_name("list-add-symbolic", Gtk.IconSize.BUTTON))
         new_menu = Gtk.Menu()
         self.new_entry_item = Gtk.MenuItem(label="Entry…")
         self.new_entry_item.connect("activate", lambda *_: self._new_entry())
@@ -232,6 +259,9 @@ class WorkspaceApplication(Gtk.Application):
             item.connect("activate", handler)
             menu.append(item)
             self.vault_buttons[name] = item
+        self.group_reference = Gtk.MenuItem(label="Copy group reference")
+        self.group_reference.connect("activate", self._copy_group_reference)
+        menu.append(self.group_reference)
         self.group_separator = Gtk.SeparatorMenuItem()
         menu.append(self.group_separator)
         self.group_actions = []
@@ -244,25 +274,26 @@ class WorkspaceApplication(Gtk.Application):
         self.vault_menu.set_popup(menu)
         self.vault_tools.pack_end(self.vault_menu, False, False, 0)
 
-        self.entry_search = Gtk.SearchEntry(placeholder_text="Filter entries", width_chars=24, halign=Gtk.Align.START)
+        card = styled(Gtk.Box(orientation=Gtk.Orientation.VERTICAL), "keeper-card")
+        self.browser.pack_start(card, True, True, 0)
+        self.entry_tools = styled(Gtk.Box(), "keeper-card-toolbar")
+        self.entry_search = styled(Gtk.SearchEntry(placeholder_text="Filter entries", width_chars=28,
+                                                 max_width_chars=36, halign=Gtk.Align.START), "keeper-search")
         self.entry_search.set_tooltip_text("Filter the selected group (Ctrl+F)")
         self.entry_search.connect("changed", lambda *_: self._browse())
-        self.browser.pack_start(self.entry_search, False, False, 0)
+        self.entry_tools.pack_start(self.entry_search, False, False, 0)
+        card.pack_start(self.entry_tools, False, False, 0)
 
-        self.entries = styled(_table(Gtk.ListStore(str, str, str, str), ("Title", "Username", "URL")), "keeper-table")
-        for index, column in enumerate(self.entries.get_columns()):
-            column.set_resizable(True)
-            column.set_expand(True)
-            column.set_sizing(Gtk.TreeViewColumnSizing.FIXED)
-            column.set_fixed_width((180, 130, 160)[index])
-            column.get_cells()[0].set_properties(ellipsize=Pango.EllipsizeMode.END, xpad=8, ypad=8)
+        self.entries, self.entry_scroll = pane_table(Gtk.ListStore(str, str, str, str),
+                                                     ("Title", "Username", "URL"), (175, 124, 140),
+                                                     lead_icon="dialog-password-symbolic", expand_columns=(0, 1, 2), muted_columns=(1, 2))
         self.entries.connect("row-activated", self._entry)
-        self.entry_scroll = _scroll(self.entries)
-        self.entry_scroll.set_shadow_type(Gtk.ShadowType.NONE)
-        self.browser.pack_start(self.entry_scroll, True, True, 0)
-        self.empty_entries = styled(Gtk.Label(wrap=True, justify=Gtk.Justification.CENTER,
-                                              valign=Gtk.Align.CENTER), "keeper-muted")
-        self.browser.pack_start(self.empty_entries, True, True, 0)
+        card.pack_start(self.entry_scroll, True, True, 0)
+        self.empty_state, self.empty_entries, self.empty_icon = empty_state("drive-harddisk-symbolic", "")
+        area = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, valign=Gtk.Align.FILL, halign=Gtk.Align.FILL)
+        area.set_center_widget(self.empty_state)
+        card.pack_start(area, True, True, 0)
+        self.empty_area = area
 
     def _keyboard(self, _window, event):
         if (event.state & Gtk.accelerator_get_default_mod_mask() == Gdk.ModifierType.CONTROL_MASK
@@ -322,9 +353,9 @@ class WorkspaceApplication(Gtk.Application):
         for view, button in (("access", self.access_button), ("activity", self.activity_button)):
             style = button.get_style_context()
             if name == view:
-                style.add_class("suggested-action")
+                style.add_class("keeper-current")
             else:
-                style.remove_class("suggested-action")
+                style.remove_class("keeper-current")
         self.entry_count.set_visible(name == "browse")
         if name == "access":
             self.access_view.refresh()
@@ -344,8 +375,12 @@ class WorkspaceApplication(Gtk.Application):
                 self.pause_button.set_label(pause_label)
                 icon = "changes-prevent-symbolic" if paused else "changes-allow-symbolic"
                 self.pause_icon.set_from_icon_name(icon, Gtk.IconSize.BUTTON)
+                style = self.pause_button.get_style_context()
+                style.add_class("keeper-paused" if paused else "keeper-live")
+                style.remove_class("keeper-live" if paused else "keeper-paused")
             self.pause_button.set_sensitive(bool(self.broker and self.broker.enabled and not self.desktop.locked))
             count = sum(row.status == "pending" for row in self.grants.rows()) if self.grants else 0
+            count += sum(row.status == "pending" for row in self.pending_edits())
             access_label = f"Access ({count})" if count else "Access"
             self.access_button.set_label(access_label)
             if self.indicator:
@@ -358,6 +393,14 @@ class WorkspaceApplication(Gtk.Application):
             elif self.stack.get_visible_child_name() == "activity":
                 self.activity_view.refresh()
         return GLib.SOURCE_CONTINUE
+
+    def pending_edits(self):
+        if self.edit_requests:
+            try:
+                return self.edit_requests.rows()
+            except ActivityError:
+                self.message = "Agent edit requests are temporarily unavailable."
+        return []
 
     def _refresh_tree(self):
         with self.workspace.mutex:
@@ -431,11 +474,14 @@ class WorkspaceApplication(Gtk.Application):
         session = self.workspace.owner_session(record.id) if record else None
         group_id = self.selection[1] if record else ""
         title, path, empty = "Vaults", "", "Add a KeePass vault to begin."
+        symbol = "drive-harddisk-symbolic"
+        search = ""
         matches, total = [], 0
         if session:
             group = next((group for group in session.groups if group["id"] == group_id
                           or not group_id and group["parent"] is None), None)
             if group_id and group:
+                symbol = "folder-open-symbolic"
                 title = group["name"] or "(Untitled group)"
                 groups = {item["id"]: item for item in session.groups}
                 ancestors = []
@@ -455,15 +501,24 @@ class WorkspaceApplication(Gtk.Application):
             )]
             empty = "No entries match this filter." if search else "This group has no entries."
         elif record:
+            symbol = "changes-prevent-symbolic"
             title = f"{record.name} · Locked"
             empty = "Unlock this vault to view its groups and entries."
         self.browse_title.set_text(title)
         self.browse_path.set_text(path)
         self.browse_path.set_visible(bool(path))
+        self.entry_tools.set_visible(bool(session))
         self.entry_search.set_visible(bool(session))
         self.entry_scroll.set_visible(bool(matches))
         self.empty_entries.set_text(empty)
-        self.empty_entries.set_visible(not matches)
+        self.empty_area.set_visible(not matches)
+        current, _ = self.browse_icon.get_icon_name()
+        if current != symbol:
+            self.browse_icon.set_from_icon_name(symbol, Gtk.IconSize.LARGE_TOOLBAR)
+        empty_symbol = "system-search-symbolic" if search else symbol
+        current, _ = self.empty_icon.get_icon_name()
+        if current != empty_symbol:
+            self.empty_icon.set_from_icon_name(empty_symbol, Gtk.IconSize.DIALOG)
         count = "1 entry" if total == 1 else f"{total} entries"
         self.entry_count.set_text(f"{len(matches)} of {count}" if session and len(matches) != total
                                   else count if session else "")
@@ -479,6 +534,7 @@ class WorkspaceApplication(Gtk.Application):
                     self.entries.get_selection().select_iter(row)
         self.new_item.set_visible(bool(session))
         self.new_item.set_sensitive(not self.busy and not self.desktop.locked)
+        self.group_reference.set_visible(bool(session))
         for item in (self.group_separator, *self.group_actions):
             item.set_visible(bool(session and group_id))
         self.vault_menu.set_visible(bool(record))
@@ -491,6 +547,18 @@ class WorkspaceApplication(Gtk.Application):
             }[key]
             control.set_visible(visible)
             control.set_sensitive(not self.busy and not self.desktop.locked)
+
+    def copy_reference(self, vault, field, identifier):
+        if not self.desktop.locked and self.workspace.owner_session(vault):
+            reference = json.dumps({"vault": vault, field: identifier})
+            Gtk.Clipboard.get(Gdk.SELECTION_CLIPBOARD).set_text(reference, -1)
+
+    def _copy_group_reference(self, *_):
+        record = self._record()
+        session = self.workspace.owner_session(record.id) if record else None
+        if session:
+            group = self.selection[1] or next(item["id"] for item in session.groups if item["parent"] is None)
+            self.copy_reference(record.id, "parent", group)
 
     def _show_group(self, identifier, group):
         self.selection = (identifier, group)

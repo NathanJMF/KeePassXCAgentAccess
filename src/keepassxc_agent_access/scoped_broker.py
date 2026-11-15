@@ -8,10 +8,11 @@ from .settings import SettingsError
 
 
 class ScopedBroker:
-    def __init__(self, workspace, grants, activity):
+    def __init__(self, workspace, grants, activity, edits=None):
         self.workspace = workspace
         self.grants = grants
         self.activity = activity
+        self.edits = edits
 
     def __call__(self, payload, uid, _engine, live, dispatch, deliver):
         try:
@@ -28,7 +29,9 @@ class ScopedBroker:
             context = Attribution.parse(payload.get("context", {}))
             entry, binding_id, vault = None, None, None
             fields = ()
-            if operation == "request_access" and keys == {"request"}:
+            if operation in ("request_access", "request_edit") and keys == {"request"}:
+                pass
+            elif operation == "edit_status" and keys == {"id"}:
                 pass
             elif operation in ("access_status", "list_vaults") and not keys:
                 pass
@@ -65,6 +68,12 @@ class ScopedBroker:
             token = self.grants.authenticate(credential, uid)
             if operation == "access_status":
                 return encode({"status": token.status})
+            if operation in ("request_edit", "edit_status"):
+                if self.edits is None:
+                    raise ListingError("ineligible")
+                reply = (self.edits.submit(token, payload["request"], context) if operation == "request_edit"
+                         else self.edits.status(token, payload["id"]))
+                return encode(reply)
             generation = self.workspace.generation
             name = {"list_vaults": "List vaults", "list_entries": "List entries",
                     "use_password": "Use password"}[operation]
