@@ -335,7 +335,7 @@ class AccessView(Gtk.Box):
     TITLES = ("Requested", "Last used", "Identity", "Project", "Status")
     STATUS, RECORD_ID, KIND = 4, 5, 6
     REQUESTED_TIME, LAST_USED_TIME, REVIEW_GROUP = 7, 8, 9
-    ROW_KEY = 10
+    ROW_KEY, SEPARATOR_OFFSETS = 10, 11
     REMOVE = "Remove token…"
 
     def __init__(self, app):
@@ -348,7 +348,7 @@ class AccessView(Gtk.Box):
         self.review_button.set_sensitive(False)
         self.pack_start(header, False, False, 0)
         self.table, scroll = pane_table(
-            Gtk.TreeStore(*([str] * 7), object, object, bool, object, object),
+            Gtk.TreeStore(*([str] * 7), object, object, bool, object, object, object),
             self.TITLES, (138, 138, 122, 122, 119),
             status=(self.STATUS, ACCESS_STATES), muted_columns=(0, 1), expand_columns=(2, 3),
             time_columns={0: self.REQUESTED_TIME, 1: self.LAST_USED_TIME},
@@ -377,13 +377,13 @@ class AccessView(Gtk.Box):
             rows.append((other, -grant.requested,
                          (table_time(grant.requested), table_time(grant.last_used),
                           reported(grant.identity), reported(grant.project), grant.status.capitalize(), grant.id, "grant",
-                          grant.requested, grant.last_used, other, ("grant", grant.id), scope)))
+                          grant.requested, grant.last_used, other, ("grant", grant.id), (), scope)))
         for edit in edits:
             state = "Edit pending" if edit.status == "pending" else "Applying edit"
             rows.append((False, -edit.requested,
                          (table_time(edit.requested), "—", reported(edit.identity),
                           reported(edit.project), state, f"{edit.token_id}/{edit.id}", "edit", edit.requested, None,
-                          False, ("edit", edit.token_id, edit.id), ())))
+                          False, ("edit", edit.token_id, edit.id), (), ())))
         rows.sort()
         fill_table(self.table, [columns for _, _, columns in rows], self.ROW_KEY)
         self.empty.set_visible(not rows)
@@ -405,6 +405,8 @@ class AccessView(Gtk.Box):
         Gtk.cairo_transform_to_window(cr, table, window)
         selection = table.get_selection()
         context = table.get_style_context()
+        found, green = context.lookup_color("keeper_success")
+        separator_rgb = tuple(round(channel * 65535) for channel in (green.red, green.green, green.blue)) if found else None
         first_column, identity = table.get_column(0), table.get_column(2)
         for token in table.get_model():
             path = token.path
@@ -423,6 +425,13 @@ class AccessView(Gtk.Box):
                 if width <= 0:
                     continue
                 layout = table.create_pango_layout(row[2])
+                if separator_rgb is not None:
+                    attributes = Pango.AttrList()
+                    for offset in row[self.SEPARATOR_OFFSETS]:
+                        color = Pango.attr_foreground_new(*separator_rgb)
+                        color.start_index, color.end_index = offset, offset + 1
+                        attributes.insert(color)
+                    layout.set_attributes(attributes)
                 layout.set_width(width * Pango.SCALE)
                 layout.set_ellipsize(Pango.EllipsizeMode.END)
                 layout.set_single_paragraph_mode(True)
@@ -446,9 +455,11 @@ class AccessView(Gtk.Box):
                 paths[item.key] = (*parent, item.name)
                 continue
             vault, *groups = parent
-            label = f"{vault} > {' / '.join(groups) or '—'} > {item.name}"
+            prefix = f"{vault} > {' / '.join(groups) or '—'}"
+            label = f"{prefix} > {item.name}"
+            separators = tuple(len(part.encode("utf-8")) + 1 for part in (vault, prefix))
             rows.append(("", "", label, item.permissions, "", "", "scope", None, None, True,
-                         (grant.id, *item.key), ()))
+                         (grant.id, *item.key), separators, ()))
         return tuple(rows)
 
     def _open(self, *_):

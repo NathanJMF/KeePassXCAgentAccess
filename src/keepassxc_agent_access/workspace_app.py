@@ -342,6 +342,8 @@ class WorkspaceApplication(Gtk.Application):
         return True
 
     def _view(self, name):
+        if name == "access" and self.stack.get_visible_child_name() != name:
+            self.access_view.table.collapse_all()
         self.stack.set_visible_child_name(name)
         for view, button in (("access", self.access_button), ("activity", self.activity_button)):
             style = button.get_style_context()

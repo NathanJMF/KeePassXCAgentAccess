@@ -220,6 +220,9 @@ def main(root):
                 for row in token.iterchildren():
                     assert not row.model.iter_has_child(row.iter)
                     assert row[identity] not in entries
+                    label = row[identity].encode("utf-8")
+                    offsets = row[app.access_view.SEPARATOR_OFFSETS]
+                    assert len(offsets) == 2 and all(label[index:index + 1] == b">" for index in offsets)
                     entries[row[identity]] = row[project]
                 return entries
 
@@ -234,6 +237,12 @@ def main(root):
                 for _ in range(3):
                     table.get_column(identity).clicked()
                     assert read_inline() == inline
+                app.activity_button.clicked()
+                app.access_button.clicked()
+                token = access_root("expanded")
+                assert not table.row_expanded(token.path)
+                table.expand_row(token.path, False)
+                assert read_inline() == inline
 
             def inspect(dialog):
                 assert dialog.get_title() == "Access token"
