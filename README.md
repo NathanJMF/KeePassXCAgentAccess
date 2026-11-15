@@ -14,9 +14,9 @@ sudo apt install python3-gi python3-pykeepass gir1.2-gtk-3.0 \
 
 Run `./install-launcher` from the owner-controlled checkout to add **Keeper** to the GNOME application menu. Rerun the installer to refresh an existing launcher or if the checkout moves. Closing the window leaves the app running when the tray icon is available.
 
-1. Select **Add vault…** and choose an existing KeePass file. Enter its password and select its key file if required.
+1. Select **Add vault…** and choose an existing KeePass file. The picker opens the Keeper folder in your Documents directory when that folder exists. Enter its password and select its key file if required.
 2. Select **Remember on this device** to save the password in the system keyring, then select **Verify and save**.
-3. Expand the vault in the sidebar and select a group to browse its direct entries. Double-click an entry for details and credential actions.
+3. Select a vault in the sidebar to see all its entries and their folder paths. Expand it and select a folder to browse the entries directly inside. Double-click an entry for details and credential actions.
 4. Use **Lock vault** to close the selected vault independently. To check saved unlock, lock that vault and select **Unlock**.
 
 Use **Enter password…** to unlock manually or update a remembered password after rotating it in KeePassXC. **Forget password** deletes the app's saved credential. **Relink** checks the last verified contents of a moved vault before retaining its local identity and token scopes. **Remove…** removes the registration and its saved credential while keeping the database file.

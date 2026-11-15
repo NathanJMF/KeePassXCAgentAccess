@@ -36,7 +36,11 @@ The application SHALL support multiple unlocked vaults at once. Locking, removin
 
 ### Requirement: Browse groups and entries in the main pane
 
-The sidebar SHALL display registered vaults and expandable nested groups for unlocked ones. Selecting a vault root or group SHALL show the entries directly in that selection. Selecting an entry SHALL show its owner-side details, including its configured actions.
+The sidebar SHALL display registered vaults and expandable nested groups for unlocked ones. Selecting a vault SHALL show all its active entries with the relative folder path in the first column. Selecting a group SHALL show its direct entries. Selecting an entry SHALL show its owner-side details, including its configured actions.
+
+#### Scenario: Select a vault with folders
+- **WHEN** the owner selects an unlocked vault in the sidebar
+- **THEN** the main pane lists active entries from the root and nested folders with a leading Folder column
 
 #### Scenario: Navigate to a nested group
 - **WHEN** the owner expands an unlocked vault and selects a nested group

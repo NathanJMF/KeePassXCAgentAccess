@@ -24,7 +24,7 @@ from keepassxc_agent_access.settings import SettingsStore
 from keepassxc_agent_access.setup import VaultSetup
 from keepassxc_agent_access.tray import GLib, Gtk
 from keepassxc_agent_access.edit_request_view import OPERATION_LABELS
-from keepassxc_agent_access.workspace_app import WorkspaceApplication
+from keepassxc_agent_access.workspace_app import ENTRY_ID_COLUMN, WorkspaceApplication
 from keepassxc_agent_access.workspace_editor import edit_entry, recycle_entry
 from keepassxc_agent_access.keyring import SystemKeyring
 from tls_fixture import AUTHORIZATION, PASSWORD, USERNAME, tls_service
@@ -184,6 +184,11 @@ def main(root):
 
         def use(profile, vault, entry=first_entry, expected=0):
             return invoke(profile, "use", "--vault", vault, "--entry", entry, "--action", "check", expected=expected)
+
+        def open_entry(identifier):
+            table = app.entries
+            path = next(row.path for row in table.get_model() if row[ENTRY_ID_COLUMN] == identifier)
+            table.row_activated(path, next(column for column in table.get_columns() if column.get_title() == "Title"))
 
         def check_editors(vault):
             def fill_group(dialog, name):
@@ -381,7 +386,15 @@ def main(root):
                 app.vault_buttons["unlock"].clicked()
                 wait_for(lambda: not app.busy and app.workspace.session(first), "Migrated keyring did not unlock")
                 assert app.workspace.registrations[first].bindings[0].action == imported
-                assert [row[3] for row in app.entries.get_model()] == [first_entry]
+                assert {row[ENTRY_ID_COLUMN]: row[3] for row in app.entries.get_model()} == {
+                    first_entry: "Root", direct_entry: "Harbor Lab", nested_entry: "Harbor Lab / Field Notes",
+                }
+                assert [column.get_title() for column in app.entries.get_columns() if column.get_visible()] == [
+                    "Folder", "Title", "Username", "URL",
+                ]
+                app.entry_search.set_text("harbor lab / FIELD")
+                assert [row[ENTRY_ID_COLUMN] for row in app.entries.get_model()] == [nested_entry]
+                app.entry_search.set_text("")
 
                 def setup_secondary(dialog):
                     assert dialog.database.set_filename(str(second_path))
@@ -423,22 +436,24 @@ def main(root):
                     return GLib.SOURCE_CONTINUE
 
                 select_tree(second)
-                drive_dialog(lambda: app.entries.row_activated(Gtk.TreePath.new_from_string("0"),
-                                                               app.entries.get_column(0)), configure_action)
+                drive_dialog(lambda: open_entry(first_entry), configure_action)
                 assert app.workspace.registrations[second].binding(first_entry, "check").action.url.endswith("/second")
                 first_groups = app.workspace.session(first).groups
                 outer = next(row["id"] for row in first_groups if row["name"] == "Harbor Lab")
                 inner = next(row["id"] for row in first_groups if row["name"] == "Field Notes")
                 select_tree(first, outer)
-                assert [row[3] for row in app.entries.get_model()] == [direct_entry]
+                assert [row[ENTRY_ID_COLUMN] for row in app.entries.get_model()] == [direct_entry]
+                assert [column.get_title() for column in app.entries.get_columns() if column.get_visible()] == [
+                    "Title", "Username", "URL",
+                ]
                 selected_path = select_tree(first, inner)
-                assert [row[3] for row in app.entries.get_model()] == [nested_entry]
+                assert [row[ENTRY_ID_COLUMN] for row in app.entries.get_model()] == [nested_entry]
                 assert app.browse_title.get_text() == "Field Notes"
                 app.entry_search.set_text("NO MATCH")
                 assert not list(app.entries.get_model())
                 assert app.empty_entries.get_text() == "No entries match this filter."
                 app.entry_search.set_text(duplicate_title.upper())
-                assert [row[3] for row in app.entries.get_model()] == [nested_entry]
+                assert [row[ENTRY_ID_COLUMN] for row in app.entries.get_model()] == [nested_entry]
                 assert app.entry_count.get_text() == "1 entry"
                 app.activity_button.clicked()
                 assert app.stack.get_visible_child_name() == "activity"
@@ -520,8 +535,7 @@ def main(root):
                     GLib.timeout_add(25, close_details)
                     return GLib.SOURCE_REMOVE
 
-                drive_dialog(lambda: app.entries.row_activated(Gtk.TreePath.new_from_string("0"),
-                                                               app.entries.get_column(0)), edit_type)
+                drive_dialog(lambda: open_entry(first_entry), edit_type)
                 rebound = app.workspace.registrations[first].binding(first_entry, "check")
                 assert rebound.action.kind is ActionType.BEARER and rebound.action.url == imported.url
                 assert use("alpha", first, expected=1) == denied

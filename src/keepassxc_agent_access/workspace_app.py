@@ -29,11 +29,12 @@ from .workspace import Workspace
 from .workspace_editor import edit_entry, edit_group, recycle_group
 from .workspace_style import install_style, styled
 from .workspace_views import (
-    AccessView, ActivityView, add_label, button, empty_state, entry_details, pane_table, section_heading, selected_key,
+    AccessView, ActivityView, add_label, button, empty_state, entry_details, fill_table, pane_table, section_heading,
 )
 
 
 OWNER_ERRORS = (ActivityError, KeyringError, ListingError, OSError, SettingsError, ValueError, VaultError)
+ENTRY_ID_COLUMN = 4
 
 
 class WorkspaceApplication(Gtk.Application):
@@ -279,14 +280,16 @@ class WorkspaceApplication(Gtk.Application):
         self.entry_tools = styled(Gtk.Box(), "keeper-card-toolbar")
         self.entry_search = styled(Gtk.SearchEntry(placeholder_text="Filter entries", width_chars=28,
                                                  max_width_chars=36, halign=Gtk.Align.START), "keeper-search")
-        self.entry_search.set_tooltip_text("Filter the selected group (Ctrl+F)")
         self.entry_search.connect("changed", lambda *_: self._browse())
         self.entry_tools.pack_start(self.entry_search, False, False, 0)
         card.pack_start(self.entry_tools, False, False, 0)
 
-        self.entries, self.entry_scroll = pane_table(Gtk.ListStore(str, str, str, str),
-                                                     ("Title", "Username", "URL"), (175, 124, 140),
-                                                     lead_icon="dialog-password-symbolic", expand_columns=(0, 1, 2), muted_columns=(1, 2))
+        self.entries, self.entry_scroll = pane_table(
+            Gtk.ListStore(str, str, str, str, str), ("Title", "Username", "URL", "Folder"), (165, 110, 125, 128),
+            lead_icon="dialog-password-symbolic", expand_columns=(0, 1, 2, 3), muted_columns=(1, 2, 3),
+        )
+        self.folder_column = self.entries.get_column(3)
+        self.entries.move_column_after(self.folder_column, None)
         self.entries.connect("row-activated", self._entry)
         card.pack_start(self.entry_scroll, True, True, 0)
         self.empty_state, self.empty_entries, self.empty_icon = empty_state("drive-harddisk-symbolic", "")
@@ -478,8 +481,7 @@ class WorkspaceApplication(Gtk.Application):
         search = ""
         matches, total = [], 0
         if session:
-            group = next((group for group in session.groups if group["id"] == group_id
-                          or not group_id and group["parent"] is None), None)
+            group = next((group for group in session.groups if group["id"] == group_id), None) if group_id else None
             if group_id and group:
                 symbol = "folder-open-symbolic"
                 title = group["name"] or "(Untitled group)"
@@ -493,13 +495,18 @@ class WorkspaceApplication(Gtk.Application):
                 path = " / ".join((record.name, *reversed(ancestors)))
             else:
                 title = record.name
-            rows = [row for row in session.entries if group and row["group"] == group["id"]]
+            rows = [row for row in session.entries if row["group"] == group_id] if group_id else session.entries
             total = len(rows)
             search = self.entry_search.get_text().strip().casefold()
-            matches = [row for row in rows if not search or any(
-                search in row[field].casefold() for field in ("title", "username", "url")
-            )]
-            empty = "No entries match this filter." if search else "This group has no entries."
+            matches = []
+            for row in rows:
+                folder = "" if group_id else " / ".join(part or "(Untitled group)" for part in row["group_path"]) or "Root"
+                fields = (row["title"], row["username"], row["url"], folder)
+                if not search or any(search in field.casefold() for field in fields):
+                    matches.append((row, folder))
+            empty = "This group has no entries." if group_id else "This vault has no entries."
+            if search:
+                empty = "No entries match this filter."
         elif record:
             symbol = "changes-prevent-symbolic"
             title = f"{record.name} · Locked"
@@ -509,6 +516,8 @@ class WorkspaceApplication(Gtk.Application):
         self.browse_path.set_visible(bool(path))
         self.entry_tools.set_visible(bool(session))
         self.entry_search.set_visible(bool(session))
+        self.entry_search.set_tooltip_text("Filter the selected group (Ctrl+F)" if group_id else "Filter this vault (Ctrl+F)")
+        self.folder_column.set_visible(bool(session and not group_id))
         self.entry_scroll.set_visible(bool(matches))
         self.empty_entries.set_text(empty)
         self.empty_area.set_visible(not matches)
@@ -522,16 +531,10 @@ class WorkspaceApplication(Gtk.Application):
         count = "1 entry" if total == 1 else f"{total} entries"
         self.entry_count.set_text(f"{len(matches)} of {count}" if session and len(matches) != total
                                   else count if session else "")
-        self.entry_rows = {row["id"]: row for row in matches}
-        model = self.entries.get_model()
-        values = [(row["title"] or "(Untitled entry)", row["username"], row["url"], row["id"]) for row in matches]
-        if list(map(tuple, model)) != values:
-            selected = selected_key(self.entries, 3)
-            model.clear()
-            for value in values:
-                row = model.append(value)
-                if value[3] == selected:
-                    self.entries.get_selection().select_iter(row)
+        self.entry_rows = {row["id"]: row for row, _ in matches}
+        values = [(row["title"] or "(Untitled entry)", row["username"], row["url"], folder, row["id"])
+                  for row, folder in matches]
+        fill_table(self.entries, values, ENTRY_ID_COLUMN)
         self.new_item.set_visible(bool(session))
         self.new_item.set_sensitive(not self.busy and not self.desktop.locked)
         self.group_reference.set_visible(bool(session))
@@ -585,7 +588,7 @@ class WorkspaceApplication(Gtk.Application):
 
     def _entry(self, _table, path, _column):
         if not self.busy and not self.desktop.locked and self.selection:
-            identifier = self.entries.get_model()[path][3]
+            identifier = self.entries.get_model()[path][ENTRY_ID_COLUMN]
             if identifier in self.entry_rows:
                 entry_details(self, self.selection[0], self.entry_rows[identifier])
 

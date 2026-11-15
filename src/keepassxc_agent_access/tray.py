@@ -35,6 +35,11 @@ ICONS = {
 }
 
 
+def default_vault_directory():
+    documents = GLib.get_user_special_dir(GLib.UserDirectory.DIRECTORY_DOCUMENTS)
+    return (Path(documents) if documents else Path.home() / "Documents") / "Keeper"
+
+
 def password_entry():
     entry = Gtk.Entry(visibility=False, activates_default=True)
     entry.set_input_purpose(Gtk.InputPurpose.PASSWORD)
@@ -69,6 +74,10 @@ class SetupDialog(Gtk.Dialog):
             if target.key_file:
                 self.key_file.set_filename(str(target.key_file))
                 self.key_file_enabled.set_active(True)
+        else:
+            folder = default_vault_directory()
+            if folder.is_dir():
+                self.database.set_current_folder(str(folder))
         self._toggle_key_file()
         self.show_all()
 
