@@ -34,12 +34,10 @@ def _field(grid, row, label, widget, *, focus=None):
     return widget
 
 
-def _locations(app, vault, current):
-    """Return the root and a chooser whose destinations stay inside this vault."""
-    session = app.workspace.owner_session(vault)
-    names = {group["id"]: group for group in session.groups}
-    root, = (group["id"] for group in session.groups if group["parent"] is None)
-    options = [(app.workspace.registrations[vault].name, root)]
+def _group_options(groups):
+    names = {group["id"]: group for group in groups}
+    root, = (group["id"] for group in groups if group["parent"] is None)
+    options = []
     for identifier, group in names.items():
         if identifier == root:
             continue
@@ -50,15 +48,45 @@ def _locations(app, vault, current):
             path.append(ancestor["name"] or "(Untitled group)")
             parent = ancestor["parent"]
         if parent == root:
-            options.append((" / ".join(reversed(path)), identifier))
-    combo = Gtk.ComboBoxText()
-    combo.set_name("group-location")
-    combo.append(root, options[0][0])
-    for name, identifier in sorted(options[1:], key=lambda option: option[0].casefold()):
-        combo.append(identifier, name)
-    if not combo.set_active_id(current or root):
-        combo.set_active(0)
-    return root, combo
+            options.append((identifier, " / ".join(reversed(path))))
+    return [(root, "Root"), *sorted(options, key=lambda option: option[1].casefold())]
+
+
+def _entry_locations(app, grid, vault, group, *, creating):
+    workspace = app.workspace
+    with workspace.mutex:
+        available = {
+            record.id: (record.name, session.groups)
+            for record in workspace.registrations.values()
+            if (creating or record.id == vault) and (session := workspace.owner_session(record.id))
+        }
+    if vault not in available:
+        return None
+
+    vault_choice = Gtk.ComboBoxText()
+    vault_choice.set_name("entry-vault")
+    for identifier, (name, _) in sorted(available.items(), key=lambda item: item[1][0].casefold()):
+        vault_choice.append(identifier, name)
+    vault_choice.set_active_id(vault)
+    vault_choice.set_sensitive(creating)
+
+    group_choice = Gtk.ComboBoxText()
+    group_choice.set_name("group-location")
+
+    def populate(widget, selected=None):
+        group_choice.remove_all()
+        active = widget.get_active_id()
+        if active in available:
+            for identifier, name in _group_options(available[active][1]):
+                group_choice.append(identifier, name)
+            if not selected or not group_choice.set_active_id(selected):
+                group_choice.set_active(0)
+
+    populate(vault_choice, group)
+    vault_choice.connect("changed", populate)
+    _field(grid, 0, "_Vault", vault_choice)
+    _field(grid, 1, "_Group", group_choice)
+    return vault_choice, group_choice
 
 
 def edit_entry(app, vault, group, entry=None):
@@ -75,21 +103,24 @@ def _entry_form(app, vault, group, entry, saved_notes):
     if not app.workspace.owner_session(vault):
         return
     dialog, grid = _form(app, "Edit entry" if entry else "New entry")
-    root, location = _locations(app, vault, entry["group"] if entry else group)
-    _field(grid, 0, "_Group", location)
+    locations = _entry_locations(app, grid, vault, entry["group"] if entry else group, creating=entry is None)
+    if locations is None:
+        dialog.destroy()
+        return
+    vault_choice, group_choice = locations
     fields = {}
-    for index, (name, label) in enumerate((("title", "_Title"), ("url", "U_RL"), ("username", "_Username")), 1):
+    for index, (name, label) in enumerate((("title", "_Title"), ("url", "U_RL"), ("username", "_Username")), 2):
         control = Gtk.Entry(text=entry[name] if entry else "", activates_default=True)
         control.set_name(f"entry-{name}")
         fields[name] = _field(grid, index, label, control)
 
     change_password = Gtk.CheckButton(label="Replace saved password", no_show_all=not bool(entry))
-    grid.attach(change_password, 1, 4, 1, 1)
+    grid.attach(change_password, 1, 5, 1, 1)
     password = password_entry()
     password.set_name("entry-password")
     password.set_placeholder_text("Entry password")
     password.set_sensitive(entry is None)
-    _field(grid, 5, "_Password", password)
+    _field(grid, 6, "_Password", password)
 
     notes = Gtk.TextView(wrap_mode=Gtk.WrapMode.WORD_CHAR, accepts_tab=False,
                          left_margin=8, right_margin=8, top_margin=6, bottom_margin=6)
@@ -104,7 +135,7 @@ def _entry_form(app, vault, group, entry, saved_notes):
     notes_scroll = Gtk.ScrolledWindow(vexpand=True, min_content_height=90, shadow_type=Gtk.ShadowType.IN)
     notes_scroll.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
     notes_scroll.add(notes)
-    _field(grid, 6, "_Notes", notes_scroll, focus=notes)
+    _field(grid, 7, "_Notes", notes_scroll, focus=notes)
 
     def change(box):
         password.set_sensitive(box.get_active())
@@ -125,12 +156,14 @@ def _entry_form(app, vault, group, entry, saved_notes):
     notes_buffer.set_text("")
     if response != Gtk.ResponseType.OK:
         return
-    destination = location.get_active_id()
+    destination_vault = vault_choice.get_active_id()
+    destination_group = group_choice.get_active_id()
+    selection = "" if group_choice.get_active() == 0 else destination_group
     values = {name: field.get_text() for name, field in fields.items()}
     app._background(
-        lambda: app.workspace.put_entry(vault, destination, **values, password=updated_password,
+        lambda: app.workspace.put_entry(destination_vault, destination_group, **values, password=updated_password,
                                         notes=updated_notes, entry=entry["id"] if entry else None),
-        after=lambda _: app._show_group(vault, "" if destination == root else destination),
+        after=lambda _: app._show_group(destination_vault, selection),
     )
 
 

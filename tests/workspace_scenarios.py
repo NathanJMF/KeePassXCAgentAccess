@@ -283,7 +283,11 @@ def main(root):
             path = next(row.path for row in table.get_model() if row[ENTRY_ID_COLUMN] == identifier)
             table.row_activated(path, next(column for column in table.get_columns() if column.get_title() == "Title"))
 
-        def check_editors(vault):
+        def entry_locations(dialog):
+            choosers = {child.get_name(): child for child in descendants(dialog) if isinstance(child, Gtk.ComboBoxText)}
+            return choosers["entry-vault"], choosers["group-location"]
+
+        def check_editors(vault, other_vault):
             original_notes = "Synthetic notes on line one\nSynthetic notes on line two"
             updated_notes = original_notes + "\nUpdated in Keeper"
 
@@ -297,7 +301,18 @@ def main(root):
                 grid, = [child for child in descendants(dialog) if isinstance(child, Gtk.Grid)]
                 captions = sorted((grid.child_get_property(child, "top-attach"), child.get_text())
                                   for child in grid.get_children() if isinstance(child, Gtk.Label))
-                assert [label for _, label in captions] == ["Group", "Title", "URL", "Username", "Password", "Notes"]
+                assert [label for _, label in captions] == ["Vault", "Group", "Title", "URL", "Username",
+                                                           "Password", "Notes"]
+                vault_choice, group_choice = entry_locations(dialog)
+                assert vault_choice.get_active_id() == vault
+                assert vault_choice.get_sensitive() == create
+                assert group_choice.get_sensitive() and group_choice.get_active_id() == group
+                if create:
+                    assert {row[vault_choice.get_id_column()] for row in vault_choice.get_model()} == {
+                        vault, other_vault,
+                    }
+                else:
+                    assert len(vault_choice.get_model()) == 1
                 controls = {child.get_name(): child for child in descendants(dialog) if isinstance(child, Gtk.Entry)}
                 notes = next(child for child in descendants(dialog) if child.get_name() == "entry-notes")
                 assert isinstance(notes, Gtk.TextView)
@@ -325,6 +340,39 @@ def main(root):
             assert group and app.browse_title.get_text() == "New fixture group"
             created_group = next(row for row in app.workspace.owner_session(vault).groups if row["id"] == group)
             assert created_group["parent"] == root
+            other_session = app.workspace.owner_session(other_vault)
+            other_root, = (row["id"] for row in other_session.groups if row["parent"] is None)
+            other_group, = (row["id"] for row in other_session.groups if row["name"] == "Harbor Lab")
+            cross_title = "Cross-vault entry fixture"
+
+            def cross_vault_entry(dialog):
+                vault_choice, group_choice = entry_locations(dialog)
+                assert vault_choice.get_active_id() == vault
+                assert group_choice.get_active_id() == group
+                assert group_choice.set_active_id(root) and group_choice.get_active_text() == "Root"
+                assert group_choice.set_active_id(group)
+                assert vault_choice.set_active_id(other_vault)
+                assert group_choice.get_active_id() == other_root
+                assert group_choice.get_active_text() == "Root"
+                assert {row[group_choice.get_id_column()] for row in group_choice.get_model()} == {
+                    row["id"] for row in other_session.groups
+                }
+                assert group_choice.set_active_id(other_group)
+                title = next(child for child in descendants(dialog) if child.get_name() == "entry-title")
+                title.set_text(cross_title)
+                dialog.response(Gtk.ResponseType.OK)
+
+            drive_dialog(app.new_entry_item.activate, cross_vault_entry)
+            wait_for(lambda: not app.busy, "Creating an entry in the other vault timed out")
+            assert app.selection == (other_vault, other_group)
+            destination = app.workspace.registrations[other_vault].target
+            saved_other = PyKeePass(destination.database, password=UNLOCK, keyfile=str(destination.key_file))
+            cross_entry = saved_other.find_entries(title=cross_title, first=True)
+            assert cross_entry is not None and cross_entry.group.uuid == UUID(other_group)
+            assert all(row["title"] != cross_title for row in app.workspace.owner_session(vault).entries)
+            app.workspace.delete_entry(other_vault, str(cross_entry.uuid))
+            select_tree(vault, group)
+
             drive_dialog(app.new_entry_item.activate, lambda dialog: fields(dialog, "Created entry", create=True))
             wait_for(lambda: not app.busy, "Creating an entry timed out")
             entry, = app.entry_rows.values()
@@ -804,6 +852,15 @@ def main(root):
                 assert invoke("alpha", "entries", "list", expected=1) == denied
                 assert invoke("beta", "entries", "list")["entries"] == fixture[2:]
                 check_token_scope(first, second, first_locked=True)
+                select_tree(second)
+
+                def reject_locked_destination(dialog):
+                    vault_choice, group_choice = entry_locations(dialog)
+                    assert len(vault_choice.get_model()) == 1 and vault_choice.get_active_id() == second
+                    assert group_choice.get_active_text() == "Root"
+                    dialog.response(Gtk.ResponseType.CANCEL)
+
+                drive_dialog(app.new_entry_item.activate, reject_locked_destination)
                 select_tree(first)
                 app.vault_buttons["unlock"].clicked()
                 wait_for(lambda: not app.busy and app.workspace.session(first), "First vault did not unlock again")
@@ -822,7 +879,7 @@ def main(root):
                 assert invoke("alpha", "entries", "list", expected=1) == denied
                 assert invoke("beta", "entries", "list")["entries"] == fixture[2:]
 
-                check_editors(first)
+                check_editors(first, second)
                 assert invoke("beta", "entries", "list")["entries"] == fixture[2:]
                 app.activity_button.clicked()
                 view = app.activity_view
