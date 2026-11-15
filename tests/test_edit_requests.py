@@ -107,7 +107,11 @@ class EditRequestsTests(unittest.TestCase):
         with self.assertRaises(ListingError) as invalid_target:
             self._wire("request_edit", request=impossible)
         self.assertEqual(invalid_target.exception.code, "invalid_request")
-        for raw in (dict(real, password="Never persisted"), dict(real, fields={"password": "Never persisted"})):
+        for raw in (
+            dict(real, password="Never persisted"),
+            dict(real, fields={"password": "Never persisted"}),
+            dict(real, fields={"notes": "Owner-only test note"}),
+        ):
             with self.assertRaises(ListingError) as invalid_fields:
                 self._wire("request_edit", request=raw)
             self.assertEqual(invalid_fields.exception.code, "invalid_request")
