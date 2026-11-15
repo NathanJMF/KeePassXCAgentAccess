@@ -21,9 +21,10 @@ from password_scenarios import button, descendants
 from keepassxc_agent_access.access_settings import AccessMode, AccessStore, Action, ActionType, VaultPolicy
 from keepassxc_agent_access.activity import ActivityStore
 from keepassxc_agent_access.controller import VaultController
+from keepassxc_agent_access.launcher import install as install_launcher
 from keepassxc_agent_access.settings import SettingsStore
 from keepassxc_agent_access.setup import VaultSetup
-from keepassxc_agent_access.tray import GLib, Gtk
+from keepassxc_agent_access.tray import Gio, GLib, Gtk
 from keepassxc_agent_access.edit_request_view import OPERATION_LABELS
 from keepassxc_agent_access.workspace_app import (
     ENTRY_FOLDER_COLUMN, ENTRY_ID_COLUMN, Gdk, WorkspaceApplication,
@@ -40,8 +41,34 @@ EDIT_PASSWORD = "synthetic-owner-edit-password"
 REQUESTED_PASSWORD = "synthetic-approval-only-password"
 
 
+def monitor_notifications():
+    messages = []
+    connection = Gio.DBusConnection.new_for_address_sync(
+        os.environ["DBUS_SESSION_BUS_ADDRESS"],
+        Gio.DBusConnectionFlags.AUTHENTICATION_CLIENT | Gio.DBusConnectionFlags.MESSAGE_BUS_CONNECTION,
+        None, None,
+    )
+
+    def capture(_connection, message, incoming):
+        if incoming and message.get_interface() == "org.gtk.Notifications":
+            messages.append((message.get_member(), message.get_body().unpack()))
+            return None
+        return message
+
+    connection.add_filter(capture)
+    connection.call_sync(
+        "org.freedesktop.DBus", "/org/freedesktop/DBus", "org.freedesktop.DBus.Monitoring", "BecomeMonitor",
+        GLib.Variant("(asu)", (["type='method_call',interface='org.gtk.Notifications'"], 0)),
+        None, Gio.DBusCallFlags.NONE, 1500, None,
+    )
+    return connection, messages
+
+
 def main(root):
     target, endpoint, private, fixture = prepare(root)
+    install_launcher(REPO / "run-tray", os.environ["XDG_DATA_HOME"])
+    notification_monitor, notification_messages = monitor_notifications()
+    atexit.register(notification_monitor.close_sync, None)
     runtime = root / "cli"
     shutil.copy2(REPO / "keeper-agent-runner", runtime / "keeper-agent-runner")
     shutil.copyfile(REPO / "src/keepassxc_agent_access/agent_runner.py",
@@ -100,6 +127,65 @@ def main(root):
         enrollment_model, enrollment_chat = "Synthetic enrollment model", "Synthetic enrollment chat"
         action_model, action_chat = "Synthetic test model", "Synthetic test chat"
 
+        def notifications(kind, identifier):
+            return [message for method, (application, _, *payload) in notification_messages
+                    if method == "AddNotification" and application == app.get_application_id()
+                    and (message := payload[0]).get("default-action-target") == (kind, identifier)]
+
+        def get_notification(kind, identifier, title, *, count=1):
+            matches = lambda: notifications(kind, identifier)
+            wait_for(lambda: len(matches()) >= count, f"No desktop notification for {kind} request")
+            assert len(matches()) == count
+            notice = matches()[-1]
+            assert notice["title"] == title
+            assert notice["default-action"] == "app.review-request"
+            review, = notice["buttons"]
+            assert review["label"] == "Review request" and review["action"] == notice["default-action"]
+            assert review["target"] == notice["default-action-target"]
+            return notice
+
+        def activate_notice(notice, *, button=False):
+            if button:
+                action, target = (notice["buttons"][0][key] for key in ("action", "target"))
+            else:
+                action, target = (notice[key] for key in ("default-action", "default-action-target"))
+            bus = Gio.bus_get_sync(Gio.BusType.SESSION, None)
+            results = []
+
+            def completed(connection, result):
+                try:
+                    results.append(connection.call_finish(result))
+                except GLib.Error as error:
+                    results.append(error)
+
+            arguments = GLib.Variant("(sava{sv})", (action.removeprefix("app."), [GLib.Variant("(ss)", target)], {}))
+            bus.call(app.get_application_id(), app.get_dbus_object_path(), "org.freedesktop.Application",
+                     "ActivateAction", arguments,
+                     None, Gio.DBusCallFlags.NONE, 5000, None, completed)
+            wait_for(lambda: results, "Desktop notification action did not return")
+            assert not isinstance(results[0], GLib.Error), results[0]
+
+        def ignore_notice(notice):
+            visible = []
+
+            def inspect():
+                visible.append(app.dialog is not None)
+                if app.dialog:
+                    app.dialog.response(Gtk.ResponseType.CLOSE)
+                return GLib.SOURCE_REMOVE
+
+            GLib.timeout_add(50, inspect)
+            activate_notice(notice)
+            wait_for(lambda: visible, "Keeper did not process notification activation")
+            assert not visible[0]
+
+        def notification_setting():
+            settings, = [child for child in descendants(app.window.get_titlebar())
+                         if isinstance(child, Gtk.MenuButton) and child.get_tooltip_text() == "Keeper settings"]
+            toggle, = [item for item in settings.get_popup().get_children()
+                       if isinstance(item, Gtk.CheckMenuItem) and item.get_label() == "Desktop notifications"]
+            return toggle
+
         def invoke(profile, *command, request=None, expected=0, model=action_model, chat=action_chat):
             env = [f"KEEPASSXC_AGENT_SOCKET={endpoint}", f"KEEPASSXC_AGENT_MODEL={model}",
                    f"KEEPASSXC_AGENT_CHAT={chat}", "KEEPASSXC_AGENT_CHAT_ID=test-chat"]
@@ -145,7 +231,7 @@ def main(root):
             source = GLib.timeout_add(20, fill)
             action()
             if opens_async:
-                wait_for(lambda: not GLib.MainContext.default().find_source_by_id(source) or not app.busy,
+                wait_for(lambda: not GLib.MainContext.default().find_source_by_id(source),
                          "Waiting for a GTK dialog timed out")
             if GLib.MainContext.default().find_source_by_id(source):
                 GLib.source_remove(source)
@@ -164,11 +250,13 @@ def main(root):
             table.get_selection().select_path(path)
             return lambda: table.row_activated(path, table.get_column(0))
 
-        def approve(profile, vault=None):
+        def approve(profile, vault=None, *, notice=None):
             def confirm(dialog):
                 assert dialog.get_title() == "Review access request"
+                assert app.window.get_visible()
                 labels = [child.get_text() for child in descendants(dialog) if isinstance(child, Gtk.Label)]
                 assert any("verified" in label for label in labels)
+                assert any(expected_identity(profile) in label for label in labels)
                 assert any("Disposable project (reported)" in label for label in labels)
                 if profile == "alpha":
                     assert any(f"Username  {USERNAME}" in label for label in labels)
@@ -186,7 +274,11 @@ def main(root):
                     combo.set_active(index)
                 assert dialog.get_widget_for_response(Gtk.ResponseType.ACCEPT).get_sensitive()
                 dialog.response(Gtk.ResponseType.ACCEPT)
-            drive_dialog(access_row(profile), confirm)
+            if notice:
+                app.window.hide()
+                drive_dialog(lambda: activate_notice(notice), confirm, opens_async=True)
+            else:
+                drive_dialog(access_row(profile), confirm)
 
         def expanded_scope(tree, rows, name_column, permissions_column):
             leaves = {}
@@ -649,7 +741,8 @@ def main(root):
                 }
                 return proposal
 
-            def decide(proposal, response, *, strings=(), password=None, before=None, allow=True, resume=False):
+            def decide(proposal, response, *, strings=(), password=None, before=None, allow=True,
+                       resume=False, notice=None):
                 app.access_button.clicked()
                 view = app.access_view
                 table = view.table
@@ -682,7 +775,10 @@ def main(root):
                         before()
                     dialog.response(response)
 
-                drive_dialog(lambda: table.row_activated(path, table.get_column(0)), check)
+                if notice:
+                    drive_dialog(lambda: activate_notice(notice, button=True), check, opens_async=True)
+                else:
+                    drive_dialog(lambda: table.row_activated(path, table.get_column(0)), check)
                 wait_for(lambda: not app.busy, "Approved agent edit did not finish")
 
             def apply(proposal, **kwargs):
@@ -697,8 +793,12 @@ def main(root):
             duplicate = runner("beta", "request_edit", {"request": first_group})
             assert duplicate["status"] == "pending"
             assert runner("expanded", "edit_status", {"id": first_group["id"]}, error=True)
+            notice_id = f"{token_ids['beta']}/{first_group['id']}"
+            edit_notice = get_notification("edit", notice_id, "Keeper edit request")
             app.set_agent_paused(True)
-            group = apply(first_group, strings=("Reviewed group", "Proposed"), resume=True)
+            group = apply(first_group, strings=("Reviewed group", "Proposed"), resume=True, notice=edit_notice)
+            ignore_notice(edit_notice)
+            assert len(notifications("edit", notice_id)) == 1
             assert runner("beta", "request_edit", {"request": first_group}) == {
                 "id": first_group["id"], "status": "applied", "result": group,
             }
@@ -973,12 +1073,29 @@ def main(root):
                             {"vault": second, "entry": nested_entry, "metadata": True}]
                 assert enroll("alpha", alpha) == enroll("alpha", alpha) == {"status": "pending"}
                 assert enroll("beta", beta) == {"status": "pending"}
+                alpha_notice = get_notification("grant", token_ids["alpha"], "Keeper access request")
+                beta_notice = get_notification("grant", token_ids["beta"], "Keeper access request")
+                toggle = notification_setting()
+                assert toggle.get_active()
                 duplicate_identity = enroll("review", beta, expected=1, identity="  aGENT beta  ")
                 assert "identity" in duplicate_identity.casefold()
+                approve("alpha", notice=alpha_notice)
+                ignore_notice(alpha_notice)
+                assert len(notifications("grant", token_ids["alpha"])) == 1
+                toggle.set_active(False)
+                assert not toggle.get_active()
+                config = private / "desktop-notifications.json"
+                assert json.loads(config.read_text()) == {"desktop_notifications": False}
+                wait_for(lambda: ("RemoveNotification", (app.get_application_id(), f"grant:{token_ids['beta']}"))
+                         in notification_messages, "Turning off notifications did not withdraw the pending notice")
+                ignore_notice(beta_notice)
                 assert enroll("review", beta) == {"status": "pending"}
                 assert len(app.grants.rows()) == 3
                 assert "unavailable for this token" in invoke("beta", "vaults", "list", expected=1)
-                approve("alpha")
+                settled = []
+                GLib.timeout_add(1100, lambda: settled.append(True))
+                wait_for(lambda: settled, "Keeper did not poll for pending requests")
+                assert not notifications("grant", token_ids["review"])
                 access_view = app.access_view
                 access_table = access_view.table
                 assert [column.get_title() for column in access_table.get_columns()] == [
@@ -1002,10 +1119,15 @@ def main(root):
                 assert all(timestamp.fullmatch(row[0]) and row[1] == "—" for row in access_table.get_model())
                 assert token_context_menu("beta") == ["Review request…"]
                 assert token_context_menu("alpha") == ["View permissions…", "Disable token", "Remove token…"]
-                approve("beta", second)
+                assert toggle.get_active() is False
                 drive_dialog(access_row("review"), lambda dialog: dialog.response(Gtk.ResponseType.REJECT))
                 assert invoke("review", "access", "status") == {"status": "denied"}
                 assert "unavailable for this token" in invoke("review", "vaults", "list", expected=1)
+                toggle.set_active(True)
+                assert toggle.get_active()
+                assert json.loads(config.read_text()) == {"desktop_notifications": True}
+                beta_notice = get_notification("grant", token_ids["beta"], "Keeper access request", count=2)
+                approve("beta", second, notice=beta_notice)
                 assert "paused" in invoke("alpha", "vaults", "list", expected=1)
                 assert app.workspace.session(first) and app.workspace.session(second)
 
@@ -1317,7 +1439,7 @@ def main(root):
                 for sentinel in (UNLOCK, PASSWORD, OTHER_PASSWORD, EDIT_PASSWORD, REQUESTED_PASSWORD, AUTHORIZATION, BEARER_AUTHORIZATION, other_header):
                     assert all(sentinel.encode() not in data for data in persisted)
                     assert all(sentinel.encode() not in data for call in captured for data in call)
-                print("Workspace scenario passed: two vaults, scoped CLI, GNOME owner and agent edits, credential types, migration, locks and Activity", flush=True)
+                print("Workspace scenario passed: two vaults, scoped CLI, GNOME owner and agent edits, desktop notifications, credential types, migration, locks and Activity", flush=True)
                 result = 0
             except Exception:
                 traceback.print_exc()

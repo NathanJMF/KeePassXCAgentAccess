@@ -109,6 +109,7 @@ def main(root):
     launcher = Gio.DesktopAppInfo.new(DESKTOP_ID)
     assert launcher is not None and "--show-window" in launcher.get_commandline()
     assert launcher.get_name() == "Keeper"
+    assert launcher.get_boolean("X-GNOME-UsesNotifications")
 
     assert launcher.launch([], None)
     first = wait_for(app_pid)

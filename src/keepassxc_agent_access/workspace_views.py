@@ -503,21 +503,21 @@ class AccessView(Gtk.Box):
             [(self.REMOVE, lambda: self._update_token(identifier, "removed"))],
         ]
 
-    def open_record(self, identifier, kind):
+    def open_record(self, identifier, kind, *, pending_only=False):
         if self.app.desktop.locked:
             return
         if kind == "edit":
-            token_id, request_id = identifier.split("/")
+            token_id, _, request_id = identifier.partition("/")
             record = next((edit for edit in self.app.pending_edits()
                            if edit.token_id == token_id and edit.id == request_id), None)
-            if record is not None:
+            if record is not None and (not pending_only or record.status == "pending"):
                 review_edit(self.app, record)
             return
-        grant = self.app.grants.records.get(identifier)
+        grant = self.app.grants.records.get(identifier) if self.app.grants else None
         if grant:
             if grant.status == "pending":
                 self._review(grant)
-            else:
+            elif not pending_only:
                 self._manage(grant)
 
     def _header(self, title, grant):

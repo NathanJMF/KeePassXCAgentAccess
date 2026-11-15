@@ -59,6 +59,7 @@ def install(executable, data_directory):
         "Icon=dialog-password",
         f"Exec={_exec_argument(str(executable))} --show-window",
         "Terminal=false",
+        "X-GNOME-UsesNotifications=true",
         "Categories=Utility;Security;",
         "",
     ])
