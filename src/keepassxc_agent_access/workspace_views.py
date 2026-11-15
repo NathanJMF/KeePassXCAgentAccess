@@ -243,6 +243,7 @@ ACTIVITY_ACTION_ICONS = {
     "Use password": "dialog-password-symbolic",
     "Request token": "dialog-question-symbolic",
     "Approve token": "changes-allow-symbolic",
+    "Auto-approve token": "changes-allow-symbolic",
     "Deny token": "changes-prevent-symbolic",
     "Disable token": "changes-prevent-symbolic",
     "Re-enable token": "changes-allow-symbolic",

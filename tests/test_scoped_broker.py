@@ -101,6 +101,48 @@ class ScopedBrokerTests(unittest.TestCase):
         self.assert_code("paused", "list_entries", vault=self.vaults[0])
         self.assertEqual(len(self.activity.rows(action="Request token")), 1)
 
+    def test_automatic_token_approval_through_the_broker_is_audited_and_scoped(self):
+        self.grants.set_auto_approve_tokens(True)
+        self.grants = Grants(self.workspace, self.activity)
+        self.engine.grants = self.grants
+        vault = self.vaults[0]
+        item = {"vault": vault, "entry": self.entry, "metadata": True, "username": True, "action": "check"}
+        self.assertEqual(self.enroll([item]), {"status": "active"})
+        self.assertEqual(self.enroll([item]), {"status": "active"})
+        self.assertEqual([row["id"] for row in self.invoke("list_vaults")["vaults"]], [vault])
+        self.assertEqual(self.invoke("list_entries", fields=["username", "url"])["entries"], [{
+            **self.workspace.sessions[vault].worker.row, "username": "fixture-user-0",
+        }])
+        self.assert_code("ineligible", "list_entries", vault=self.vaults[1])
+        event, = self.activity.rows(action="Auto-approve token")
+        self.assertEqual((event["outcome"], event["decision"], event["entry"]),
+                         ("Approved", "Allowed by new token permission policy", self.entry))
+        self.assertEqual(event["agent"], "Fixture agent 0")
+
+    def test_automatic_token_approval_never_resolves_ambiguous_or_partial_requests(self):
+        self.grants.set_auto_approve_tokens(True)
+        label_request = {"label": "Example entry", "metadata": True}
+        exact = {"vault": self.vaults[0], "entry": self.entry, "metadata": True}
+        self.assertEqual(self.enroll([label_request]), {"status": "pending"})
+        self.workspace.sessions.pop(self.vaults[1])
+        self.assertEqual(self.enroll([label_request], 1), {"status": "pending"})
+        absent = {**exact, "entry": str(uuid4())}
+        self.assertEqual(self.enroll([exact, absent], 2), {"status": "pending"})
+        self.assertFalse(any(record.scope for record in self.grants.rows()))
+        self.assertEqual(self.activity.rows(action="Auto-approve token"), [])
+
+    def test_token_policy_applies_only_to_new_requests_and_does_not_resume_access(self):
+        item = {"vault": self.vaults[0], "entry": self.entry, "metadata": True}
+        self.assertEqual(self.enroll([item]), {"status": "pending"})
+        self.grants.set_auto_approve_tokens(True)
+        self.assertEqual(self.enroll([item]), {"status": "pending"})
+        self.workspace.pause()
+        self.assertEqual(self.enroll([item], 1), {"status": "active"})
+        self.assert_code("paused", "list_entries", 1)
+        self.grants.set_auto_approve_tokens(False)
+        self.assertEqual(self.enroll([item], 1), {"status": "active"})
+        self.assertEqual(self.enroll([item], 2), {"status": "pending"})
+
     def test_identity_reserved_until_token_is_removed_or_denied(self):
         items = [{"label": "Example entry", "metadata": True}]
         label = "Straße agent"

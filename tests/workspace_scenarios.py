@@ -91,7 +91,8 @@ def main(root):
     profiles = root / "profiles"
     profiles.mkdir()
     profiles.chmod(0o1777)
-    names = ("alpha", "beta", "review", "review-live", "review-paused", "expanded", "bearer")
+    names = ("alpha", "beta", "review", "review-live", "review-paused", "expanded", "bearer",
+             "auto-approval", "manual-approval")
     directories = [str(profiles / name) for name in names]
     atexit.register(subprocess.run, [*NAMESPACE, "rm", "-rf", "--", *directories], check=True)
     subprocess.run([*NAMESPACE, "mkdir", "-m", "700", *directories], check=True)
@@ -128,12 +129,13 @@ def main(root):
         enrollment_model, enrollment_chat = "Synthetic enrollment model", "Synthetic enrollment chat"
         action_model, action_chat = "Synthetic test model", "Synthetic test chat"
 
-        def popup_setting():
+        def settings_items():
             settings, = [child for child in descendants(app.window.get_titlebar())
                          if isinstance(child, Gtk.MenuButton) and child.get_tooltip_text() == "Keeper settings"]
-            toggle, = [item for item in settings.get_popup().get_children()
-                       if isinstance(item, Gtk.CheckMenuItem) and item.get_label() == "Request pop-ups"]
-            return toggle
+            return {item.get_label(): item for item in settings.get_popup().get_children()}
+
+        def popup_setting():
+            return settings_items()["Request pop-ups"]
 
         def click_decision(widget):
             event = Gdk.Event.new(Gdk.EventType.BUTTON_RELEASE)
@@ -1465,6 +1467,24 @@ def main(root):
 
                 drive_dialog(lambda: table.row_activated(path, table.get_column(0)), read_activity)
                 check_agent_edits(first, second)
+                policy = settings_items()["New token permissions"].get_submenu()
+                review, allow = policy.get_children()
+                assert review.get_label() == "Always review" and review.get_active()
+                assert allow.get_label() == "Always allow" and not allow.get_active()
+                allow.activate()
+                assert allow.get_active() and old_access.read().auto_approve_tokens
+                automatic = [{"vault": second, "entry": nested_entry, "metadata": True}]
+                assert enroll("auto-approval", automatic) == {"status": "active"}
+                assert not app._review_requests()
+                app._refresh()
+                assert app.popup_source is None
+                assert invoke("auto-approval", "entries", "list")["entries"] == fixture[2:]
+                event, = old_activity.rows(agent="Agent auto-approval", action="Auto-approve token")
+                assert event["outcome"] == "Approved" and event["entry"] == nested_entry
+                review.activate()
+                assert review.get_active() and not old_access.read().auto_approve_tokens
+                assert enroll("manual-approval", automatic) == {"status": "pending"}
+                deny("manual-approval", popup=True)
                 app.tray_items["pause"].activate()
                 assert app.workspace.paused and app.workspace.session(second)
                 assert app.indicator.get_icon() == "keeper-agent-access-paused"
