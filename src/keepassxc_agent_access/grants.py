@@ -116,7 +116,6 @@ class Grants:
         self.workspace = workspace
         self.activity = activity
         self.path = Path(workspace.directory) / "tokens.json"
-        self.auto_approve_tokens = workspace.legacy_access.read().auto_approve_tokens
         self.records = {}
         self.credentials = {}
         try:
@@ -149,28 +148,6 @@ class Grants:
             raise ListingError("ineligible")
         return record
 
-    def set_auto_approve_tokens(self, enabled):
-        with self.workspace.mutex:
-            settings = self.workspace.legacy_access
-            settings.write(replace(settings.read(), auto_approve_tokens=enabled))
-            self.auto_approve_tokens = enabled
-
-    def _automatic_scope(self, items):
-        if not self.auto_approve_tokens:
-            return ()
-        if any(item.vault is None for item in items) and any(
-            self.workspace.session(vault) is None for vault in self.workspace.registrations
-        ):
-            # A locked or unavailable vault could contain another match for a global label.
-            return ()
-        scope = []
-        for item in items:
-            choices = self.choices(item)
-            if len(choices) != 1:
-                return ()
-            scope.append(choices[0].scope)
-        return tuple(scope)
-
     def enroll(self, credential, uid, payload, attribution):
         try:
             if not isinstance(payload, dict) or set(payload) != {"identity", "project", "items"}:
@@ -198,14 +175,10 @@ class Grants:
             if any(row.status in LIVE_GRANT_STATES and row.identity.strip().casefold() == identity_key
                    for row in self.records.values()):
                 raise ListingError("identity_in_use")
+            if sum(row.status == "pending" for row in self.records.values()) >= MAX_PENDING:
+                raise ListingError("busy")
             record = Grant(new_id(), digest, uid, time(), identity, project, attribution, items)
-            if scope := self._automatic_scope(items):
-                record = replace(record, status="active", scope=scope)
-                self._change(record, "Auto-approve token", "Approved", decision="Allowed by new token permission policy")
-            else:
-                if sum(row.status == "pending" for row in self.records.values()) >= MAX_PENDING:
-                    raise ListingError("busy")
-                self._change(record, "Request token", "Pending approval")
+            self._change(record, "Request token", "Pending approval")
             return record.status
 
     def rows(self):
@@ -250,8 +223,7 @@ class Grants:
             ):
                 raise ValueError("The requested scope changed. Reopen the request and review it again.")
             scope = tuple(choice.scope for choice in choices)
-            self._change(replace(record, status="active", scope=scope), "Approve token", "Approved",
-                         decision="Approved in Access")
+            self._change(replace(record, status="active", scope=scope), "Approve token", "Approved")
 
     def transition(self, identifier, status):
         with self.workspace.mutex:
@@ -289,13 +261,13 @@ class Grants:
         target.update(entry=entry_id, folder=folder, entry_title=title)
         return target
 
-    def _change(self, record, action, outcome, *, target_scope=None, decision=None):
+    def _change(self, record, action, outcome, *, target_scope=None):
         scope = ", ".join(item.audit_summary() for item in record.scope)
         target = self._target(record.scope if target_scope is None else target_scope)
         event = self.activity.begin(record.uid, record.context, action, None, token=record.id,
                                     agent=record.identity, project=record.project, scope=scope or None, **target)
-        if decision:
-            self.activity.authorize(event, decision)
+        if action == "Approve token":
+            self.activity.authorize(event, "Approved in Access")
         self._put(record)
         self.activity.finish(event, outcome)
 

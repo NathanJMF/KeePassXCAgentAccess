@@ -22,7 +22,6 @@ class AccessStorageTests(TestCase):
         store = AccessStore(self.root / "access.json")
         default = store.read()
         self.assertEqual(default.mode, AccessMode.REVIEW)
-        self.assertFalse(default.auto_approve_tokens)
         fallback = BrokerConfig(self.root / "existing.sock", os.geteuid() + 1)
         self.assertEqual(default.broker_config(fallback), fallback)
         vault, other, stable_id = (str(uuid4()) for _ in range(3))
@@ -30,17 +29,13 @@ class AccessStorageTests(TestCase):
             Action("verify", "Verify service", stable_id, "https://example.invalid/check"),
         ))
         saved = replace(default, mode=AccessMode.SMART, endpoint=str(self.root / "broker.sock"),
-                        uid=os.geteuid() + 1, vaults=((vault, policy),), auto_approve_tokens=True)
+                        uid=os.geteuid() + 1, vaults=((vault, policy),))
         store.write(saved)
         reopened = AccessStore(store.path).read()
         self.assertEqual(reopened, saved)
         self.assertEqual(reopened.for_vault(vault), policy)
         self.assertNotIn(stable_id, reopened.for_vault(other).automatic)
         self.assertEqual(store.path.stat().st_mode & 0o777, 0o600)
-        legacy = json.loads(store.path.read_text())
-        del legacy["auto_approve_tokens"]
-        store.path.write_text(json.dumps(legacy))
-        self.assertEqual(store.read(), replace(saved, auto_approve_tokens=False))
 
     def test_refuses_ambiguous_destinations(self):
         for invalid in ("http://test.invalid/", "https://user@host.invalid/", "https://test.invalid/?x=y",

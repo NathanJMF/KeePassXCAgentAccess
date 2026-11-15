@@ -122,7 +122,6 @@ class AccessSettings:
     uid: int | None = None
     retention_days: int = 30
     vaults: tuple[tuple[str, VaultPolicy], ...] = ()
-    auto_approve_tokens: bool = False
 
     def for_vault(self, identity):
         return dict(self.vaults).get(identity, VaultPolicy())
@@ -148,8 +147,7 @@ class AccessStore:
             elif uid is not None:
                 raise ValueError
             retention = data["retention_days"]
-            auto_approve_tokens = data.get("auto_approve_tokens", False)
-            if type(retention) is not int or not 1 <= retention <= 365 or type(auto_approve_tokens) is not bool:
+            if type(retention) is not int or not 1 <= retention <= 365:
                 raise ValueError
             vaults = tuple(
                 (uuid_text(identity), VaultPolicy(
@@ -158,7 +156,7 @@ class AccessStore:
                 ))
                 for identity, policy in data["vaults"].items()
             )
-            return AccessSettings(AccessMode(data["mode"]), endpoint, uid, retention, vaults, auto_approve_tokens)
+            return AccessSettings(AccessMode(data["mode"]), endpoint, uid, retention, vaults)
         except FileNotFoundError:
             return AccessSettings()
         except (OSError, AttributeError, ValueError, TypeError, KeyError):
@@ -170,11 +168,8 @@ class AccessStore:
             config.validate()
         if not 1 <= settings.retention_days <= 365:
             raise ValueError("Choose a retention period between 1 and 365 days.")
-        if type(settings.auto_approve_tokens) is not bool:
-            raise ValueError("Choose whether to review new token permissions.")
         write_private_json(self.path, {
             "mode": settings.mode.value,
-            "auto_approve_tokens": settings.auto_approve_tokens,
             "endpoint": settings.endpoint,
             "uid": settings.uid,
             "retention_days": settings.retention_days,

@@ -180,7 +180,6 @@ class WorkspaceApplication(Gtk.Application):
         popups = Gtk.CheckMenuItem(label="Request pop-ups", active=self.review_popups.enabled)
         popups.connect("toggled", self._set_request_popups)
         settings_menu.append(popups)
-        settings_menu.append(self._token_approval_menu())
         for label, action in (("Broker settings…", self._broker_settings), ("Lock all vaults", self._lock_all)):
             item = Gtk.MenuItem(label=label)
             item.connect("activate", action)
@@ -403,34 +402,6 @@ class WorkspaceApplication(Gtk.Application):
         return tuple(("grant", grant.id) for grant in grants if grant.status == "pending") + tuple(
             ("edit", f"{edit.token_id}/{edit.id}") for edit in self.pending_edits() if edit.status == "pending"
         )
-
-    def _token_approval_menu(self):
-        policy = Gtk.MenuItem(label="New token permissions", sensitive=self.grants is not None)
-        choices = Gtk.Menu()
-        review = Gtk.RadioMenuItem.new_with_label([], "Always review")
-        allow = Gtk.RadioMenuItem.new_with_label_from_widget(review, "Always allow")
-        allow.set_tooltip_text("Automatically approve new requests when every permission matches one available entry.")
-        choices.append(review)
-        choices.append(allow)
-        allow.set_active(bool(self.grants and self.grants.auto_approve_tokens))
-        review.connect("toggled", self._set_token_approval, False, allow)
-        allow.connect("toggled", self._set_token_approval, True, review)
-        policy.set_submenu(choices)
-        return policy
-
-    def _set_token_approval(self, item, enabled, previous):
-        if not item.get_active() or self.grants.auto_approve_tokens == enabled:
-            return
-        if self.desktop.locked:
-            previous.set_active(True)
-            return
-        try:
-            self.grants.set_auto_approve_tokens(enabled)
-            self.message = ""
-        except OWNER_ERRORS as error:
-            self.message = str(error) or "Could not save the token permission setting."
-            previous.set_active(True)
-        self._refresh()
 
     def _set_request_popups(self, item):
         enabled = item.get_active()
