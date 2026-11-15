@@ -31,7 +31,7 @@ if [[ ${1:-} != --private-session ]]; then
         echo "Synthetic passphrase found in captured desktop output."
         exit 1
     fi
-    grep -E '^(Desktop scenario passed|Broker scenario passed|Password scenario passed|Launcher scenario passed|Denied):' "$test_root/run.log"
+    grep -E '^(Desktop scenario passed|Broker scenario passed|Password scenario passed|Launcher scenario passed|Workspace scenario passed|Denied):' "$test_root/run.log"
     exit 0
 fi
 
@@ -59,6 +59,13 @@ if ! watcher_active; then
     exit 1
 fi
 
+if [[ ${TRAY_WORKSPACE_ONLY:-0} == 1 ]]; then
+    workspace_root=$(mktemp -d /tmp/keepass-workspace.XXXXXX)
+    trap 'rm -rf -- "$workspace_root"; kill "$compositor" 2>/dev/null || true; wait "$compositor" 2>/dev/null || true' EXIT
+    timeout 80 /usr/bin/python3 tests/workspace_scenarios.py "$workspace_root"
+    exit
+fi
+
 if [[ -n ${TRAY_SKILL_TRIAL_DIR:-} ]]; then
     timeout 240 /usr/bin/python3 tests/broker_scenarios.py "$TRAY_SKILL_TRIAL_DIR" --hold
     exit
@@ -72,10 +79,12 @@ if [[ ${TRAY_TEST_ISOLATION:-0} == 1 ]]; then
     broker_root=$(mktemp -d /tmp/keepass-broker.XXXXXX)
     password_root=$(mktemp -d /tmp/keepass-action.XXXXXX)
     launcher_root=$(mktemp -d /tmp/keepass-launcher.XXXXXX)
-    trap 'rm -rf -- "$broker_root" "$password_root" "$launcher_root"; kill "$compositor" 2>/dev/null || true; wait "$compositor" 2>/dev/null || true' EXIT
+    workspace_root=$(mktemp -d /tmp/keepass-workspace.XXXXXX)
+    trap 'rm -rf -- "$broker_root" "$password_root" "$launcher_root" "$workspace_root"; kill "$compositor" 2>/dev/null || true; wait "$compositor" 2>/dev/null || true' EXIT
     timeout 45 /usr/bin/python3 tests/broker_scenarios.py "$broker_root"
     timeout 80 /usr/bin/python3 tests/password_scenarios.py "$password_root"
     timeout 45 /usr/bin/python3 tests/launcher_scenarios.py "$launcher_root"
+    timeout 80 /usr/bin/python3 tests/workspace_scenarios.py "$workspace_root"
 fi
 
 # Keep the same Wayland display, but give this process a bus without a tray host.

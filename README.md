@@ -1,6 +1,6 @@
 # KeePassXC Agent Access
 
-A Linux tray app for opening an existing KeePass vault from the owner's desktop. The app opens the database read-only. **Remember on this device** stores the master password in the owner's OS keyring for future unlocks.
+A Linux tray app for browsing existing KeePass databases and granting agents access to specific entries and credential actions. The desktop opens KeePass files read-only and can independently remember each database password in the owner's OS keyring.
 
 ## Run on Ubuntu GNOME
 
@@ -12,63 +12,50 @@ sudo apt install python3-gi python3-pykeepass gir1.2-gtk-3.0 \
 ./run-tray
 ```
 
-To add an application-menu entry, run `./install-launcher` from the owner-controlled checkout and open **KeePassXC Agent Access** in GNOME. Rerun the installer if the checkout moves.
+Run `./install-launcher` from the owner-controlled checkout to add **KeePassXC Agent Access** to the GNOME application menu. Rerun the installer if the checkout moves. Closing the window leaves the app running when the tray icon is available.
 
-The tray icon opens setup, shows the lock state, and offers **Unlock**, **Lock now**, **Settings**, and **Quit** as appropriate. The main window provides the same vault controls if the desktop has no tray. Closing the window with the tray available leaves the app running. Locking the desktop ends any unlocked vault session.
+1. Select **Add vault…** and choose an existing KeePass file. Enter its password and select its key file if required.
+2. Select **Remember on this device** to save the password in the system keyring, then select **Verify and save**.
+3. Expand the vault in the sidebar and select a group to browse its direct entries. Double-click an entry for details and credential actions.
+4. Use **Lock vault** to close the selected vault independently. To check saved unlock, lock that vault and select **Unlock**.
 
-1. Select **Setup** and choose an existing `.kdbx` file.
-2. Enter the database password and choose the key file if the vault uses one.
-3. Select **Remember on this device** to save the password in the system keyring, then select **Verify and save**.
-4. Select **Unlock** from the tray. The status reads **Unlocked · OS keyring** when the app successfully used the saved password.
+Use **Enter password…** to unlock manually or update a remembered password after rotating it in KeePassXC. **Forget password** deletes the app's saved credential. **Relink** checks the last verified contents of a moved vault before retaining its local identity and token scopes. **Remove…** removes the registration and its saved credential while keeping the database file.
 
-When saved unlock fails, use **Enter password…** for a one-time unlock or **Change vault or password** to verify and save a replacement. **Forget saved password** locks the vault and removes app-owned saved items. If the keyring cannot delete an item, **Retry keyring cleanup** stays available in Settings. Items pending deletion are disabled for unlock.
+Existing installations retain their registered vault, keyring reference, broker admission settings, and Activity. Unlock the migrated vault to see its existing action bindings in entry details. Startup pauses agent access, and agent use requires an approved token.
 
 ## Replace a plaintext unlock file
 
 1. Confirm you have an owner-controlled recovery path, then rotate the master password in KeePassXC.
-2. Use **Change vault or password** to verify and remember the new password.
-3. Quit and restart the tray app. With the legacy file unavailable to the app, select **Unlock** and confirm **Unlocked · OS keyring**. If the check fails, use manual recovery and retry with the correct saved password.
-4. Retire the old plaintext file after verification. Review any backups separately because older database copies can still use the previous password.
+2. In the workspace, lock the vault, select **Enter password…**, and remember the new password.
+3. Quit and restart the tray app. Select the vault, click **Unlock**, and check that its groups and entries appear.
+4. Retire the old plaintext file after verifying the keyring unlock. Review any backups separately because older database copies can still use the previous password.
 
 ## Isolate the agent runtime
 
-Run the tray under the desktop owner's account and start the agent from the login environment of a separate, unprivileged OS account. Give that account access to its own workspace. Keep the vault, key file, and owner settings readable only by their owner, and keep the app's executable and source outside agent-writable directories. Give the agent its own session environment and keep the owner's session bus, Wayland socket, and process memory inaccessible to that account.
+Run the tray under the desktop owner's account and start the agent in a separate, unprivileged OS account. Keep the vault, key file, settings, keyring, desktop session, and process memory inaccessible to the runner. Install the CLI and source in a location the runner can read but cannot change.
 
-## Enable agent access
-
-Provision a directory for the socket that the owner controls and the agent can traverse. The agent must be able to write to the socket inode to connect. One Ubuntu setup uses a dedicated group shared by the owner and agent. Give the agent a new login session after changing its group membership.
+Provision a socket directory that the owner controls and the agent can traverse. The agent must be able to write to the socket inode to connect. This example assumes that the owner and dedicated agent account are members of a group called `vault-listing`.
 
 ```sh
-# The owner and the dedicated agent account are members of vault-listing.
 sudo install -d -o "$(id -un)" -g vault-listing -m 2750 /run/keepassxc-agent-access
 export KEEPASSXC_AGENT_SOCKET=/run/keepassxc-agent-access/entries.sock
 export KEEPASSXC_AGENT_UID="$(id -u agent-runner)"
 ./run-tray
 ```
 
-The owner can also save the socket path and allowed account from **Access** in the app. The app-menu launcher loads those settings on startup. Under the owner's account, unlock the vault and select **Enable agent access**. The broker verifies the connecting OS UID. **Stop agent access**, vault lock, a vault configuration change, or exit revokes access. Agent access starts disabled on the next session.
+Save the socket path and runner account in **Broker settings…** for app-menu launches. The broker checks the connecting OS UID before accepting token requests.
 
-Provide the agent an owner-controlled installation of the `keepassxc-agent` launcher and its adjacent `src/keepassxc_agent_access` package. Put the launcher on its PATH and supply the same socket path as `KEEPASSXC_AGENT_SOCKET` in its environment. Give the agent the [KeePass skill](skills/keepassxc-agent-access/SKILL.md) for usage.
+Put `keepassxc-agent` on the runner's PATH with its adjacent package in `src/keepassxc_agent_access`. Provide the socket path in `KEEPASSXC_AGENT_SOCKET` and an absolute private credential file path in `KEEPASSXC_AGENT_TOKEN_FILE`. The credential directory must be owned by the runner and accessible only to it. Use distinct isolated storage for each token profile. Processes sharing an OS UID need a runtime boundary that prevents access to each other's profiles. Give the agent the [KeePass skill](skills/keepassxc-agent-access/SKILL.md).
 
-```sh
-keepassxc-agent entries list --json
-```
+## Review token requests and activity
 
-Use **Access** to choose **Allow all**, **Review all**, or **Smart access**. Review all is the default. The **Require approval** setting for each entry applies in Smart access, with new entries requiring review. A standard Smart listing includes the entries available automatically. Add `--include-reviewed` to request the protected rows.
+Open **Access** to review requests. Double-click a pending request to inspect the verified OS identity, reported agent and project labels, and every requested entry and operation. Resolve duplicate entry names before approving. Double-click an approved token to disable, re-enable, or remove it. A larger scope requires a separate token request.
 
-In **Actions**, bind a KeePass entry to a fixed, certificate-verified HTTPS Basic-auth GET endpoint. Give the agent the entry UUID and the action ID:
+Use **Resume agent access** in the tray or main window to let approved tokens run. **Pause agent access** stops broker discovery and credential operations while the owner keeps browsing. Locking the desktop pauses agent access and closes all vault sessions.
 
-```sh
-keepassxc-agent use --entry ENTRY_UUID --action ACTION_ID --json
-```
-
-Use **Approve once** or **Decline** when prompted. The CLI reports a structured outcome and, when received, the HTTP status. **Activity** shows time, model, chat, action, and outcome. A runner can supply `KEEPASSXC_AGENT_MODEL`, `KEEPASSXC_AGENT_CHAT`, and `KEEPASSXC_AGENT_CHAT_ID` as optional agent-reported labels.
-
-For a fresh-agent check, first configure a disposable synthetic vault. Give the agent just the skill and ask it to list entry titles and groups. Observe one successful CLI invocation through the broker and compare the agent's report to the expected fixture held by the verifier. Stop listing afterward and check that the command fails without entry data.
+Credential use requires an enabled, owner-configured **HTTPS Basic-auth GET** binding on the selected entry. Approval applies to that exact binding and destination. **Activity** shows Time, Model, Chat, Action, and Outcome. Filter by vault, agent, or other columns, and double-click a row for more context. `KEEPASSXC_AGENT_MODEL`, `KEEPASSXC_AGENT_CHAT`, and `KEEPASSXC_AGENT_CHAT_ID` supply optional agent-reported attribution.
 
 ## Test with synthetic data
-
-Run from the project root after installing the dependencies above.
 
 ```sh
 PYTHONPATH=src /usr/bin/python3 -m unittest discover -s tests -v
@@ -76,4 +63,4 @@ tests/run-linux-integration
 TRAY_TEST_ISOLATION=1 tests/run-linux-integration
 ```
 
-The integration runner starts a private GNOME Wayland compositor, D-Bus session, and disposable OS keyring. It creates a synthetic password-and-key-file database, rotates the password, and verifies tray unlock after restart with the legacy file removed. It also exercises manual recovery, **Forget saved password**, desktop lock, and the main-window fallback. The isolation option uses a Linux user namespace with subordinate UID and GID mappings and `setfacl` from the `acl` package. It checks broker listing and revocation from a different host identity while a synthetic vault is open.
+The integration runner uses a private GNOME Wayland compositor, D-Bus session, and disposable OS keyring. The isolation option requires Linux subordinate UID/GID mappings and `setfacl` from the `acl` package. It verifies legacy setup and recovery, the GNOME launcher, and the scoped workspace with two disposable vaults that share KeePass IDs. The workspace scenario checks CLI enrollment, metadata-only and use-only grants, destination binding, per-token revocation, desktop lock, and Activity without using personal vaults.

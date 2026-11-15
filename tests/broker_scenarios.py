@@ -65,7 +65,7 @@ def prepare(root):
     runtime = root / "cli"
     modules = runtime / "src" / "keepassxc_agent_access"
     modules.mkdir(parents=True)
-    for file in ("__init__.py", "agent_cli.py", "protocol.py"):
+    for file in ("__init__.py", "agent_cli.py", "protocol.py", "runner_token.py"):
         shutil.copyfile(REPO / "src/keepassxc_agent_access" / file, modules / file)
     shutil.copy2(REPO / "keepassxc-agent", runtime / CLI_ARGS[0])
     return VaultTarget(database, key_file), endpoint, private, expected

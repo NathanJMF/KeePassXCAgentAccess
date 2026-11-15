@@ -1,7 +1,6 @@
 """Exercise GNOME desktop entry discovery, launch, and single-instance reuse."""
 
 from dataclasses import replace
-import json
 import os
 from pathlib import Path
 import signal
@@ -100,14 +99,14 @@ def main(root):
     assert launcher.launch([], None)
     first = wait_for(app_pid)
     try:
-        wait_for(lambda: row("Setup required"))
+        wait_for(lambda: row("Open workspace"))
         assert launcher.launch([], None)
         sleep(.6)
         assert app_pid() == first
     finally:
         stop(first)
 
-    target, endpoint, _private, expected = prepare(root)
+    target, endpoint, _private, _expected = prepare(root)
     store = SettingsStore()
     setup = VaultSetup(store, SystemKeyring(), VaultController())
     setup.configure(setup.controller.begin(), target, PASSWORD, True)
@@ -118,16 +117,16 @@ def main(root):
     assert launcher.launch([], None)
     second = wait_for(app_pid)
     try:
-        wait_for(lambda: row("Locked"))
-        click("Unlock")
-        wait_for(lambda: row("Unlocked · OS keyring"))
-        assert not endpoint.exists()
-        click("Enable agent access")
+        wait_for(lambda: row("Resume agent access"))
         wait_for(endpoint.exists)
         subprocess.run(["setfacl", "-m", f"u:{uid}:rw", endpoint], check=True)
         result = invoke(root, endpoint)
-        assert result.returncode == 0
-        assert {item["id"] for item in json.loads(result.stdout)["entries"]} == {row["id"] for row in expected}
+        assert result.returncode != 0 and not result.stdout
+        assert b"approved access token" in result.stderr
+        click("Resume agent access")
+        wait_for(lambda: row("Pause agent access"))
+        click("Pause agent access")
+        wait_for(lambda: row("Resume agent access"))
     finally:
         stop(second)
     assert not endpoint.exists()

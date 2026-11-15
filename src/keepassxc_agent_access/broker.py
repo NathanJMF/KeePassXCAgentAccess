@@ -191,7 +191,10 @@ class ListingBroker:
                 effect()
                 return True
 
+        sent_response = False
+
         def deliver(reply, scope=None):
+            nonlocal sent_response
             try:
                 connection.setblocking(False)
                 payload = memoryview(reply)
@@ -212,6 +215,7 @@ class ListingBroker:
                     if not permitted or sent == 0:
                         return False
                     if sent:
+                        sent_response = True
                         payload = payload[sent:]
                 return True
             except (OSError, ValueError):
@@ -229,7 +233,8 @@ class ListingBroker:
                         deliver(response)
             except ListingError as error:
                 try:
-                    deliver(encode({"error": error.code}))
+                    if not sent_response:
+                        deliver(encode({"error": error.code}))
                 except (OSError, ValueError):
                     pass
             except (OSError, ValueError):

@@ -97,10 +97,11 @@ class ScopedBroker:
                         return False
                     if binding is not None:
                         saved = record.binding(entry, binding_id)
-                        if saved is None or not saved.action.enabled or saved.revision != binding.revision:
+                        if saved is not binding or not saved.action.enabled:
                             return False
                 return effect()
 
+        dispatch_started = False
         try:
             if token.status != "active":
                 raise ListingError("ineligible")
@@ -127,7 +128,9 @@ class ScopedBroker:
             else:
                 def gate(send):
                     def audit_and_send():
+                        nonlocal dispatch_started
                         self.activity.dispatched(event)
+                        dispatch_started = True
                         send()
                     return guard(lambda: dispatch(audit_and_send))
 
@@ -147,7 +150,9 @@ class ScopedBroker:
             return None
         except ListingError as error:
             outcome = "Denied"
-            if error.code in ("busy", "too_large"):
+            if dispatch_started:
+                outcome = "Interrupted · outcome unknown"
+            elif error.code in ("busy", "too_large"):
                 outcome = "Failed"
             elif error.code == "revoked" or not guard(live) and error.code == "unavailable":
                 outcome = "Revoked"

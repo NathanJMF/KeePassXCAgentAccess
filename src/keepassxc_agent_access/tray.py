@@ -474,4 +474,5 @@ def main():
     if ctypes.CDLL(None).prctl(4, 0, 0, 0, 0):
         raise SystemExit("Could not protect the desktop process from core dumps.")
     show_window = "--show-window" in sys.argv
-    return VaultApplication(show_window=show_window).run([arg for arg in sys.argv if arg != "--show-window"])
+    from .workspace_app import WorkspaceApplication
+    return WorkspaceApplication(show_window=show_window).run([arg for arg in sys.argv if arg != "--show-window"])

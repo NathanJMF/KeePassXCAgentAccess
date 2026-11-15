@@ -1,5 +1,6 @@
 """Owner registry and independent KeePass worker sessions."""
 
+from contextlib import nullcontext
 from dataclasses import asdict, dataclass, replace
 from hashlib import file_digest
 import json
@@ -52,6 +53,8 @@ class Workspace:
         self.keyring = keyring
         self.opener = opener
         self.mutex = RLock()
+        self.keyring_mutex = RLock()
+        self.owner_generation = 0
         self.registrations = {}
         self.sessions = {}
         self.opening = {}
@@ -102,13 +105,16 @@ class Workspace:
         self.registrations, self.pending = records, pending
 
     def cleanup(self):
-        with self.mutex:
-            for item in self.pending:
+        with self.keyring_mutex:
+            with self.mutex:
+                pending = self.pending
+            for item in pending:
                 try:
                     self.keyring.remove(item)
                 except KeyringError:
                     continue
-                self._save(self.registrations, tuple(i for i in self.pending if i != item))
+                with self.mutex:
+                    self._save(self.registrations, tuple(i for i in self.pending if i != item))
 
     def _replace(self, record, pending=None):
         self._save({**self.registrations, record.id: record}, pending)
@@ -125,20 +131,23 @@ class Workspace:
             if same:
                 raise VaultError("This database is already registered.")
 
-    def add(self, target, password, remember, name=None):
-        return self._open(new_id(), target, password, remember, label(name or target.database.stem), adding=True)
+    def add(self, target, password, remember, name=None, *, cycle=None):
+        return self._open(new_id(), target, password, remember, label(name or target.database.stem),
+                          adding=True, cycle=cycle)
 
-    def unlock(self, identifier, password=None, remember=None):
+    def unlock(self, identifier, password=None, remember=None, *, cycle=None):
         with self.mutex:
             target = self.registrations[identifier].target
-        return self._open(identifier, target, password, remember)
+        return self._open(identifier, target, password, remember, cycle=cycle)
 
-    def relink(self, identifier, target, password, remember=None):
-        return self._open(identifier, target, password, remember, relinking=True)
+    def relink(self, identifier, target, password, remember=None, *, cycle=None):
+        return self._open(identifier, target, password, remember, relinking=True, cycle=cycle)
 
-    def _open(self, identifier, target, password, remember, name=None, *, adding=False, relinking=False):
+    def _open(self, identifier, target, password, remember, name=None, *, adding=False, relinking=False, cycle=None):
         target = VaultTarget(target.database.resolve(), target.key_file.resolve() if target.key_file else None)
         with self.mutex:
+            if cycle is not None and cycle != self.owner_generation:
+                raise UnlockCancelled
             if identifier in self.opening:
                 raise VaultError("This vault is already being opened.")
             record = self.registrations.get(identifier)
@@ -156,7 +165,8 @@ class Workspace:
             if password is None:
                 if record is None or record.item is None:
                     raise VaultError("Enter the vault password to unlock.")
-                password = self.keyring.retrieve(record.item)
+                with self.keyring_mutex:
+                    password = self.keyring.retrieve(record.item)
             try:
                 with target.database.open("rb") as source:
                     fingerprint = file_digest(source, "sha256").hexdigest()
@@ -167,35 +177,37 @@ class Workspace:
             worker = self.opener(target, password, cancelled)
             snapshot = worker.owner_snapshot()
             session = Unlocked(worker, tuple(snapshot["groups"]), tuple(snapshot["entries"]))
-            with self.mutex:
-                if cancelled.is_set() or self.registrations.get(identifier) != record:
-                    raise UnlockCancelled
-                self._check_target(target, identifier)
-                if record is None:
-                    record = Registration(identifier, name, target, worker.identity, None)
-                elif record.identity and record.identity != worker.identity:
-                    raise VaultError("The selected file does not match the registered vault.")
-                elif record.identity is None:
-                    imported = self.legacy_access.read().for_vault(worker.identity).actions
-                    record = replace(record, identity=worker.identity,
-                                     bindings=tuple(Binding(action, new_id()) for action in imported))
-                old_item = record.item
-                item = new_id() if remember is True else None if remember is False else old_item
-                pending = self.pending + ((old_item,) if old_item and old_item != item else ())
-                if remember is True:
-                    # Queue the new reference before saving it so a failed registration can be cleaned up.
-                    self._save(self.registrations, self.pending + (item,))
+            with self.keyring_mutex if remember else nullcontext():
+                with self.mutex:
+                    if cancelled.is_set() or self.registrations.get(identifier) != record:
+                        raise UnlockCancelled
+                    if record and record.identity and record.identity != worker.identity:
+                        raise VaultError("The selected file does not match the registered vault.")
+                    item = new_id() if remember is True else None if remember is False or record is None else record.item
+                    if remember:
+                        # Journal the new item before writing it to the OS service.
+                        self._save(self.registrations, self.pending + (item,))
+                if remember:
                     self.keyring.remember(item, password)
-                try:
+                with self.mutex:
+                    if cancelled.is_set() or self.registrations.get(identifier) != record:
+                        raise UnlockCancelled
+                    self._check_target(target, identifier)
+                    if record is None:
+                        record = Registration(identifier, name, target, worker.identity, None)
+                    elif record.identity is None:
+                        imported = self.legacy_access.read().for_vault(worker.identity).actions
+                        record = replace(record, identity=worker.identity,
+                                         bindings=tuple(Binding(action, new_id()) for action in imported))
+                    pending = tuple(i for i in self.pending if i != item)
+                    if record.item and record.item != item:
+                        pending += (record.item,)
                     updated = replace(record, target=target, item=item, fingerprint=fingerprint)
                     if updated != self.registrations.get(identifier):
                         self._replace(updated, pending)
-                except BaseException:
-                    self.cleanup()
-                    raise
-                previous = self.sessions.get(identifier)
-                self.sessions[identifier] = session
-                worker = None
+                    previous = self.sessions.get(identifier)
+                    self.sessions[identifier] = session
+                    worker = None
             return identifier
         finally:
             with self.mutex:
@@ -230,6 +242,7 @@ class Workspace:
 
     def lock_all(self):
         with self.mutex:
+            self.owner_generation += 1
             self.pause()
             for job in self.opening.values():
                 job.set()
@@ -247,6 +260,13 @@ class Workspace:
             records = {key: value for key, value in self.registrations.items() if key != identifier}
             self._save(records, self.pending + ((record.item,) if record.item else ()))
             self.lock(identifier)
+        self.cleanup()
+
+    def forget(self, identifier):
+        with self.mutex:
+            record = self.registrations[identifier]
+            if record.item:
+                self._replace(replace(record, item=None), self.pending + (record.item,))
         self.cleanup()
 
     def save_binding(self, identifier, action, original=None):
