@@ -6,6 +6,7 @@ from gi.repository import Gtk, Pango
 
 from .access_settings import Action, ActionType
 from .activity import ActivityError
+from .activity_grouping import EDIT_STAGES, ActivityResources, activity_groups, activity_matches, event_time
 from .edit_request_view import review_edit
 from .owner_views import _dialog, _label, _scroll, _table, _time
 from .workspace_context import DELETE_LABEL, attach_row_context
@@ -49,7 +50,7 @@ def fill_table(table, rows, key_column):
     if sorting.rows != rows or sorting.key_column != key_column:
         sorting.rows = rows
         sorting.key_column = key_column
-        _replace_rows(table, sorting.visible_rows(), key_column)
+        sorting.replace_rows(table, sorting.visible_rows(), key_column)
 
 
 def _replace_rows(table, rows, key_column):
@@ -86,9 +87,10 @@ def sorted_table_rows(rows, key_column, descending=False, group_column=None):
 
 
 class TableSort:
-    def __init__(self, sort_keys, sort_group):
+    def __init__(self, sort_keys, sort_group, replace_rows=_replace_rows):
         self.sort_keys = sort_keys or {}
         self.sort_group = sort_group
+        self.replace_rows = replace_rows
         self.rows = []
         self.key_column = None
         self.active = None
@@ -116,7 +118,7 @@ class TableSort:
         if self.active is not None:
             self.active.set_sort_order(Gtk.SortType.DESCENDING if self.descending else Gtk.SortType.ASCENDING)
         if self.key_column is not None:
-            _replace_rows(table, self.visible_rows(), self.key_column)
+            self.replace_rows(table, self.visible_rows(), self.key_column)
 
 
 def section_heading(title, icon):
@@ -144,9 +146,9 @@ def empty_state(icon, text):
 
 
 def pane_table(model, titles, widths, *, lead_icon=None, status=None, expand_columns=(1, 2), muted_columns=(),
-               sort_keys=None, sort_group=None):
+               sort_keys=None, sort_group=None, replace_rows=_replace_rows):
     table = styled(Gtk.TreeView(model=model), "keeper-table")
-    table.keeper_sort = TableSort(sort_keys, sort_group)
+    table.keeper_sort = TableSort(sort_keys, sort_group, replace_rows)
     table.set_grid_lines(Gtk.TreeViewGridLines.HORIZONTAL)
     for index, title in enumerate(titles):
         column = Gtk.TreeViewColumn(title)
@@ -506,31 +508,9 @@ class AccessView(Gtk.Box):
         self.app.owner_operation(lambda: self.app.grants.transition(identifier, status))
 
 
-def activity_target(row):
-    parts = (row.get("folder"), row.get("entry_title"))
-    return " / ".join(part for part in parts if part) or "—"
-
-
 def activity_location(row, workspace):
-    """Prefer event-time labels and use exact current references for older rows."""
-    fields = (("vault", "Vault"), ("folder", "Folder"), ("entry_title", "Entry"))
-    values = {key: row.get(key) for key, _ in fields}
-    vault_id, entry_id = row.get("vault_id"), row.get("entry")
-    if workspace is not None and vault_id:
-        with workspace.mutex:
-            record = workspace.registrations.get(vault_id)
-            if not values["vault"] and record:
-                values["vault"] = f"{record.name} (current)"
-            if record and entry_id and not (values["entry_title"] and values["folder"]):
-                session = workspace.owner_session(vault_id)
-                if session:
-                    entry = next((item for item in session.entries if item["id"] == entry_id), None)
-                    if entry:
-                        path = " / ".join(name or "(Untitled folder)" for name in entry["group_path"]) or "Root"
-                        values["folder"] = values["folder"] or f"{path} (current)"
-                        title = entry["title"] or "(Untitled entry)"
-                        values["entry_title"] = values["entry_title"] or f"{title} (current)"
-    return tuple((caption, values[key]) for key, caption in fields)
+    labels = ActivityResources(workspace, mark_current=True).labels(row)
+    return tuple(zip(("Vault", "Group", "Key"), labels))
 
 
 def activity_facts(pairs):
@@ -565,7 +545,7 @@ EDIT_FIELD_LABELS = {"title": "Title", "username": "Username", "url": "URL", "na
 
 def activity_edit_fields(row):
     stage = row["action"].partition(" · ")[0]
-    if stage not in ("Request edit", "Apply edit", "Deny edit", "Cancel edit"):
+    if stage not in EDIT_STAGES:
         return None
     for part in (row.get("scope") or "").split(" · "):
         if part.startswith("Fields "):
@@ -620,7 +600,7 @@ def activity_dialog(app, row):
     scroll.set_max_content_height(480)
     body.pack_start(scroll, True, True, 0)
 
-    add_activity_section(details, "Target", activity_location(row, app.workspace))
+    add_activity_section(details, "Resource", activity_location(row, app.workspace))
     add_activity_section(details, "Request", (
         (caption, reported(row[key]) if row.get(key) else None)
         for key, caption in (("agent", "Agent"), ("project", "Project"), ("model", "Model"), ("chat", "Chat"))
@@ -628,7 +608,9 @@ def activity_dialog(app, row):
     add_activity_section(details, "Execution", activity_execution(row))
     technical = activity_facts((
         ("Linux UID (verified)", row.get("uid")), ("Chat ID", row.get("chat_id")), ("Vault ID", row.get("vault_id")),
-        ("Entry ID", row.get("entry")), ("Token record", row.get("token")), ("Recorded scope", row.get("scope")),
+        ("Group ID", row.get("group_id")), ("Entry ID", row.get("entry")),
+        ("Token record", row.get("token")), ("Edit request ID", row.get("edit_request_id")),
+        ("Recorded scope", row.get("scope")),
     ))
     if technical is not None:
         technical.set_margin_start(10)
@@ -644,10 +626,34 @@ def activity_dialog(app, row):
     return dialog
 
 
+def replace_activity_rows(table, rows, key_column):
+    model = table.get_model()
+    if list(map(tuple, model)) == rows:
+        return
+    selected = selected_key(table, key_column)
+    expanded = set()
+    table.map_expanded_rows(lambda _, path: expanded.add(model[path][key_column]))
+    model.clear()
+    restored = None
+    for values in rows:
+        parent = model.append(None, values)
+        for child in values[-1]:
+            node = model.append(parent, child)
+            if child[key_column] == selected:
+                restored = node
+        if values[key_column] in expanded:
+            table.expand_row(model.get_path(parent), False)
+        if values[key_column] == selected:
+            restored = parent
+    if restored is not None:
+        table.get_selection().select_iter(restored)
+
+
 class ActivityView(Gtk.Box):
-    TITLES = ("Time", "Model", "Chat", "Action", "Vault", "Target", "Outcome")
+    TITLES = ("Time", "Model", "Chat", "Action", "Vault", "Group", "Key", "Outcome")
     RECORD_ID = len(TITLES)
-    REQUESTED_TIME = RECORD_ID + 1
+    TIME = RECORD_ID + 1
+    ROW_KEY = TIME + 1
 
     def __init__(self, app):
         super().__init__(orientation=Gtk.Orientation.VERTICAL, spacing=18)
@@ -658,10 +664,10 @@ class ActivityView(Gtk.Box):
         header.pack_end(tools, False, False, 0)
         filters = Gtk.Grid(column_spacing=8, row_spacing=8, margin=12)
         self.filters = {}
-        for index, name in enumerate(("Vault", "Agent", "Model", "Chat", "Action", "Outcome")):
+        for index, name in enumerate(("Vault", "Group", "Key", "Agent", "Model", "Chat", "Action", "Outcome")):
             field = styled(Gtk.SearchEntry(placeholder_text=name, hexpand=True), "keeper-search")
             field.connect("search-changed", self.refresh)
-            filters.attach(field, index % 3, index // 3, 1, 1)
+            filters.attach(field, index % 4, index // 4, 1, 1)
             self.filters[name.lower()] = field
         self.filter_panel = styled(Gtk.Revealer(transition_type=Gtk.RevealerTransitionType.SLIDE_DOWN), "keeper-card")
         self.filter_panel.add(filters)
@@ -673,10 +679,13 @@ class ActivityView(Gtk.Box):
         self.pack_start(header, False, False, 0)
         self.pack_start(self.filter_panel, False, False, 0)
         self.table, scroll = pane_table(
-            Gtk.ListStore(*([str] * (self.RECORD_ID + 1)), object), self.TITLES,
-            (140, 70, 68, 104, 75, 174, 147), status=(6, ACTIVITY_STATES),
-            expand_columns=(1, 2, 3, 4, 5), muted_columns=(0,), sort_keys={0: self.REQUESTED_TIME},
+            Gtk.TreeStore(*([str] * (self.RECORD_ID + 1)), object, object, object), self.TITLES,
+            (144, 64, 60, 115, 78, 86, 84, 144), status=(7, ACTIVITY_STATES),
+            expand_columns=(1, 2, 3, 4, 5, 6), muted_columns=(0,), sort_keys={0: self.TIME},
+            replace_rows=replace_activity_rows,
         )
+        self.table.set_enable_tree_lines(True)
+        self.table.set_expander_column(self.table.get_column(3))
         self.table.connect("row-activated", self._details)
         self.empty, self.empty_label, _ = empty_state("document-open-recent-symbolic", "No activity recorded")
         self.pack_start(table_card(scroll, self.empty), True, True, 0)
@@ -693,22 +702,51 @@ class ActivityView(Gtk.Box):
             panel.hide()
 
     def refresh(self, *_):
+        filters = {name: field.get_text().strip().casefold() for name, field in self.filters.items()
+                   if field.get_text().strip()}
         try:
-            rows = self.app.activity.rows(**{name: field.get_text() for name, field in self.filters.items()})
+            rows = self.app.activity.rows(limit=None)
         except ActivityError:
             rows = []
         self.rows = {str(row["id"]): row for row in rows}
-        fill_table(self.table, [
-            (table_time(row["requested"]), reported(row["model"]), reported(row["chat"]), row["action"],
-             row.get("vault") or "—", activity_target(row), row["outcome"], str(row["id"]), row["requested"])
-            for row in rows
-        ], self.RECORD_ID)
-        filtered = any(field.get_text() for field in self.filters.values())
-        self.empty_label.set_text("No activity matches these filters" if filtered else "No activity recorded")
-        self.empty.set_visible(not rows)
+        lookup = ActivityResources(self.app.workspace)
+        resources = {row["id"]: lookup.labels(row) for row in rows}
+        visible = []
+        for key, (label, events) in activity_groups(rows).items():
+            if filters and not any(
+                activity_matches(event, resources[event["id"]], filters) for event in events
+            ):
+                continue
+            latest = events[0]
+            if len(events) == 1:
+                visible.append(self._values(latest, resources[latest["id"]], key))
+                continue
+            children = tuple(
+                self._values(event, resources[event["id"]], ("event", event["id"])) for event in events
+            )
+            visible.append(self._values(
+                latest, resources[latest["id"]], key, action=f"{label} ({len(events)})", children=children,
+            ))
+        fill_table(self.table, visible, self.ROW_KEY)
+        self.empty_label.set_text("No activity matches these filters" if filters else "No activity recorded")
+        self.empty.set_visible(not visible)
 
-    def _details(self, *_):
-        self.open_record(selected_key(self.table, self.RECORD_ID))
+    @staticmethod
+    def _values(row, resource, key, *, action=None, children=()):
+        timestamp = event_time(row)
+        return (table_time(timestamp, compact=True), reported(row["model"]), reported(row["chat"]),
+                action or row["action"], *(value or "—" for value in resource),
+                row["outcome"], str(row["id"]), timestamp, key, children)
+
+    def _details(self, table, path, _column):
+        model = table.get_model()
+        if model.iter_has_child(model.get_iter(path)):
+            if table.row_expanded(path):
+                table.collapse_row(path)
+            else:
+                table.expand_row(path, False)
+            return
+        self.open_record(model[path][self.RECORD_ID])
 
     def open_record(self, identifier):
         row = self.rows.get(identifier)

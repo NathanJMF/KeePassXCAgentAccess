@@ -154,7 +154,7 @@ class ScopedBrokerTests(unittest.TestCase):
         self.assertEqual((new["folder"], new["entry_title"]), ("Root", "(Untitled entry)"))
         self.assertEqual((previous["folder"], previous["entry_title"]), ("Example group", "Example entry"))
 
-    def test_token_lifecycle_only_snapshots_a_single_approved_target(self):
+    def test_token_lifecycle_describes_exact_and_multi_vault_scopes(self):
         vault, other = self.vaults
         identifier = self.approve([
             {"vault": vault, "entry": self.entry, "metadata": True},
@@ -175,7 +175,10 @@ class ScopedBrokerTests(unittest.TestCase):
             {"vault": other, "entry": self.entry, "metadata": True},
         ], 1)
         latest = self.activity.rows(action="Approve token")[0]
-        self.assertEqual((latest["vault"], latest["folder"], latest["entry_title"]), (None, None, None))
+        self.assertEqual((latest["vault"], latest["folder"], latest["entry_title"]),
+                         ("Multiple vaults", None, "Multiple keys"))
+        self.assertIsNone(latest["vault_id"])
+        self.assertIsNone(latest["entry"])
 
     def test_revoke_at_delivery_and_dispatch(self):
         vault = self.vaults[0]

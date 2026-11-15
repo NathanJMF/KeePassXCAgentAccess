@@ -237,13 +237,16 @@ class Grants:
 
     def _target(self, scope):
         vault_ids = {item.vault for item in scope}
-        if len(vault_ids) != 1:
+        if not vault_ids:
             return {}
+        if len(vault_ids) > 1:
+            return {"vault": "Multiple vaults", "entry_title": "Multiple keys"}
         vault_id, = vault_ids
         vault = self.workspace.registrations.get(vault_id)
         target = {"vault_id": vault_id, "vault": vault.name if vault else None}
         entry_ids = {item.entry for item in scope}
-        if len(entry_ids) != 1:
+        if len(entry_ids) > 1:
+            target["entry_title"] = "Multiple keys"
             return target
         entry_id, = entry_ids
         session = self.workspace.session(vault_id)

@@ -356,6 +356,24 @@ def main(root):
             assert saved.find_entries(uuid=UUID(entry["id"]), first=True) is None
             assert saved.find_groups(uuid=UUID(group), first=True) is None
 
+        def activity_leaf(event_id):
+            view = app.activity_view
+            for root in view.table.get_model():
+                rows = root.iterchildren() if root.model.iter_has_child(root.iter) else (root,)
+                for row in rows:
+                    if row[view.RECORD_ID] == str(event_id):
+                        return row
+            raise AssertionError(f"Expected Activity event {event_id}")
+
+        def activity_group(events, outcome):
+            view = app.activity_view
+            summary = activity_leaf(events[0]["id"]).parent
+            assert summary is not None
+            outcome_column = view.TITLES.index("Outcome")
+            assert summary[outcome_column] == outcome
+            assert [row[view.RECORD_ID] for row in summary.iterchildren()] == [str(event["id"]) for event in events]
+            return summary
+
         def check_agent_edits(first, second):
             def runner(profile, tool, arguments, *, error=False):
                 message = {"jsonrpc": "2.0", "id": 1, "method": "tools/call",
@@ -484,8 +502,43 @@ def main(root):
             app.activity_button.clicked()
             app.activity_view.filters["chat"].set_text("Edit acceptance")
             app.activity_view.refresh()
-            assert len(app.activity_view.table.get_model()) >= 3
-            app.activity_view.filters["chat"].set_text("")
+            view = app.activity_view
+            assert len(view.table.get_model()) >= 3
+            denied = [row for row in rows if f"Edit request {proposal['id']}" in (row["scope"] or "")]
+            assert [row["outcome"] for row in denied] == ["Denied", "Pending review"]
+            summary = activity_group(denied, "Denied")
+            assert summary[view.TITLES.index("Vault")] == app.workspace.registrations[first].name
+            assert summary[view.TITLES.index("Group")] == "Approved group"
+            assert summary[view.TITLES.index("Key")] == "Agent fixture"
+            create_events = [row for row in rows if f"Edit request {first_group['id']}" in (row["scope"] or "")]
+            create_summary = activity_group(create_events, "Succeeded")
+            assert create_summary[view.TITLES.index("Group")] == "Reviewed group"
+            assert create_summary[view.TITLES.index("Key")] == "—"
+
+            view.table.expand_row(summary.path, False)
+            request = activity_leaf(denied[1]["id"])
+            view.table.get_selection().select_path(request.path)
+
+            def read_request(dialog):
+                labels = {child.get_text() for child in descendants(dialog) if isinstance(child, Gtk.Label)}
+                assert {denied[1]["action"], "Pending review"} <= labels
+                assert "Denied" not in labels
+                dialog.response(Gtk.ResponseType.CLOSE)
+
+            drive_dialog(lambda: view.table.row_activated(request.path, view.table.get_column(0)), read_request)
+            view.filters["outcome"].set_text("Pending review")
+            view.refresh()
+            summary = activity_group(denied, "Denied")
+            assert view.table.row_expanded(summary.path)
+            selected_model, selected = view.table.get_selection().get_selected()
+            assert selected_model[selected][view.RECORD_ID] == str(denied[1]["id"])
+            group_header = view.table.get_column(view.TITLES.index("Group"))
+            for _ in range(3):
+                group_header.clicked()
+                summary = activity_group(denied, "Denied")
+                assert view.table.row_expanded(summary.path)
+            view.filters["outcome"].set_text("")
+            view.filters["chat"].set_text("")
 
         def exercise():
             nonlocal result
@@ -750,11 +803,19 @@ def main(root):
                 check_editors(first)
                 assert invoke("beta", "entries", "list")["entries"] == fixture[2:]
                 app.activity_button.clicked()
-                assert [column.get_title() for column in app.activity_view.table.get_columns()] == list(app.activity_view.TITLES)
+                view = app.activity_view
+                table = view.table
+                assert [column.get_title() for column in table.get_columns()] == [
+                    "Time", "Model", "Chat", "Action", "Vault", "Group", "Key", "Outcome",
+                ]
+                assert isinstance(table.get_model(), Gtk.TreeStore)
                 app.activity_view.filters["agent"].set_text("Agent beta")
                 app.activity_view.refresh()
-                assert len(app.activity_view.table.get_model()) > 0
-                assert all(row["agent"] == "Agent beta" for row in app.activity_view.rows.values())
+                assert len(table.get_model()) > 0
+                allowed = {str(row["id"]) for row in old_activity.rows(agent="Agent beta")}
+                for root in table.get_model():
+                    assert root[view.RECORD_ID] in allowed
+                    assert all(row[view.RECORD_ID] in allowed for row in root.iterchildren())
                 access = next(row for row in old_activity.rows(vault="second", action="Use password")
                               if row["entry"] == first_entry and row["entry_title"])
                 assert access["folder"] == "Root" and access["entry_title"] == fixture[0]["title"]
@@ -765,27 +826,47 @@ def main(root):
 
                 app.activity_view.filters["agent"].set_text("")
                 app.activity_view.refresh()
-                activity_table = app.activity_view.table
-                model = activity_table.get_model()
-                path = next(row.path for row in model if row[app.activity_view.RECORD_ID] == str(access["id"]))
-                row = model[path]
-                assert row[app.activity_view.TITLES.index("Vault")] == "second"
-                assert row[app.activity_view.TITLES.index("Target")] == "Root / " + fixture[0]["title"]
-                activity_table.get_selection().select_path(path)
-                assert context_menu(activity_table) == ["View details…"]
+                token_events = [row for row in old_activity.rows(agent="Agent alpha")
+                                if row["action"] in ("Request token", "Approve token", "Disable token",
+                                                     "Re-enable token", "Remove token")]
+                assert [row["action"] for row in token_events] == [
+                    "Remove token", "Re-enable token", "Disable token", "Approve token", "Request token",
+                ]
+                token_summary = activity_group(token_events, "Removed")
+                assert not table.row_expanded(token_summary.path)
+                for expanded in (True, False):
+                    table.row_activated(token_summary.path, table.get_column(0))
+                    assert table.row_expanded(token_summary.path) == expanded
+
+                row = activity_leaf(access["id"])
+                assert row[view.TITLES.index("Vault")] == "second"
+                assert row[view.TITLES.index("Group")] == "Root"
+                assert row[view.TITLES.index("Key")] == fixture[0]["title"]
+                path = row.path
+                table.expand_to_path(path)
+                table.get_selection().select_path(path)
+                assert context_menu(table) == ["View details…"]
 
                 def read_activity(dialog):
                     labels = {child.get_text() for child in descendants(dialog) if isinstance(child, Gtk.Label)}
-                    assert {"Target", "Vault", "Folder", "Entry", "second", "Root", fixture[0]["title"]} <= labels
+                    assert {"Resource", "Vault", "Group", "Key", "second", "Root", fixture[0]["title"]} <= labels
                     expander = next(child for child in descendants(dialog) if isinstance(child, Gtk.Expander))
                     assert expander.get_label() == "Technical details" and not expander.get_expanded()
                     dialog.response(Gtk.ResponseType.CLOSE)
 
-                drive_dialog(lambda: activity_table.row_activated(path, activity_table.get_column(0)), read_activity)
+                drive_dialog(lambda: table.row_activated(path, table.get_column(0)), read_activity)
                 check_agent_edits(first, second)
                 app.tray_items["pause"].activate()
                 assert app.workspace.paused and app.workspace.session(second)
                 assert "paused" in invoke("beta", "entries", "list", expected=1)
+                listings = [row for row in old_activity.rows(agent="Agent beta", action="List entries")
+                            if row["vault_id"] == second and row["chat_id"] == "test-chat"]
+                assert len(listings) > 1 and listings[0]["outcome"] == "Paused"
+                same_scope = [row for row in listings if row["scope"] == listings[0]["scope"]]
+                assert len(same_scope) < len(listings)
+                assert any(row["outcome"] == "Succeeded" for row in same_scope[1:])
+                app.activity_view.refresh()
+                activity_group(same_scope, "Paused")
                 app.tray_items["pause"].activate()
                 set_screen_active(True)
                 wait_for(lambda: app.desktop.locked and not app.workspace.sessions, "Desktop lock did not close both workers")

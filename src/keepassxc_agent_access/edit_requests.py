@@ -201,12 +201,19 @@ class EditRequests:
             scope.append("Fields " + ", ".join(name for name, _ in request.fields))
         if request.password_source:
             scope.append(f"Replacement source {request.password_source}")
-        folder, title, destination = _reviewed_target(preview) if preview is not None else (None, None, None)
+        registration = self.workspace.registrations.get(request.vault)
+        vault_name = preview.vault_name if preview else registration.name if registration else None
+        folder, title, destination = None, None, None
+        group_id = request.group or (request.parent if request.entry is None else None)
+        if preview is not None:
+            folder, title, destination = _reviewed_target(preview)
+            if request.entry:
+                group_id = _unique(preview._session.entries, request.entry)["group"]
         return self.activity.begin(
             token.uid, context or token.context, f"{label} · {request.title}", destination, entry=request.entry,
-            vault=preview.vault_name if preview else None, vault_id=request.vault,
+            vault=vault_name, vault_id=request.vault,
             token=token.id, agent=token.identity, project=token.project, scope=" · ".join(scope),
-            folder=folder, entry_title=title,
+            folder=folder, entry_title=title, group_id=group_id, edit_request_id=request.id,
         )
 
     def _stale(self, record, token, preview=None, *, label="Apply edit"):
@@ -379,9 +386,14 @@ class EditRequests:
                 raise VaultError("Could not confirm the edit outcome. Reopen the vault to check it.") from None
             raise
         result = identifier if request.operation in ("create_entry", "create_group") else None
+        target = {}
+        if request.operation == "create_entry":
+            target.update(entry=result, entry_title=entry_label(values["title"]))
+        elif request.operation == "create_group":
+            target.update(group_id=result, folder=folder_label((*checked.destination_path[1:], values["name"])))
         with self.workspace.mutex:
             self._status(record, "dispatched", "applied", result)
-            self.activity.finish(event, "Succeeded", entry=result if request.operation == "create_entry" else None)
+            self.activity.finish(event, "Succeeded", **target)
             self.grants.used(token)
         return {"id": record.id, "status": "applied", **({"result": result} if result else {})}
 
@@ -400,10 +412,8 @@ def _reviewed_target(preview):
         return folder_label(preview.target_path[1:-1]), entry_label(preview.target_path[-1]), destination
     if request.group:
         return folder_label(preview.target_path[1:]), None, destination
-    proposed = dict(preview.new)
-    if request.operation == "create_entry":
-        return folder_label(parts), entry_label(proposed["title"]), destination
-    return folder_label((*parts, proposed["name"])), None, destination
+    # A create request only targets its parent until the new resource is saved.
+    return folder_label(parts), None, destination
 
 
 def _unique(rows, identifier):

@@ -252,36 +252,50 @@ class EditRequestsTests(unittest.TestCase):
         self.assertEqual({row["outcome"] for row in rows}, {"Pending review", "Denied"})
         for row in rows:
             self.assertEqual((row["model"], row["chat_id"]), (context["model"], context["chat_id"]))
+            self.assertEqual(row["edit_request_id"], request["id"])
             self.assertIn("Fields title, username", row["scope"])
             for value in fields.values():
                 self.assertNotIn(value, str(row))
 
         create = self._request("create_group", parent=self.root_id, fields={"name": "Synthetic new folder"})
         self._wire("request_edit", request=create, context=context)
-        self.edits.approve(self.edits.preview(self.token.id, create["id"]))
-        success = self.activity.rows(chat=context["chat"], action="Apply edit", outcome="Succeeded")[0]
+        applied = self.edits.approve(self.edits.preview(self.token.id, create["id"]))
+        success, = self.activity.rows(chat=context["chat"], action="Apply edit", outcome="Succeeded")
         self.assertIn(f"Destination group {self.root_id}", success["scope"])
+        self.assertEqual((success["edit_request_id"], success["group_id"], success["folder"], success["destination"]),
+                         (create["id"], applied["result"], "Synthetic new folder", "Root"))
+
+        declined = self._submit("create_group", parent=self.group_id, fields={"name": "Unapproved label"})
+        self.edits.deny(self.token.id, declined["id"], preview=self.edits.preview(self.token.id, declined["id"]))
+        denied, = self.activity.rows(action="Deny edit · Create group")
+        self.assertEqual((denied["edit_request_id"], denied["group_id"], denied["folder"], denied["destination"]),
+                         (declined["id"], self.group_id, "First folder", "First folder"))
+        self.assertNotIn("Unapproved label", str(denied))
 
     def test_activity_snapshots_reviewed_titles_folders_and_destinations(self):
         request = self._submit("update_entry", entry=self.entry_id, fields={"title": "Approved new title"})
         queued, = self.activity.rows(action="Request edit")
-        self.assertEqual((queued["vault"], queued["folder"], queued["entry_title"]), (None, None, None))
         preview = self.edits.preview(self.token.id, request["id"])
+        self.assertEqual((queued["vault"], queued["folder"], queued["entry_title"], queued["edit_request_id"]),
+                         (preview.vault_name, None, None, request["id"]))
         self.edits.approve(preview)
         updated, = self.activity.rows(action="Apply edit · Update entry", outcome="Succeeded")
         self.assertEqual((updated["vault"], updated["folder"], updated["entry_title"], updated["entry"]),
                          (preview.vault_name, "First folder", "Scoped entry", self.entry_id))
+        self.assertEqual((updated["edit_request_id"], updated["group_id"]), (request["id"], self.group_id))
         self.assertNotIn("Approved new title", repr(updated))
 
         _, result = self._apply("create_entry", parent=self.root_id, fields={"title": "Approved creation"})
         created, = self.activity.rows(action="Apply edit · Create entry", outcome="Succeeded")
         self.assertEqual((created["folder"], created["entry_title"], created["entry"], created["destination"]),
                          ("Root", "Approved creation", result["result"], "Root"))
+        self.assertEqual((created["edit_request_id"], created["group_id"]), (result["id"], self.root_id))
 
         self._apply("move_entry", entry=self.entry_id, parent=self.root_id)
         moved, = self.activity.rows(action="Apply edit · Move entry", outcome="Succeeded")
         self.assertEqual((moved["folder"], moved["entry_title"], moved["destination"]),
                          ("First folder", "Approved new title", "Root"))
+        self.assertEqual(moved["group_id"], self.group_id)
 
         request = self._submit("recycle_group", group=self.group_id)
         review = self.edits.preview(self.token.id, request["id"])
@@ -289,6 +303,7 @@ class EditRequestsTests(unittest.TestCase):
         denied, = self.activity.rows(action="Deny edit", outcome="Denied")
         self.assertEqual((denied["folder"], denied["entry_title"], denied["destination"]),
                          ("First folder", None, "Recycle Bin"))
+        self.assertEqual((denied["edit_request_id"], denied["group_id"]), (request["id"], self.group_id))
 
     def test_reenabled_token_cannot_apply_an_earlier_pending_edit(self):
         request = self._submit("create_group", parent=self.root_id, fields={"name": "Revoked"})

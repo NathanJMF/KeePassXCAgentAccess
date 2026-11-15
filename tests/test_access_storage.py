@@ -93,6 +93,8 @@ class AccessStorageTests(TestCase):
         with store.connection() as db:
             db.execute("ALTER TABLE activity DROP COLUMN folder")
             db.execute("ALTER TABLE activity DROP COLUMN entry_title")
+            db.execute("ALTER TABLE activity DROP COLUMN group_id")
+            db.execute("ALTER TABLE activity DROP COLUMN edit_request_id")
 
         reopened = ActivityStore(store.path)
         reopened.recover(30)
@@ -101,11 +103,14 @@ class AccessStorageTests(TestCase):
                          ("Previous vault", vault_id, entry))
         self.assertIsNone(legacy_row["folder"])
         self.assertIsNone(legacy_row["entry_title"])
+        self.assertIsNone(legacy_row["group_id"])
+        self.assertIsNone(legacy_row["edit_request_id"])
 
         event = reopened.begin(123, Attribution(), "Create entry", "Root", vault="Example vault",
                                vault_id=vault_id, folder="Root", entry_title="At review")
         reopened.finish(event, "Succeeded", entry=entry)
-        current, _ = ActivityStore(store.path).rows()
+        current, _ = ActivityStore(store.path).rows(limit=None)
+        self.assertEqual([current], reopened.rows(limit=1))
         self.assertEqual((current["vault"], current["folder"], current["entry_title"], current["entry"]),
                          ("Example vault", "Root", "At review", entry))
 

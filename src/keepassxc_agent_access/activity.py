@@ -64,6 +64,8 @@ CREATE TABLE IF NOT EXISTS activity (
     chat TEXT,
     action TEXT NOT NULL,
     entry TEXT,
+    group_id TEXT,
+    edit_request_id TEXT,
     folder TEXT,
     entry_title TEXT,
     destination TEXT,
@@ -102,7 +104,8 @@ class ActivityStore:
         with self.connection() as db:
             db.executescript(SCHEMA)
             columns = {column["name"] for column in db.execute("PRAGMA table_info(activity)")}
-            for name in ("entry", "vault", "vault_id", "token", "agent", "project", "scope", "folder", "entry_title"):
+            for name in ("entry", "vault", "vault_id", "token", "agent", "project", "scope", "folder", "entry_title",
+                         "group_id", "edit_request_id"):
                 if name not in columns:
                     db.execute(f"ALTER TABLE activity ADD COLUMN {name} TEXT")
             db.execute(
@@ -120,7 +123,8 @@ class ActivityStore:
             db.execute("DELETE FROM sessions WHERE id NOT IN (SELECT session FROM activity)")
 
     def begin(self, uid, context, action, destination, entry=None, *, vault=None, vault_id=None,
-              token=None, agent=None, project=None, scope=None, folder=None, entry_title=None):
+              token=None, agent=None, project=None, scope=None, folder=None, entry_title=None,
+              group_id=None, edit_request_id=None):
         with self.connection() as db:
             chat_id = context.chat_id or ""
             db.execute("INSERT OR IGNORE INTO sessions(uid, chat_id) VALUES (?, ?)", (uid, chat_id))
@@ -129,10 +133,11 @@ class ActivityStore:
             ).fetchone()[0]
             cursor = db.execute(
                 """INSERT INTO activity(session, requested, model, chat, action, destination, entry,
-                                         vault, vault_id, token, agent, project, scope, folder, entry_title, outcome)
-                VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'Pending')""",
+                                         vault, vault_id, token, agent, project, scope, folder, entry_title,
+                                         group_id, edit_request_id, outcome)
+                VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'Pending')""",
                 (session, time(), context.model, context.chat, action, destination, entry,
-                 vault, vault_id, token, agent, project, scope, folder, entry_title),
+                 vault, vault_id, token, agent, project, scope, folder, entry_title, group_id, edit_request_id),
             )
             return cursor.lastrowid
 
@@ -153,15 +158,17 @@ class ActivityStore:
             if changed != 1:
                 raise ActivityError()
 
-    def finish(self, event, outcome, status=None, *, entry=None):
+    def finish(self, event, outcome, status=None, *, entry=None, group_id=None, folder=None, entry_title=None):
         now = time()
         with self.connection() as db:
             db.execute(
                 """UPDATE activity SET decided=coalesce(decided, ?), completed=?, outcome=?, status=?,
-                    entry=coalesce(entry, ?) WHERE id=?""", (now, now, outcome, status, entry, event),
+                    entry=coalesce(entry, ?), group_id=coalesce(?, group_id), folder=coalesce(?, folder),
+                    entry_title=coalesce(?, entry_title) WHERE id=?""",
+                (now, now, outcome, status, entry, group_id, folder, entry_title, event),
             )
 
-    def rows(self, *, model="", chat="", action="", outcome="", vault="", agent=""):
+    def rows(self, *, model="", chat="", action="", outcome="", vault="", agent="", limit=1000):
         with self.connection() as db:
             return [dict(row) for row in db.execute(
                 """SELECT activity.*, sessions.uid, sessions.chat_id FROM activity
@@ -171,6 +178,6 @@ class ActivityStore:
                   AND instr(lower(action), lower(?)) > 0 AND instr(lower(outcome), lower(?)) > 0
                   AND instr(lower(coalesce(vault,'') || ' ' || coalesce(vault_id,'')), lower(?)) > 0
                   AND instr(lower(coalesce(agent,'')), lower(?)) > 0
-                ORDER BY requested DESC, activity.id DESC LIMIT 1000""",
-                (model, chat, action, outcome, vault, agent),
+                ORDER BY requested DESC, activity.id DESC LIMIT ?""",
+                (model, chat, action, outcome, vault, agent, -1 if limit is None else limit),
             )]
