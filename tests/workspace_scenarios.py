@@ -1485,6 +1485,7 @@ def main(root):
                 def read_parent(dialog):
                     labels = {label.get_text() for label in descendants(dialog) if isinstance(label, Gtk.Label)}
                     assert {"Remove token", "Audit Note", "Check approved services"} <= labels
+                    assert "No note provided." not in labels
                     dialog.response(Gtk.ResponseType.CLOSE)
 
                 drive_dialog(lambda: table.row_activated(token_summary.path, table.get_column(0)), read_parent)
@@ -1522,9 +1523,11 @@ def main(root):
                 assert context_menu(table) == ["View Details…"]
 
                 def read_activity(dialog):
-                    labels = {child.get_text() for child in descendants(dialog) if isinstance(child, Gtk.Label)}
-                    assert {"Resource", "Vault", "Group", "Key", "second", "Root", fixture[0]["title"]} <= labels
-                    assert {f"{action_model} (reported)", f"{action_chat} (reported)"} <= labels
+                    labels = [child.get_text() for child in descendants(dialog) if isinstance(child, Gtk.Label)]
+                    assert {"Resource", "Vault", "Group", "Key", "second", "Root", fixture[0]["title"]} <= set(labels)
+                    assert {f"{action_model} (reported)", f"{action_chat} (reported)"} <= set(labels)
+                    assert "No note provided." in labels
+                    assert labels.index("Execution") < labels.index("Audit Note")
                     expander = next(child for child in descendants(dialog) if isinstance(child, Gtk.Expander))
                     assert expander.get_label() == "Technical Details" and not expander.get_expanded()
                     dialog.response(Gtk.ResponseType.CLOSE)

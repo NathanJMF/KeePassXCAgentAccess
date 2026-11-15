@@ -1013,14 +1013,13 @@ def activity_dialog(app, row):
     scroll.set_max_content_height(480)
     body.pack_start(scroll, True, True, 0)
 
-    if row.get("note"):
-        add_activity_section(details, "Audit Note", (("Agent Note", row["note"]),))
     add_activity_section(details, "Resource", activity_location(row, app.workspace))
     context = [(caption, reported(row[key])) for key, caption in
                (("project", "Project"), ("model", "Model"), ("chat", "Chat")) if row.get(key)]
     identity = row.get("identity") or row.get("agent")
     add_activity_section(details, "Request", (("Identity", reported(identity) if identity else None), *context))
     add_activity_section(details, "Execution", activity_execution(row))
+    add_activity_section(details, "Audit Note", (("Agent Note", row.get("note") or "No note provided."),))
     technical = activity_facts((
         ("Linux UID (verified)", row.get("uid")), ("Chat ID", row.get("chat_id")), ("Vault ID", row.get("vault_id")),
         ("Group ID", row.get("group_id")), ("Entry ID", row.get("entry")),
