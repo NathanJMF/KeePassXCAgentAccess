@@ -211,7 +211,7 @@ def main(root):
 
             def scope_label(path):
                 vault, *groups, entry = path
-                return f"{vault} | {' / '.join(groups) or '—'} | {entry}"
+                return f"{vault} > {' / '.join(groups) or '—'} > {entry}"
 
             def read_inline():
                 token = access_root("expanded")
@@ -1111,7 +1111,7 @@ def main(root):
                 assert access_table.row_expanded(disabled.path)
                 scope, = disabled.iterchildren()
                 assert not scope.model.iter_has_child(scope.iter)
-                assert scope[2] == f"{app.workspace.registrations[first].name} | — | {fixture[0]['title']}"
+                assert scope[2] == f"{app.workspace.registrations[first].name} > — > {fixture[0]['title']}"
                 assert "Entry metadata" in scope[3] and "Username" in scope[3]
                 drive_dialog(access_row("alpha"), lambda dialog: dialog.response(Gtk.ResponseType.APPLY))
                 assert invoke("alpha", "entries", "list")["entries"] == fixture[:1]

@@ -7,7 +7,7 @@ Keeper is a Linux tray app for browsing existing KeePass databases and granting 
 Use a Wayland session with the AppIndicator extension enabled. Install the desktop and vault dependencies from Ubuntu.
 
 ```sh
-sudo apt install python3-gi python3-pykeepass gir1.2-gtk-3.0 \
+sudo apt install python3-gi python3-gi-cairo python3-pykeepass gir1.2-gtk-3.0 \
   gir1.2-secret-1 gir1.2-ayatanaappindicator3-0.1 gnome-keyring
 ./run-tray
 ```

@@ -139,8 +139,9 @@ def empty_state(icon, text):
 
 
 def pane_table(model, titles, widths, *, lead_icon=None, status=None, expand_columns=(1, 2), muted_columns=(),
-               time_columns=None, sort_group=None, replace_rows=_replace_rows):
+               time_columns=None, text_renderers=None, sort_group=None, replace_rows=_replace_rows):
     time_columns = time_columns or {}
+    text_renderers = text_renderers or {}
     table = styled(Gtk.TreeView(model=model), "keeper-table")
     table.keeper_sort = TableSort(time_columns, sort_group, replace_rows)
     table.set_grid_lines(Gtk.TreeViewGridLines.HORIZONTAL)
@@ -152,7 +153,8 @@ def pane_table(model, titles, widths, *, lead_icon=None, status=None, expand_col
         column.set_expand(index in expand_columns)
         column.set_min_width(widths[index])
         ellipsize = Pango.EllipsizeMode.NONE if index in time_columns else Pango.EllipsizeMode.END
-        text = Gtk.CellRendererText(xpad=10, ypad=9, ellipsize=ellipsize)
+        renderer = text_renderers.get(index, Gtk.CellRendererText)
+        text = renderer(xpad=10, ypad=9, ellipsize=ellipsize)
         colored = status is not None and index == status[0]
         if colored or (index == 0 and lead_icon):
             icon = Gtk.CellRendererPixbuf(xpad=5, stock_size=Gtk.IconSize.MENU)
@@ -321,6 +323,14 @@ def approved_entries_tree(workspace, scopes):
     return tree, needs_unlock
 
 
+class AccessIdentityRenderer(Gtk.CellRendererText):
+    inline_scope = False
+
+    def do_render(self, cr, widget, background_area, cell_area, flags):
+        if not self.inline_scope:
+            Gtk.CellRendererText.do_render(self, cr, widget, background_area, cell_area, flags)
+
+
 class AccessView(Gtk.Box):
     TITLES = ("Requested", "Last used", "Identity", "Project", "Status")
     STATUS, RECORD_ID, KIND = 4, 5, 6
@@ -342,12 +352,13 @@ class AccessView(Gtk.Box):
             self.TITLES, (138, 138, 122, 122, 119),
             status=(self.STATUS, ACCESS_STATES), muted_columns=(0, 1), expand_columns=(2, 3),
             time_columns={0: self.REQUESTED_TIME, 1: self.LAST_USED_TIME},
-            sort_group=self.REVIEW_GROUP, replace_rows=replace_tree_rows,
+            text_renderers={2: AccessIdentityRenderer}, sort_group=self.REVIEW_GROUP, replace_rows=replace_tree_rows,
         )
         self.table.set_enable_tree_lines(True)
         self.table.set_expander_column(self.table.get_column(0))
         identity = self.table.get_column(2)
         identity.set_cell_data_func(identity.get_cells()[0], self._scope_label)
+        self.table.connect_after("draw", self._draw_scope_labels)
         self.table.connect("row-activated", self._open)
         attach_row_context(self.table, self._context, destructive_labels=(self.REMOVE,))
         self.table.get_selection().connect("changed", lambda *_: self.review_button.set_sensitive(
@@ -378,8 +389,52 @@ class AccessView(Gtk.Box):
         self.empty.set_visible(not rows)
 
     def _scope_label(self, _column, cell, model, iterator, *_):
-        ellipsize = Pango.EllipsizeMode.NONE if model[iterator][self.KIND] == "scope" else Pango.EllipsizeMode.END
-        cell.set_property("ellipsize", ellipsize)
+        cell.inline_scope = model[iterator][self.KIND] == "scope"
+
+    def _draw_scope_labels(self, table, cr):
+        window = table.get_bin_window()
+        visible = table.get_visible_range()
+        if not window or not visible or not Gtk.cairo_should_draw_window(cr, window):
+            return
+        first, last = visible
+        first_token = first.get_indices()[0]
+
+        # Scope rows have no timestamps. Draw their accessible path across those
+        # empty cells and Identity, leaving the column layout of token rows intact.
+        cr.save()
+        Gtk.cairo_transform_to_window(cr, table, window)
+        selection = table.get_selection()
+        context = table.get_style_context()
+        first_column, identity = table.get_column(0), table.get_column(2)
+        for token in table.get_model():
+            path = token.path
+            if path.compare(last) > 0:
+                break
+            if path.get_indices()[0] < first_token or not table.row_expanded(path):
+                continue
+            for row in token.iterchildren():
+                path = row.path
+                if path.compare(first) < 0 or path.compare(last) > 0:
+                    continue
+                line = table.get_cell_area(path, first_column)
+                cell = table.get_cell_area(path, identity)
+                x = line.x + 6
+                width = cell.x + cell.width - x - 10
+                if width <= 0:
+                    continue
+                layout = table.create_pango_layout(row[2])
+                layout.set_width(width * Pango.SCALE)
+                layout.set_ellipsize(Pango.EllipsizeMode.END)
+                layout.set_single_paragraph_mode(True)
+                _, height = layout.get_pixel_size()
+                state = table.get_state_flags()
+                if selection.iter_is_selected(row.iter):
+                    state |= Gtk.StateFlags.SELECTED
+                context.save()
+                context.set_state(state)
+                Gtk.render_layout(context, cr, x, cell.y + (cell.height - height) // 2, layout)
+                context.restore()
+        cr.restore()
 
     def _scope_rows(self, grant, snapshots):
         resources, _ = approved_resources(self.app.workspace, grant.scope, snapshots)
@@ -391,7 +446,7 @@ class AccessView(Gtk.Box):
                 paths[item.key] = (*parent, item.name)
                 continue
             vault, *groups = parent
-            label = f"{vault} | {' / '.join(groups) or '—'} | {item.name}"
+            label = f"{vault} > {' / '.join(groups) or '—'} > {item.name}"
             rows.append(("", "", label, item.permissions, "", "", "scope", None, None, True,
                          (grant.id, *item.key), ()))
         return tuple(rows)
