@@ -52,6 +52,11 @@ def pane_table(model, titles):
     return table, scroll
 
 
+def metadata_labels(permission):
+    return [label for field, label in (("metadata", "Entry metadata"), ("username", "Username"),
+                                       ("url", "Stored URL")) if getattr(permission, field)]
+
+
 class AccessView(Gtk.Box):
     TITLES = ("Requested", "Identity", "Project", "Status", "Last used")
 
@@ -107,7 +112,7 @@ class AccessView(Gtk.Box):
                                           bool(controls) and all(combo.get_active() >= 0 for combo, _ in controls))
 
         for item in grant.items:
-            operations = ["Entry metadata"] if item.metadata else []
+            operations = metadata_labels(item)
             if item.action:
                 operations.append(f"HTTPS Basic-auth GET · {item.action}")
             selector = item.label or f"{item.vault} / {item.entry}"
@@ -129,8 +134,12 @@ class AccessView(Gtk.Box):
                     choice = options[index]
                     vault = self.app.workspace.registrations.get(choice.scope.vault)
                     source = f"\nDatabase  {vault.target.database}" if vault else ""
-                    label.set_text(f"Vault  {choice.scope.vault}{source}\nEntry  {choice.scope.entry}" +
-                                   (f"\nGET  {choice.destination}" if choice.destination else ""))
+                    values = [f"Vault  {choice.scope.vault}{source}", f"Entry  {choice.scope.entry}"]
+                    for field, caption in ((choice.username, "Username"), (choice.url, "Stored URL"),
+                                           (choice.destination, "GET")):
+                        if field is not None:
+                            values.append(f"{caption}  {field or '—'}")
+                    label.set_text("\n".join(values))
                 changed()
 
             combo.connect("changed", show_choice)
@@ -161,7 +170,7 @@ class AccessView(Gtk.Box):
             session = self.app.workspace.session(scope.vault)
             entry = next((row for row in session.entries if row["id"] == scope.entry), None) if session else None
             title = " / ".join([*entry["group_path"], entry["title"]]) if entry else scope.entry
-            operations = ["Entry metadata"] if scope.metadata else []
+            operations = metadata_labels(scope)
             if scope.action:
                 binding = record.binding(scope.entry, scope.action) if record else None
                 current = binding and binding.revision == scope.revision and binding.action.enabled

@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
@@ -18,9 +19,10 @@ class Worker:
 
     def __init__(self, entry):
         self.row = {"id": entry, "title": "Example entry", "group_path": ["Example group"]}
+        self.rows = [self.row]
 
     def scoped_entries(self, identifiers):
-        return {"entries": [self.row] if self.row["id"] in identifiers else []}
+        return {"entries": [row for row in self.rows if row["id"] in identifiers]}
 
     def entry(self, _):
         return self.row
@@ -47,7 +49,9 @@ class ScopedBrokerTests(unittest.TestCase):
         for index, vault in enumerate(self.vaults):
             self.workspace.registrations[vault] = Registration(vault, str(index), VaultTarget(Path(f"fixture-{index}.kdbx")), None, None)
             worker = Worker(self.entry)
-            self.workspace.sessions[vault] = Unlocked(worker, (), (worker.row,))
+            owner_row = {**worker.row, "username": f"fixture-user-{index}", "url": f"https://fixture-{index}.example.test",
+                         "password": "fixture-password", "notes": "fixture-notes"}
+            self.workspace.sessions[vault] = Unlocked(worker, (), (owner_row,))
         self.workspace.save_binding(self.vaults[0], self.action)
         self.workspace.pause(False)
 
@@ -146,6 +150,113 @@ class ScopedBrokerTests(unittest.TestCase):
         with patch.object(worker, "use", use):
             self.assert_code("revoked", "use_password", entry=self.entry, action="check")
         self.assertEqual(len(self.activity.rows(outcome="revoked")), 2)
+
+    def test_optional_metadata_requires_discovery_and_explicit_permission(self):
+        vault = self.vaults[0]
+        item = {"vault": vault, "entry": self.entry, "metadata": True}
+        for invalid in ({"metadata": False, "username": True, "action": "check"},
+                        {"url": "true"}, {"username": 1}, {"password": True}):
+            with self.subTest(invalid=invalid), self.assertRaises(ListingError) as error:
+                self.enroll([{**item, **invalid}])
+            self.assertEqual(error.exception.code, "invalid_request")
+
+        self.approve([item])
+        self.approve([{**item, "username": True}], index=1)
+        self.approve([{**item, "url": True}], index=2)
+        basic = self.workspace.session(vault).worker.row
+        fields = ["username", "url"]
+        self.assertEqual(self.invoke("list_entries", fields=fields), {"entries": [basic]})
+        self.assertEqual(self.invoke("list_entries", 1), {"entries": [basic]})
+        self.assertEqual(self.invoke("list_entries", 1, fields=fields),
+                         {"entries": [{**basic, "username": "fixture-user-0"}]})
+        self.assertEqual(self.invoke("list_entries", 2, fields=fields),
+                         {"entries": [{**basic, "url": "https://fixture-0.example.test"}]})
+        for invalid in ("username", [True], ["password"], ["url", "url"]):
+            with self.subTest(invalid=invalid):
+                self.assert_code("invalid_request", "list_entries", fields=invalid)
+        history = repr(self.activity.rows())
+        self.assertIn("(metadata, username)", history)
+        self.assertIn("(metadata, url)", history)
+        self.assertIn("Requested entry fields · username, url", history)
+        for value in ("fixture-user-0", "https://fixture-0.example.test", "fixture-password", "fixture-notes"):
+            self.assertNotIn(value, history)
+
+    def test_listing_does_not_forward_unapproved_worker_fields_or_identifiers(self):
+        vault = self.vaults[0]
+        self.approve([{"vault": vault, "entry": self.entry, "metadata": True, "username": True}])
+        worker = self.workspace.session(vault).worker
+        selected = {**worker.row, "password": "fixture-password", "url": "https://unapproved.example.test"}
+        unselected = {**selected, "id": str(uuid4())}
+        with patch.object(worker, "scoped_entries", return_value={"entries": [selected, unselected]}):
+            self.assertEqual(self.invoke("list_entries", fields=["username", "url"]),
+                             {"entries": [{**worker.row, "username": "fixture-user-0"}]})
+
+    def test_metadata_is_scoped_by_entry_and_vault(self):
+        first, second = self.vaults
+        session = self.workspace.session(first)
+        worker = session.worker
+        another = {"id": str(uuid4()), "title": "Second entry", "group_path": []}
+        worker.rows.append(another)
+        self.workspace.sessions[first] = Unlocked(
+            worker, (), (*session.entries, {**another, "username": "other-user", "url": "https://other.example.test"}),
+        )
+        self.approve([
+            {"vault": first, "entry": self.entry, "metadata": True, "username": True},
+            {"vault": first, "entry": another["id"], "metadata": True},
+            {"vault": second, "entry": self.entry, "metadata": True, "url": True},
+        ])
+        fields = ["username", "url"]
+        self.assertEqual(self.invoke("list_entries", vault=first, fields=fields),
+                         {"entries": [{**worker.row, "username": "fixture-user-0"}, another]})
+        self.assertEqual(self.invoke("list_entries", vault=second, fields=fields),
+                         {"entries": [{**worker.row, "url": "https://fixture-1.example.test"}]})
+
+    def test_legacy_grants_do_not_share_new_fields(self):
+        item = {"vault": self.vaults[0], "entry": self.entry, "metadata": True}
+        identifier = self.approve([item])
+        saved = json.loads(self.grants.path.read_text())
+        for row in (*saved["grants"][0]["items"], *saved["grants"][0]["scope"]):
+            del row["username"], row["url"]
+        self.grants.path.write_text(json.dumps(saved))
+        self.grants = Grants(self.workspace, self.activity)
+        self.engine.grants = self.grants
+        self.assertEqual(self.enroll([item]), {"status": "active"})
+        scope, = self.grants.records[identifier].scope
+        self.assertFalse(scope.username or scope.url)
+        self.assertEqual(self.invoke("list_entries", fields=["username", "url"]),
+                         {"entries": [self.workspace.session(self.vaults[0]).worker.row]})
+        with self.assertRaises(ListingError) as error:
+            self.enroll([{**item, "url": True}])
+        self.assertEqual(error.exception.code, "ineligible")
+
+    def test_metadata_delivery_revokes_after_session_replacement(self):
+        vault = self.vaults[0]
+        identifier = self.approve([{"vault": vault, "entry": self.entry, "metadata": True, "url": True}])
+        session = self.workspace.session(vault)
+        replacement = Unlocked(session.worker, (), ({**session.entries[0], "url": "https://updated.example.test"},))
+
+        def replace():
+            self.workspace.sessions[vault] = replacement
+
+        self.assert_code("revoked", "list_entries", fields=["url"], before=replace)
+        self.assertIsNone(self.grants.records[identifier].last_used)
+        self.assertEqual(self.invoke("list_entries", fields=["url"])["entries"][0]["url"],
+                         "https://updated.example.test")
+
+    def test_review_rejects_a_stale_displayed_metadata_value(self):
+        vault = self.vaults[0]
+        self.enroll([{"vault": vault, "entry": self.entry, "metadata": True, "url": True}])
+        record, = self.grants.rows()
+        choice, = self.grants.choices(record.items[0])
+        self.assertEqual(choice.url, "https://fixture-0.example.test")
+        self.assertIsNone(choice.username)
+
+        session = self.workspace.session(vault)
+        changed = {**session.entries[0], "url": "https://updated.example.test"}
+        self.workspace.sessions[vault] = Unlocked(session.worker, (), (changed,))
+        with self.assertRaises(ValueError):
+            self.grants.decide(record.id, (choice,))
+        self.assertEqual(self.invoke("access_status"), {"status": "pending"})
 
     def test_review_rejects_stale_choice_and_denied_token(self):
         self.enroll([{"label": "Example entry", "action": "check"}])

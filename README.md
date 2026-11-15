@@ -45,11 +45,20 @@ export KEEPASSXC_AGENT_UID="$(id -u agent-runner)"
 
 Save the socket path and runner account in **Broker settings…** for app-menu launches. The broker checks the connecting OS UID before accepting token requests.
 
-Put `keepassxc-agent` on the runner's PATH with its adjacent package in `src/keepassxc_agent_access`. Provide the socket path in `KEEPASSXC_AGENT_SOCKET` and an absolute private credential file path in `KEEPASSXC_AGENT_TOKEN_FILE`. The credential directory must be owned by the runner and accessible only to it. Use distinct isolated storage for each token profile. Processes sharing an OS UID need a runtime boundary that prevents access to each other's profiles. Give the agent the [KeePass skill](skills/keepassxc-agent-access/SKILL.md).
+Install `keeper-agent-runner`, `keepassxc-agent`, and their adjacent package in `src/keepassxc_agent_access` in an owner-controlled directory. Configure your agent's stdio MCP client to launch the runner under the admitted OS account.
+
+```sh
+keeper-agent-runner --socket /run/keepassxc-agent-access/entries.sock \
+  --profile-dir /absolute/path/to/private/profile
+```
+
+The runner creates a private profile in an existing parent directory and keeps the token inside it. A new profile reports `uninitialized` until an agent submits an access request. Use a separate profile for each token. Processes sharing an OS UID need a runtime boundary that prevents them from reading each other's profiles. The runner exposes only Keeper operations. Give the agent the [KeePass skill](skills/keepassxc-agent-access/SKILL.md).
+
+For direct CLI use under the isolated account, provide `KEEPASSXC_AGENT_SOCKET` and an absolute `KEEPASSXC_AGENT_TOKEN_FILE` inside a private directory owned by that account.
 
 ## Review token requests and activity
 
-Open **Access** to review requests. Double-click a pending request to inspect the verified OS identity, reported agent and project labels, and every requested entry and operation. Resolve duplicate entry names before approving. Double-click an approved token to disable, re-enable, or remove it. A larger scope requires a separate token request.
+Open **Access** to review requests. Double-click a pending request to inspect the verified OS identity, reported agent and project labels, and every requested entry and operation. Resolve duplicate entry names before approving. Username and stored URL access require separate approval for each entry. Approved agents can request those fields with `entries list --field username --field url`. Double-click an approved token to disable, re-enable, or remove it. A larger scope requires a separate token request.
 
 Use **Resume agent access** in the tray or main window to let approved tokens run. **Pause agent access** stops broker discovery and credential operations while the owner keeps browsing. Locking the desktop pauses agent access and closes all vault sessions.
 

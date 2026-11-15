@@ -7,14 +7,17 @@ import sys
 from time import monotonic
 from uuid import UUID
 
-from .runner_token import credential
+from .runner_token import UninitializedProfile, credential
 from .protocol import (
     CLIENT_TIMEOUT, ERRORS, LIST_REQUEST, ListingError, REQUEST_LIMIT, REQUEST_TIMEOUT, RESPONSE_LIMIT,
     decode, encode, receive, remaining,
 )
 
 
-def _validate(reply, operation):
+ENTRY_FIELDS = ("username", "url")
+
+
+def _validate(reply, operation, fields=()):
     if not isinstance(reply, dict):
         raise ListingError("invalid_response")
     if set(reply) == {"error"}:
@@ -46,10 +49,13 @@ def _validate(reply, operation):
         return reply
     if set(reply) != {"entries"} or not isinstance(reply["entries"], list):
         raise ListingError("invalid_response")
+    required = {"id", "title", "group_path"}
+    allowed = required | set(fields)
     for row in reply["entries"]:
         if (
             not isinstance(row, dict)
-            or set(row) != {"id", "title", "group_path"}
+            or not required <= row.keys() <= allowed
+            or any(field in row and not isinstance(row[field], str) for field in fields)
             or not isinstance(row["id"], str)
             or not isinstance(row["title"], str)
             or not isinstance(row["group_path"], list)
@@ -81,7 +87,7 @@ def request(endpoint, payload):
     except ValueError:
         raise ListingError("invalid_response") from None
     try:
-        return _validate(decode(response), payload["operation"])
+        return _validate(decode(response), payload["operation"], payload.get("fields", ()))
     except (ValueError, RecursionError):
         raise ListingError("invalid_response") from None
 
@@ -110,6 +116,8 @@ def main(argv=None):
     listing = commands.add_parser("list", help="List approved entry metadata")
     listing.add_argument("--json", action="store_true", required=True, help="Emit JSON")
     listing.add_argument("--vault", help="Scoped vault ID")
+    listing.add_argument("--field", choices=ENTRY_FIELDS, action="append",
+                         help="Include an additional approved metadata field")
     listing.add_argument("--include-reviewed", action="store_true", help=argparse.SUPPRESS)
     listing.set_defaults(operation="list_entries")
     use = topics.add_parser("use", help="Use a credential through a configured action")
@@ -126,6 +134,8 @@ def main(argv=None):
         payload["include_reviewed"] = True
     if getattr(options, "vault", None):
         payload["vault"] = options.vault
+    if getattr(options, "field", None):
+        payload["fields"] = list(dict.fromkeys(options.field))
     context = {}
     for key in ("model", "chat", "chat_id"):
         raw = os.environ.get(f"KEEPASSXC_AGENT_{key.upper()}", "")
@@ -151,6 +161,12 @@ def main(argv=None):
             raise ListingError("too_large")
         result = request(os.environ.get("KEEPASSXC_AGENT_SOCKET"), payload)
         sys.stdout.buffer.write(encode(result))
+    except UninitializedProfile as error:
+        if options.operation == "access_status":
+            sys.stdout.buffer.write(encode({"status": "uninitialized"}))
+            return 0
+        print(error, file=sys.stderr)
+        return 1
     except ListingError as error:
         print(error, file=sys.stderr)
         return 1

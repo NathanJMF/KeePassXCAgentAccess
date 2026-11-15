@@ -29,6 +29,7 @@ from tls_fixture import AUTHORIZATION, PASSWORD, USERNAME, tls_service
 
 
 OTHER_PASSWORD = "synthetic-second-password-sentinel"
+STORED_URL = "https://fixture.example.test/owner-preview"
 
 
 def main(root):
@@ -38,6 +39,7 @@ def main(root):
     primary = PyKeePass(target.database, password=UNLOCK, keyfile=str(target.key_file))
     credential = primary.find_entries(uuid=UUID(first_entry), first=True)
     credential.username, credential.password = USERNAME, PASSWORD
+    credential.url = STORED_URL
     primary.save()
     second_path = private / "second.kdbx"
     shutil.copyfile(target.database, second_path)
@@ -137,6 +139,10 @@ def main(root):
                 labels = [child.get_text() for child in descendants(dialog) if isinstance(child, Gtk.Label)]
                 assert any("verified" in label for label in labels)
                 assert any("Disposable project (reported)" in label for label in labels)
+                if profile == "alpha":
+                    assert any(f"Username  {USERNAME}" in label for label in labels)
+                elif profile == "expanded":
+                    assert any(f"Stored URL  {STORED_URL}" in label for label in labels)
                 if vault:
                     combo, = [child for child in descendants(dialog) if isinstance(child, Gtk.ComboBoxText)]
                     assert len(combo.get_model()) == 4
@@ -255,10 +261,10 @@ def main(root):
                 select_tree(first, outer)
                 assert not app.entry_search.get_text()
 
-                alpha = [{"vault": first, "entry": first_entry, "metadata": True, "action": "check"}]
+                alpha = [{"vault": first, "entry": first_entry, "metadata": True, "username": True, "action": "check"}]
                 beta = [{"label": duplicate_title, "metadata": True}]
                 expanded = [{"vault": first, "entry": first_entry, "action": "check"},
-                            {"vault": second, "entry": first_entry, "action": "check", "metadata": True}]
+                            {"vault": second, "entry": first_entry, "action": "check", "metadata": True, "url": True}]
                 assert enroll("alpha", alpha) == enroll("alpha", alpha) == {"status": "pending"}
                 assert enroll("beta", beta) == {"status": "pending"}
                 assert enroll("review", beta) == {"status": "pending"}
@@ -281,6 +287,10 @@ def main(root):
                 assert [row["id"] for row in invoke("beta", "vaults", "list")["vaults"]] == [second]
                 assert invoke("alpha", "entries", "list")["entries"] == fixture[:1]
                 assert invoke("beta", "entries", "list", "--vault", second)["entries"] == fixture[2:]
+                assert invoke("alpha", "entries", "list", "--field", "username", "--field", "url")["entries"] == [
+                    {**fixture[0], "username": USERNAME},
+                ]
+                assert invoke("beta", "entries", "list", "--field", "url")["entries"] == fixture[2:]
                 denied = invoke("alpha", "entries", "list", "--vault", second, expected=1)
                 assert denied == invoke("alpha", "entries", "list", "--vault", str(UUID(int=30)), expected=1)
                 assert invoke("beta", "entries", "list", "--vault", first, expected=1) == denied
@@ -296,6 +306,10 @@ def main(root):
                 assert "Choose a vault" in invoke("expanded", "entries", "list", expected=1)
                 assert invoke("expanded", "entries", "list", "--vault", first) == {"entries": []}
                 assert invoke("expanded", "entries", "list", "--vault", second)["entries"] == fixture[:1]
+                assert invoke("expanded", "entries", "list", "--vault", second,
+                              "--field", "username", "--field", "url")["entries"] == [{**fixture[0], "url": STORED_URL}]
+                assert STORED_URL.encode() not in old_activity.path.read_bytes()
+                assert USERNAME.encode() not in old_activity.path.read_bytes()
                 assert use("expanded", second, expected=1) == {"outcome": "failed", "http_status": 401}
                 other_header = "Basic " + b64encode(f"{USERNAME}:{OTHER_PASSWORD}".encode()).decode("ascii")
                 assert calls[-1] == ("/second", other_header)

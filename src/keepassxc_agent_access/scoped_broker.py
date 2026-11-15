@@ -2,7 +2,8 @@
 
 from .access_settings import action_id, uuid_text
 from .activity import ActivityError, Attribution
-from .protocol import ListingError, encode
+from .grants import OPTIONAL_METADATA_FIELDS
+from .protocol import RESPONSE_LIMIT, ListingError, encode
 from .settings import SettingsError
 
 
@@ -23,19 +24,25 @@ class ScopedBroker:
             if not isinstance(payload, dict) or type(payload.get("version")) is not int or payload["version"] != 1:
                 raise ValueError
             operation = payload["operation"]
-            fields = set(payload) - {"version", "operation", "credential", "context"}
+            keys = set(payload) - {"version", "operation", "credential", "context"}
             context = Attribution.parse(payload.get("context", {}))
             entry, binding_id, vault = None, None, None
-            if operation == "request_access" and fields == {"request"}:
+            fields = ()
+            if operation == "request_access" and keys == {"request"}:
                 pass
-            elif operation in ("access_status", "list_vaults") and not fields:
+            elif operation in ("access_status", "list_vaults") and not keys:
                 pass
-            elif operation == "list_entries" and fields <= {"vault"}:
-                vault = uuid_text(payload["vault"]) if "vault" in fields else None
-            elif operation == "use_password" and fields in ({"entry", "action"}, {"entry", "action", "vault"}):
+            elif operation == "list_entries" and keys <= {"vault", "fields"}:
+                vault = uuid_text(payload["vault"]) if "vault" in keys else None
+                fields = payload.get("fields", [])
+                if (not isinstance(fields, list) or len(fields) > len(OPTIONAL_METADATA_FIELDS)
+                        or any(field not in OPTIONAL_METADATA_FIELDS for field in fields)
+                        or len(set(fields)) != len(fields)):
+                    raise ValueError
+            elif operation == "use_password" and keys in ({"entry", "action"}, {"entry", "action", "vault"}):
                 entry = uuid_text(payload["entry"])
                 binding_id = action_id(payload["action"])
-                vault = uuid_text(payload["vault"]) if "vault" in fields else None
+                vault = uuid_text(payload["vault"]) if "vault" in keys else None
             else:
                 raise ValueError
         except (ValueError, TypeError, KeyError, AttributeError):
@@ -78,6 +85,7 @@ class ScopedBroker:
                 binding.action.url if permitted else None, entry if permitted else None,
                 vault=registration.name if registration else None, vault_id=chosen if registration else None,
                 token=token.id, agent=token.identity, project=token.project,
+                scope=f"Requested entry fields · {', '.join(fields)}" if fields else None,
             )
 
         def guard(effect):
@@ -121,10 +129,7 @@ class ScopedBroker:
             if operation == "list_vaults":
                 result = {"vaults": [{"id": key, "name": name} for key, name in registered.items()]}
             elif operation == "list_entries":
-                entries = {scope.entry for scope in token.scope if scope.vault == chosen and scope.metadata}
-                result = session.worker.scoped_entries(entries)
-                if "error" in result:
-                    raise ListingError(result["error"])
+                result = self._entries(token, session, chosen, fields)
             else:
                 def gate(send):
                     def audit_and_send():
@@ -136,7 +141,10 @@ class ScopedBroker:
 
                 result = session.worker.use(binding.action, gate)
             succeeded = result.get("outcome") != "failed"
-            delivered = deliver(encode(result), guard)
+            frame = encode(result)
+            if len(frame) > RESPONSE_LIMIT:
+                raise ListingError("too_large")
+            delivered = deliver(frame, guard)
             if operation == "use_password":
                 # An HTTP request dispatched before revocation may still complete on its fixed endpoint.
                 self.activity.finish(event, "Succeeded" if succeeded else "Failed", result.get("http_status"))
@@ -164,3 +172,33 @@ class ScopedBroker:
     def _catalog(self, token):
         identifiers = {scope.vault for scope in token.scope}
         return {r.id: r.name for r in self.workspace.registrations.values() if r.id in identifiers}
+
+    @staticmethod
+    def _entries(token, session, vault, fields):
+        permissions = {}
+        for scope in token.scope:
+            if scope.vault == vault and scope.metadata:
+                allowed = permissions.setdefault(scope.entry, set())
+                allowed.update(field for field in fields if getattr(scope, field))
+        result = session.worker.scoped_entries(permissions.keys())
+        if "error" in result:
+            raise ListingError(result["error"])
+        # The worker provides only the scoped identities and basic metadata. Read
+        # separately approved values from this same session's owner projection.
+        owner_rows = {}
+        if any(permissions.values()):
+            for row in session.entries:
+                identifier = row["id"]
+                if permissions.get(identifier):
+                    owner_rows[identifier] = row if identifier not in owner_rows else {}
+        rows = []
+        for row in result["entries"]:
+            identifier = row["id"]
+            if identifier not in permissions:
+                continue
+            projected = {"id": identifier, "title": row["title"], "group_path": row["group_path"]}
+            values = owner_rows.get(identifier, {})
+            projected.update({field: values[field] for field in fields
+                              if field in permissions[identifier] and isinstance(values.get(field), str)})
+            rows.append(projected)
+        return {"entries": rows}

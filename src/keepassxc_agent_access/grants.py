@@ -16,12 +16,20 @@ from .workspace import new_id
 
 MAX_ITEMS = 16
 MAX_PENDING = 64
+OPTIONAL_METADATA_FIELDS = ("username", "url")
 
 
 def verifier(credential):
     if not isinstance(credential, str) or not re.fullmatch(r"[0-9a-f]{64}", credential):
         raise ListingError("ineligible")
     return sha256(bytes.fromhex(credential)).hexdigest()
+
+
+def _validate_metadata(metadata, username, url):
+    if any(type(permission) is not bool for permission in (metadata, username, url)):
+        raise ValueError
+    if (username or url) and not metadata:
+        raise ValueError
 
 
 @dataclass(frozen=True)
@@ -31,21 +39,28 @@ class Item:
     label: str | None
     metadata: bool
     action: str | None
+    username: bool = False
+    url: bool = False
+
+    def __post_init__(self):
+        _validate_metadata(self.metadata, self.username, self.url)
 
     @classmethod
     def parse(cls, data):
-        if not isinstance(data, dict) or set(data) - {"vault", "entry", "label", "metadata", "action"}:
+        allowed = {"vault", "entry", "label", "metadata", "action", *OPTIONAL_METADATA_FIELDS}
+        if not isinstance(data, dict) or set(data) - allowed:
             raise ValueError
         entry, name = data.get("entry"), data.get("label")
         vault, metadata, action = data.get("vault"), data.get("metadata", False), data.get("action")
         if (entry is None) == (name is None) or entry is not None and vault is None:
             raise ValueError
-        if type(metadata) is not bool or not (metadata or action is not None):
+        if not metadata and action is None:
             raise ValueError
         return cls(uuid_text(vault) if vault is not None else None,
                    uuid_text(entry) if entry is not None else None,
                    label(name) if name is not None else None, metadata,
-                   action_id(action) if action is not None else None)
+                   action_id(action) if action is not None else None,
+                   username=data.get("username", False), url=data.get("url", False))
 
 
 @dataclass(frozen=True)
@@ -55,6 +70,17 @@ class Scope:
     metadata: bool
     action: str | None
     revision: str | None
+    username: bool = False
+    url: bool = False
+
+    def __post_init__(self):
+        _validate_metadata(self.metadata, self.username, self.url)
+
+    def audit_summary(self):
+        operations = [name for name in ("metadata", *OPTIONAL_METADATA_FIELDS) if getattr(self, name)]
+        if self.action:
+            operations.append(f"action {self.action}")
+        return f"{self.vault}/{self.entry} ({', '.join(operations)})"
 
 
 @dataclass(frozen=True)
@@ -63,6 +89,8 @@ class Choice:
     vault_name: str
     path: tuple[str, ...]
     destination: str | None
+    username: str | None = None
+    url: str | None = None
 
 
 @dataclass(frozen=True)
@@ -165,10 +193,12 @@ class Grants:
                     binding = record.binding(entry["id"], item.action) if item.action else None
                     if item.action and (binding is None or not binding.action.enabled):
                         continue
-                    result.append(Choice(Scope(identifier, entry["id"], item.metadata, item.action,
-                                               binding.revision if binding else None),
-                                         record.name, (*entry["group_path"], entry["title"]),
-                                         binding.action.url if binding else None))
+                    scope = Scope(identifier, entry["id"], item.metadata, item.action,
+                                  binding.revision if binding else None, username=item.username, url=item.url)
+                    result.append(Choice(scope, record.name, (*entry["group_path"], entry["title"]),
+                                         binding.action.url if binding else None,
+                                         username=entry.get("username") if item.username else None,
+                                         url=entry.get("url") if item.url else None))
             return tuple(result)
 
     def decide(self, identifier, choices):
@@ -204,10 +234,7 @@ class Grants:
             self._change(row, action, status.capitalize())
 
     def _change(self, record, action, outcome):
-        scope = ", ".join(
-            f"{item.vault}/{item.entry} ({', '.join(op for op in ('metadata' if item.metadata else None, item.action) if op)})"
-            for item in record.scope
-        )
+        scope = ", ".join(item.audit_summary() for item in record.scope)
         event = self.activity.begin(record.uid, record.context, action, None, token=record.id,
                                     agent=record.identity, project=record.project, scope=scope or None)
         if action == "Approve token":

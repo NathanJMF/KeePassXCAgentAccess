@@ -13,14 +13,14 @@ CLI = Path(__file__).resolve().parents[1] / "keepassxc-agent"
 
 
 class AgentCliTests(TestCase):
-    def invoke(self, endpoint):
+    def invoke(self, endpoint, fields=()):
         return subprocess.run(
-            [CLI, "entries", "list", "--json"],
+            [CLI, "entries", "list", "--json", *[f"--field={field}" for field in fields]],
             env={**os.environ, "KEEPASSXC_AGENT_SOCKET": str(endpoint)},
             capture_output=True, check=False, timeout=7,
         )
 
-    def reply(self, contents):
+    def reply(self, contents, fields=()):
         with TemporaryDirectory(dir="/tmp") as directory, socket.socket(socket.AF_UNIX) as listener:
             endpoint = Path(directory) / "list.sock"
             listener.bind(str(endpoint))
@@ -36,9 +36,10 @@ class AgentCliTests(TestCase):
 
             server = Thread(target=serve, daemon=True)
             server.start()
-            result = self.invoke(endpoint)
+            result = self.invoke(endpoint, fields)
             server.join(7)
-            self.assertEqual(requests, [LIST_REQUEST])
+            expected = {**LIST_REQUEST, **({"fields": list(fields)} if fields else {})}
+            self.assertEqual(requests, [expected])
             return result
 
     def test_success_has_exact_json_and_no_diagnostics(self):
@@ -67,3 +68,21 @@ class AgentCliTests(TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertEqual(result.stdout, b"")
         self.assertIn(b"size limit", result.stderr)
+
+    def test_metadata_fields_are_opt_in_and_must_be_strings(self):
+        row = b'{"id":"00000000-0000-0000-0000-000000000001","title":"Sample","group_path":[]'
+        payload = b'{"entries":[' + row + b',"username":"sample"}]}\n'
+        for fields, status in (((), 1), (("url",), 1), (("username",), 0)):
+            with self.subTest(fields=fields):
+                result = self.reply(payload, fields)
+                self.assertEqual(result.returncode, status)
+                self.assertEqual(result.stdout, b"" if status else payload)
+        bad = self.reply(b'{"entries":[' + row + b',"username":7}]}\n', ("username",))
+        self.assertEqual(bad.returncode, 1)
+        self.assertEqual(bad.stdout, b"")
+
+    def test_listing_can_omit_unapproved_optional_fields(self):
+        payload = b'{"entries":[{"id":"00000000-0000-0000-0000-000000000001","title":"Sample","group_path":[]}]}\n'
+        result = self.reply(payload, ("username", "url"))
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(result.stdout, payload)
