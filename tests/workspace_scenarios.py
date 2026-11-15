@@ -317,6 +317,18 @@ def main(root):
             }
             return {name: widget.translate_coordinates(app.window, 0, 0)[1] for name, widget in widgets.items()}
 
+        def workspace_positions():
+            wait_for(lambda: not app.stack.get_transition_running(), "Workspace view did not finish switching")
+            view = app.stack.get_visible_child()
+            wait_for_paint(view)
+            widgets = {
+                style: next(widget for widget in descendants(view)
+                            if widget.get_mapped() and widget.get_style_context().has_class(style))
+                for style in ("keeper-section-icon", "keeper-title", "keeper-card")
+            }
+            widgets["sidebar"] = app.tree
+            return {name: tuple(widget.translate_coordinates(app.window, 0, 0)) for name, widget in widgets.items()}
+
         def use(profile, vault, entry=first_entry, expected=0):
             return invoke(profile, "use", "--vault", vault, "--entry", entry, "--action", "check", expected=expected)
 
@@ -920,6 +932,11 @@ def main(root):
                 group_positions = browse_positions(first, outer)
                 assert vault_positions == group_positions, (vault_positions, group_positions)
                 assert browse_positions(first, inner) == vault_positions
+                group_layout = workspace_positions()
+                for view_button in (app.activity_button, app.access_button):
+                    view_button.clicked()
+                    layout = workspace_positions()
+                    assert layout == group_layout, (group_layout, layout)
                 select_tree(first, outer)
                 assert context_menu(app.tree) == [
                     "New entry…", "Edit group…", "Copy group reference", "Delete…",

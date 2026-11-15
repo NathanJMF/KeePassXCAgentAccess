@@ -223,12 +223,7 @@ class WorkspaceApplication(Gtk.Application):
     def _build_browser(self):
         self.browser = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=18)
         self.stack.add_named(self.browser, "browse")
-        header, titles, self.browse_title, self.browse_icon = section_heading("Vaults", "drive-harddisk-symbolic")
-        self.browse_path = styled(
-            Gtk.Label(xalign=0, ellipsize=Pango.EllipsizeMode.START, single_line_mode=True), "keeper-muted",
-        )
-        titles.pack_start(self.browse_path, False, False, 0)
-        titles.reorder_child(self.browse_path, 0)
+        header, self.browse_path, self.browse_title, self.browse_icon = section_heading("Vaults", "drive-harddisk-symbolic")
         self.browser.pack_start(header, False, False, 0)
 
         self.vault_tools = styled(Gtk.Box(spacing=6, valign=Gtk.Align.CENTER), "keeper-vault-tools")

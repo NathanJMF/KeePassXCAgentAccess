@@ -150,9 +150,9 @@ button.keeper-delete {
 }
 #keeper-workspace .keeper-card {
     background-color: @keeper_surface;
-    border: 1px solid @keeper_line;
-    border-radius: 12px;
-    padding: 1px;
+    border: 1px solid alpha(@theme_fg_color, 0.23);
+    border-radius: 10px;
+    padding: 3px;
 }
 #keeper-workspace .keeper-card-toolbar {
     padding: 8px 10px;

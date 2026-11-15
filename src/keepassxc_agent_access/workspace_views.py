@@ -122,9 +122,13 @@ def section_heading(title, icon):
     header.pack_start(mark, False, False, 0)
     titles = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=1, valign=Gtk.Align.CENTER)
     header.pack_start(titles, True, True, 0)
+    breadcrumb = styled(
+        Gtk.Label(label=" ", xalign=0, ellipsize=Pango.EllipsizeMode.START, single_line_mode=True), "keeper-muted",
+    )
+    titles.pack_start(breadcrumb, False, False, 0)
     label = styled(Gtk.Label(label=title, xalign=0, ellipsize=Pango.EllipsizeMode.END), "keeper-title")
     titles.pack_start(label, False, False, 0)
-    return header, titles, label, image
+    return header, breadcrumb, label, image
 
 
 def empty_state(icon, text):
