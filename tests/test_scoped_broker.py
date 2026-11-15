@@ -71,9 +71,11 @@ class ScopedBrokerTests(unittest.TestCase):
         immediate = self.engine(data, uid, None, live, live, deliver)
         return decode(immediate) if immediate else (output[0] if output else None)
 
-    def enroll(self, items, index=0):
-        return self.invoke("request_access", index, request={"identity": "Fixture agent", "project": "Fixture",
-                                                            "items": items})
+    def enroll(self, items, index=0, *, identity=None):
+        return self.invoke("request_access", index, request={
+            "identity": f"Fixture agent {index}" if identity is None else identity,
+            "project": "Fixture", "items": items,
+        })
 
     def approve(self, items, index=0, select=lambda choices: choices[0]):
         self.assertEqual(self.enroll(items, index), {"status": "pending"})
@@ -86,6 +88,31 @@ class ScopedBrokerTests(unittest.TestCase):
         with self.assertRaises(ListingError) as error:
             self.invoke(operation, *args, **kwargs)
         self.assertEqual(error.exception.code, code)
+
+    def test_identity_reserved_until_token_is_removed_or_denied(self):
+        items = [{"label": "Example entry", "metadata": True}]
+        label = "Straße agent"
+        duplicate = {"identity": " STRASSE AGENT ", "project": "Other project", "items": items}
+        self.assertEqual(self.enroll(items, identity=label), {"status": "pending"})
+        self.assertEqual(self.enroll(items, identity=label), {"status": "pending"})
+        self.assert_code("identity_in_use", "request_access", 1, request=duplicate, uid=1501)
+        record, = self.grants.rows()
+        self.grants.decide(record.id, [self.grants.choices(record.items[0])[0]])
+        self.assertEqual(self.enroll(items, identity=label), {"status": "active"})
+        self.assert_code("identity_in_use", "request_access", 1, request=duplicate)
+
+        self.grants.transition(record.id, "disabled")
+        self.grants = Grants(self.workspace, self.activity)
+        self.engine.grants = self.grants
+        self.assertEqual(self.enroll(items, identity=label), {"status": "disabled"})
+        self.assert_code("identity_in_use", "request_access", 1, request=duplicate)
+        self.assertEqual(len(self.activity.rows(action="Request token")), 1)
+
+        self.grants.transition(record.id, "removed")
+        self.assertEqual(self.invoke("request_access", 1, request=duplicate), {"status": "pending"})
+        pending, = self.grants.rows()
+        self.grants.decide(pending.id, None)
+        self.assertEqual(self.enroll(items, 2, identity=label), {"status": "pending"})
 
     def test_pending_duplicate_reference_resolution_and_revocation(self):
         item = {"label": "Example entry", "metadata": True}

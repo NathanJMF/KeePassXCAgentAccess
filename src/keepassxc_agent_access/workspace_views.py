@@ -213,7 +213,7 @@ ACTIVITY_STATES = {
 
 
 def table_card(scroll, empty):
-    card = styled(Gtk.Box(orientation=Gtk.Orientation.VERTICAL), "keeper-card")
+    card = styled(Gtk.Box(orientation=Gtk.Orientation.VERTICAL), "keeper-card", "keeper-table-card")
     overlay = Gtk.Overlay()
     overlay.add(scroll)
     overlay.add_overlay(empty)
@@ -332,10 +332,11 @@ class AccessIdentityRenderer(Gtk.CellRendererText):
 
 
 class AccessView(Gtk.Box):
-    TITLES = ("Requested", "Last used", "Identity", "Project", "Status")
-    STATUS, RECORD_ID, KIND = 4, 5, 6
-    REQUESTED_TIME, LAST_USED_TIME, REVIEW_GROUP = 7, 8, 9
-    ROW_KEY, SEPARATOR_OFFSETS = 10, 11
+    TITLES = ("Requested", "Last used", "Identity", "Model", "Chat", "Project", "Status")
+    IDENTITY, CHAT = 2, 4
+    STATUS, RECORD_ID, KIND = 6, 7, 8
+    REQUESTED_TIME, LAST_USED_TIME, REVIEW_GROUP = 9, 10, 11
+    ROW_KEY, SEPARATOR_OFFSETS = 12, 13
     REMOVE = "Remove token…"
 
     def __init__(self, app):
@@ -348,15 +349,16 @@ class AccessView(Gtk.Box):
         self.review_button.set_sensitive(False)
         self.pack_start(header, False, False, 0)
         self.table, scroll = pane_table(
-            Gtk.TreeStore(*([str] * 7), object, object, bool, object, object, object),
-            self.TITLES, (138, 138, 122, 122, 119),
-            status=(self.STATUS, ACCESS_STATES), muted_columns=(0, 1), expand_columns=(2, 3),
+            Gtk.TreeStore(*([str] * 9), object, object, bool, object, object, object),
+            self.TITLES, (138, 138, 122, 106, 106, 109, 119),
+            status=(self.STATUS, ACCESS_STATES), muted_columns=(0, 1), expand_columns=(2, 3, 4, 5),
             time_columns={0: self.REQUESTED_TIME, 1: self.LAST_USED_TIME},
-            text_renderers={2: AccessIdentityRenderer}, sort_group=self.REVIEW_GROUP, replace_rows=replace_tree_rows,
+            text_renderers={self.IDENTITY: AccessIdentityRenderer}, sort_group=self.REVIEW_GROUP,
+            replace_rows=replace_tree_rows,
         )
         self.table.set_enable_tree_lines(True)
         self.table.set_expander_column(self.table.get_column(0))
-        identity = self.table.get_column(2)
+        identity = self.table.get_column(self.IDENTITY)
         identity.set_cell_data_func(identity.get_cells()[0], self._scope_label)
         self.table.connect_after("draw", self._draw_scope_labels)
         self.table.connect("row-activated", self._open)
@@ -376,12 +378,15 @@ class AccessView(Gtk.Box):
             scope = self._scope_rows(grant, snapshots) if other else ()
             rows.append((other, -grant.requested,
                          (table_time(grant.requested), table_time(grant.last_used),
-                          reported(grant.identity), reported(grant.project), grant.status.capitalize(), grant.id, "grant",
+                          reported(grant.identity), reported(grant.context.model), reported(grant.context.chat),
+                          reported(grant.project), grant.status.capitalize(), grant.id, "grant",
                           grant.requested, grant.last_used, other, ("grant", grant.id), (), scope)))
         for edit in edits:
             state = "Edit pending" if edit.status == "pending" else "Applying edit"
             rows.append((False, -edit.requested,
                          (table_time(edit.requested), "—", reported(edit.identity),
+                          reported(edit.context.model if edit.context else None),
+                          reported(edit.context.chat if edit.context else None),
                           reported(edit.project), state, f"{edit.token_id}/{edit.id}", "edit", edit.requested, None,
                           False, ("edit", edit.token_id, edit.id), (), ())))
         rows.sort()
@@ -400,7 +405,7 @@ class AccessView(Gtk.Box):
         first_token = first.get_indices()[0]
 
         # Scope rows have no timestamps. Draw their accessible path across those
-        # empty cells and Identity, leaving the column layout of token rows intact.
+        # empty cells up to Project, where the approved permissions are shown.
         cr.save()
         Gtk.cairo_transform_to_window(cr, table, window)
         selection = table.get_selection()
@@ -410,7 +415,7 @@ class AccessView(Gtk.Box):
         palette = "keeper_separator_on_light" if light_surface else "keeper_separator_on_dark"
         found, green = context.lookup_color(palette)
         separator_rgb = tuple(round(channel * 65535) for channel in (green.red, green.green, green.blue)) if found else None
-        first_column, identity = table.get_column(0), table.get_column(2)
+        first_column, chat = table.get_column(0), table.get_column(self.CHAT)
         for token in table.get_model():
             path = token.path
             if path.compare(last) > 0:
@@ -422,12 +427,12 @@ class AccessView(Gtk.Box):
                 if path.compare(first) < 0 or path.compare(last) > 0:
                     continue
                 line = table.get_cell_area(path, first_column)
-                cell = table.get_cell_area(path, identity)
+                cell = table.get_cell_area(path, chat)
                 x = line.x + 6
                 width = cell.x + cell.width - x - 10
                 if width <= 0:
                     continue
-                layout = table.create_pango_layout(row[2])
+                layout = table.create_pango_layout(row[self.IDENTITY])
                 if separator_rgb is not None:
                     attributes = Pango.AttrList()
                     for offset in row[self.SEPARATOR_OFFSETS]:
@@ -461,7 +466,7 @@ class AccessView(Gtk.Box):
             prefix = f"{vault} > {' / '.join(groups) or '—'}"
             label = f"{prefix} > {item.name}"
             separators = tuple(len(part.encode("utf-8")) + 1 for part in (vault, prefix))
-            rows.append(("", "", label, item.permissions, "", "", "scope", None, None, True,
+            rows.append(("", "", label, "", "", item.permissions, "", "", "scope", None, None, True,
                          (grant.id, *item.key), separators, ()))
         return tuple(rows)
 
@@ -516,6 +521,7 @@ class AccessView(Gtk.Box):
         dialog.set_modal(True)
         for value in (f"Requested  {_time(grant.requested)}", f"OS identity  UID {grant.uid} (verified)",
                       f"Identity  {reported(grant.identity)}", f"Project  {reported(grant.project)}",
+                      f"Model  {reported(grant.context.model)}", f"Chat  {reported(grant.context.chat)}",
                       f"Token record  {grant.id}"):
             add_label(body, value)
         return dialog, body
@@ -594,6 +600,7 @@ class AccessView(Gtk.Box):
         body.pack_start(status, False, False, 0)
         body.pack_start(activity_facts((
             ("Identity", reported(grant.identity)), ("Project", reported(grant.project)),
+            ("Model", reported(grant.context.model)), ("Chat", reported(grant.context.chat)),
             ("Requested", table_time(grant.requested)),
             ("Last used", table_time(grant.last_used) if grant.last_used is not None else "Never"),
         )), False, False, 0)
@@ -720,10 +727,10 @@ def activity_dialog(app, row):
     body.pack_start(scroll, True, True, 0)
 
     add_activity_section(details, "Resource", activity_location(row, app.workspace))
-    add_activity_section(details, "Request", (
-        (caption, reported(row[key]) if row.get(key) else None)
-        for key, caption in (("agent", "Agent"), ("project", "Project"), ("model", "Model"), ("chat", "Chat"))
-    ))
+    context = [(caption, reported(row[key])) for key, caption in
+               (("project", "Project"), ("model", "Model"), ("chat", "Chat")) if row.get(key)]
+    identity = row.get("identity") or row.get("agent")
+    add_activity_section(details, "Request", (("Identity", reported(identity) if identity else None), *context))
     add_activity_section(details, "Execution", activity_execution(row))
     technical = activity_facts((
         ("Linux UID (verified)", row.get("uid")), ("Chat ID", row.get("chat_id")), ("Vault ID", row.get("vault_id")),
@@ -769,7 +776,7 @@ def replace_tree_rows(table, rows, key_column):
 
 
 class ActivityView(Gtk.Box):
-    TITLES = ("Time", "Model", "Chat", "Action", "Vault", "Group", "Key", "Outcome")
+    TITLES = ("Time", "Identity", "Action", "Vault", "Group", "Key", "Outcome")
     RECORD_ID = len(TITLES)
     TIME = RECORD_ID + 1
     ROW_KEY = TIME + 1
@@ -783,7 +790,7 @@ class ActivityView(Gtk.Box):
         header.pack_end(tools, False, False, 0)
         filters = Gtk.Grid(column_spacing=8, row_spacing=8, margin=12)
         self.filters = {}
-        for index, name in enumerate(("Vault", "Group", "Key", "Agent", "Model", "Chat", "Action", "Outcome")):
+        for index, name in enumerate(("Vault", "Group", "Key", "Identity", "Model", "Chat", "Action", "Outcome")):
             field = styled(Gtk.SearchEntry(placeholder_text=name, hexpand=True), "keeper-search")
             field.connect("search-changed", self.refresh)
             filters.attach(field, index % 4, index // 4, 1, 1)
@@ -799,8 +806,8 @@ class ActivityView(Gtk.Box):
         self.pack_start(self.filter_panel, False, False, 0)
         self.table, scroll = pane_table(
             Gtk.TreeStore(*([str] * (self.RECORD_ID + 1)), object, object, object), self.TITLES,
-            (144, 64, 60, 115, 78, 86, 84, 144), status=(7, ACTIVITY_STATES),
-            expand_columns=(1, 2, 3, 4, 5, 6), muted_columns=(0,), time_columns={0: self.TIME},
+            (144, 110, 115, 78, 86, 84, 144), status=(6, ACTIVITY_STATES),
+            expand_columns=(1, 2, 3, 4, 5), muted_columns=(0,), time_columns={0: self.TIME},
             replace_rows=replace_tree_rows,
         )
         self.table.set_enable_tree_lines(True)
@@ -827,6 +834,10 @@ class ActivityView(Gtk.Box):
             rows = self.app.activity.rows(limit=None)
         except ActivityError:
             rows = []
+        records = self.app.grants.records if self.app.grants else {}
+        for row in rows:
+            record = records.get(row.get("token"))
+            row["identity"] = row.get("agent") or (record.identity if record else None)
         self.rows = {str(row["id"]): row for row in rows}
         lookup = ActivityResources(self.app.workspace)
         resources = {row["id"]: lookup.labels(row) for row in rows}
@@ -853,7 +864,7 @@ class ActivityView(Gtk.Box):
     @staticmethod
     def _values(row, resource, key, *, action=None, children=()):
         timestamp = event_time(row)
-        return (table_time(timestamp), reported(row["model"]), reported(row["chat"]),
+        return (table_time(timestamp), reported(row["identity"]),
                 action or row["action"], *(value or "—" for value in resource),
                 row["outcome"], str(row["id"]), timestamp, key, children)
 

@@ -49,15 +49,15 @@ class EditRequestsTests(unittest.TestCase):
         self.engine = ScopedBroker(self.workspace, self.grants, self.activity, edits=self.edits)
         self.credential = "4b" * 32
         self.other_credential = "4c" * 32
-        self.token = self._grant(self.credential)
-        self.other = self._grant(self.other_credential)
+        self.token = self._grant(self.credential, "Synthetic agent")
+        self.other = self._grant(self.other_credential, "Other synthetic agent")
         self.workspace.pause(False)
 
-    def _grant(self, credential):
+    def _grant(self, credential, identity):
         items = [{"vault": self.vault, "entry": self.entry_id, "metadata": True}] + [
             {"vault": self.vault, "entry": self.entry_id, "action": action} for action in ("basic", "bearer")
         ]
-        self.grants.enroll(credential, 123, {"identity": "Synthetic agent", "project": "Fixture project",
+        self.grants.enroll(credential, 123, {"identity": identity, "project": "Fixture project",
                                             "items": items}, Attribution(model="Fixture model"))
         pending = self.grants.authenticate(credential, 123)
         self.grants.decide(pending.id, [self.grants.choices(item)[0] for item in pending.items])

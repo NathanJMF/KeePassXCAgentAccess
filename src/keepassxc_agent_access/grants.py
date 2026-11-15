@@ -16,6 +16,7 @@ from .workspace import new_id
 
 MAX_ITEMS = 16
 MAX_PENDING = 64
+LIVE_GRANT_STATES = frozenset(("pending", "active", "disabled"))
 OPTIONAL_METADATA_FIELDS = ("username", "url")
 
 
@@ -151,7 +152,9 @@ class Grants:
         try:
             if not isinstance(payload, dict) or set(payload) != {"identity", "project", "items"}:
                 raise ValueError
-            identity, project = label(payload["identity"]), label(payload["project"])
+            identity, project = label(payload["identity"]).strip(), label(payload["project"])
+            if not identity:
+                raise ValueError
             data = payload["items"]
             if not isinstance(data, list) or not 0 < len(data) <= MAX_ITEMS:
                 raise ValueError
@@ -161,13 +164,17 @@ class Grants:
         except (ValueError, AttributeError, TypeError):
             raise ListingError("invalid_request") from None
         digest = verifier(credential)
+        identity_key = identity.casefold()
         with self.workspace.mutex:
             identifier = self.credentials.get(digest)
             if identifier:
                 record = self.records[identifier]
-                if (record.uid, record.identity, record.project, record.items) != (uid, identity, project, items):
+                if (record.uid, record.identity.strip(), record.project, record.items) != (uid, identity, project, items):
                     raise ListingError("ineligible")
                 return record.status
+            if any(row.status in LIVE_GRANT_STATES and row.identity.strip().casefold() == identity_key
+                   for row in self.records.values()):
+                raise ListingError("identity_in_use")
             if sum(row.status == "pending" for row in self.records.values()) >= MAX_PENDING:
                 raise ListingError("busy")
             record = Grant(new_id(), digest, uid, time(), identity, project, attribution, items)
@@ -176,7 +183,7 @@ class Grants:
 
     def rows(self):
         with self.workspace.mutex:
-            rows = [row for row in self.records.values() if row.status in ("pending", "active", "disabled")]
+            rows = [row for row in self.records.values() if row.status in LIVE_GRANT_STATES]
             return sorted(rows, key=lambda row: (row.status != "pending", -row.requested, row.id))
 
     def choices(self, item):

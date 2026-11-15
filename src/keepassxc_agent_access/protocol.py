@@ -20,6 +20,7 @@ ERRORS = {
     "revoked": "Agent access changed before the request completed.",
     "busy": "The broker is busy.",
     "ineligible": "The requested operation is unavailable for this token.",
+    "identity_in_use": "That identity is already in use. Choose a different identity and retry the request.",
     "token_required": "An approved access token is required. Request access through this runner.",
     "paused": "The owner has paused agent access.",
     "select_vault": "Choose a vault with --vault using your scoped vault catalog.",

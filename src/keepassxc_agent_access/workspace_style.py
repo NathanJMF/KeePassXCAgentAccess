@@ -193,6 +193,9 @@ button.keeper-delete {
     box-shadow: none;
     color: @keeper_muted;
 }
+#keeper-workspace .keeper-table-card .keeper-table header button {
+    border-top-width: 0;
+}
 #keeper-workspace .keeper-table header button:hover {
     background-color: mix(@keeper_canvas, @theme_fg_color, 0.065);
 }

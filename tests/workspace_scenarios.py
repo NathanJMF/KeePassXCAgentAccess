@@ -96,10 +96,13 @@ def main(root):
         app = WorkspaceApplication(private, keyring, show_window=True)
         result = 1
         captured = []
+        token_ids = {}
+        enrollment_model, enrollment_chat = "Synthetic enrollment model", "Synthetic enrollment chat"
+        action_model, action_chat = "Synthetic test model", "Synthetic test chat"
 
-        def invoke(profile, *command, request=None, expected=0):
-            env = [f"KEEPASSXC_AGENT_SOCKET={endpoint}", "KEEPASSXC_AGENT_MODEL=Synthetic test model",
-                   "KEEPASSXC_AGENT_CHAT=Synthetic test chat", "KEEPASSXC_AGENT_CHAT_ID=test-chat"]
+        def invoke(profile, *command, request=None, expected=0, model=action_model, chat=action_chat):
+            env = [f"KEEPASSXC_AGENT_SOCKET={endpoint}", f"KEEPASSXC_AGENT_MODEL={model}",
+                   f"KEEPASSXC_AGENT_CHAT={chat}", "KEEPASSXC_AGENT_CHAT_ID=test-chat"]
             if profile:
                 env.append(f"KEEPASSXC_AGENT_TOKEN_FILE={profiles / profile / 'token'}")
             args = [*NAMESPACE, "/usr/bin/env", "-i", f"PATH={root / 'cli'}:/usr/bin:/bin",
@@ -112,10 +115,19 @@ def main(root):
                 return process.stderr.decode()
             return json.loads(process.stdout)
 
-        def enroll(profile, items, expected=0):
-            return invoke(profile, "access", "request", expected=expected, request={
-                "identity": f"Agent {profile}", "project": "Disposable project", "items": items,
-            })
+        def enroll(profile, items, expected=0, *, identity=None):
+            existing = set(app.grants.records)
+            request = {"identity": identity or f"Agent {profile}", "project": "Disposable project", "items": items}
+            result = invoke(profile, "access", "request", expected=expected, model=enrollment_model,
+                            chat=enrollment_chat, request=request)
+            created = app.grants.records.keys() - existing
+            if created:
+                token_ids[profile], = created
+            return result
+
+        def expected_identity(profile):
+            name = app.grants.records[token_ids[profile]].identity
+            return f"{name} (reported)"
 
         def drive_dialog(action, callback, *, opens_async=False):
             failures = []
@@ -142,9 +154,8 @@ def main(root):
                 raise failures[0]
 
         def access_root(profile):
-            table = app.access_view.table
-            identity = app.access_view.TITLES.index("Identity")
-            return next(row for row in table.get_model() if row[identity].startswith(f"Agent {profile} "))
+            view = app.access_view
+            return next(row for row in view.table.get_model() if row[view.RECORD_ID] == token_ids[profile])
 
         def access_row(profile):
             app.access_button.clicked()
@@ -628,8 +639,13 @@ def main(root):
 
             def decide(proposal, response, *, strings=(), password=None, before=None, allow=True, resume=False):
                 app.access_button.clicked()
-                table = app.access_view.table
-                path = next(row.path for row in table.get_model() if row[5].endswith("/" + proposal["id"]))
+                view = app.access_view
+                table = view.table
+                row = next(row for row in table.get_model() if row[view.RECORD_ID].endswith("/" + proposal["id"]))
+                assert row[view.TITLES.index("Identity")] == expected_identity("beta")
+                assert row[view.TITLES.index("Model")] == f"{action_model} (reported)"
+                assert row[view.TITLES.index("Chat")] == "Edit acceptance (reported)"
+                path = row.path
                 table.get_selection().select_path(path)
 
                 def check(dialog):
@@ -940,15 +956,27 @@ def main(root):
                             {"vault": second, "entry": nested_entry, "metadata": True}]
                 assert enroll("alpha", alpha) == enroll("alpha", alpha) == {"status": "pending"}
                 assert enroll("beta", beta) == {"status": "pending"}
+                duplicate_identity = enroll("review", beta, expected=1, identity="  aGENT beta  ")
+                assert "identity" in duplicate_identity.casefold()
                 assert enroll("review", beta) == {"status": "pending"}
                 assert len(app.grants.rows()) == 3
                 assert "unavailable for this token" in invoke("beta", "vaults", "list", expected=1)
                 approve("alpha")
-                access_table = app.access_view.table
+                access_view = app.access_view
+                access_table = access_view.table
                 assert [column.get_title() for column in access_table.get_columns()] == [
-                    "Requested", "Last used", "Identity", "Project", "Status",
+                    "Requested", "Last used", "Identity", "Model", "Chat", "Project", "Status",
                 ]
-                assert [row[4] for row in access_table.get_model()] == ["Pending", "Pending", "Active"]
+                assert [row[access_view.STATUS] for row in access_table.get_model()] == ["Pending", "Pending", "Active"]
+                identity_column = access_view.TITLES.index("Identity")
+                model_column, chat_column = (access_view.TITLES.index(name) for name in ("Model", "Chat"))
+                assert token_ids["beta"] != token_ids["review"]
+                for profile in ("alpha", "beta", "review"):
+                    token_row = access_root(profile)
+                    assert token_row[identity_column] == expected_identity(profile)
+                    assert token_row[model_column] == f"{enrollment_model} (reported)"
+                    assert token_row[chat_column] == f"{enrollment_chat} (reported)"
+                assert access_root("beta")[identity_column] != access_root("review")[identity_column]
                 assert isinstance(access_table.get_model(), Gtk.TreeStore)
                 assert access_table.get_expander_column() == access_table.get_column(0)
                 access_model = access_table.get_model()
@@ -996,7 +1024,9 @@ def main(root):
                     first_entry: {**fixture[0], "url": STORED_URL}, nested_entry: fixture[2],
                 }
                 app.access_view.refresh()
-                expanded_row = next(row for row in access_table.get_model() if row[2].startswith("Agent expanded "))
+                expanded_row = access_root("expanded")
+                assert expanded_row[model_column] == f"{enrollment_model} (reported)"
+                assert expanded_row[chat_column] == f"{enrollment_chat} (reported)"
                 assert timestamp.fullmatch(expanded_row[1])
                 check_date_widths(access_table, expanded_row, "Requested", "Last used")
                 check_token_scope(first, second)
@@ -1160,8 +1190,9 @@ def main(root):
                 assert access_table.row_expanded(disabled.path)
                 scope, = disabled.iterchildren()
                 assert not scope.model.iter_has_child(scope.iter)
-                assert scope[2] == f"{app.workspace.registrations[first].name} > — > {fixture[0]['title']}"
-                assert "Entry metadata" in scope[3] and "Username" in scope[3]
+                assert scope[identity_column] == f"{app.workspace.registrations[first].name} > — > {fixture[0]['title']}"
+                permissions = scope[access_view.TITLES.index("Project")]
+                assert "Entry metadata" in permissions and "Username" in permissions
                 drive_dialog(access_row("alpha"), lambda dialog: dialog.response(Gtk.ResponseType.APPLY))
                 assert invoke("alpha", "entries", "list")["entries"] == fixture[:1]
                 alpha_record = next(row for row in app.grants.rows() if row.identity == "Agent alpha")
@@ -1179,20 +1210,22 @@ def main(root):
                 view = app.activity_view
                 table = view.table
                 assert [column.get_title() for column in table.get_columns()] == [
-                    "Time", "Model", "Chat", "Action", "Vault", "Group", "Key", "Outcome",
+                    "Time", "Identity", "Action", "Vault", "Group", "Key", "Outcome",
                 ]
+                activity_identity = view.TITLES.index("Identity")
                 assert isinstance(table.get_model(), Gtk.TreeStore)
                 assert table.get_expander_column() == table.get_column(0)
-                app.activity_view.filters["agent"].set_text("Agent beta")
+                app.activity_view.filters["identity"].set_text("Agent beta")
                 app.activity_view.refresh()
                 assert len(table.get_model()) > 0
                 check_date_widths(table, table.get_model()[0], "Time")
-                allowed = {str(row["id"]) for row in old_activity.rows(agent="Agent beta")}
+                allowed = {str(row["id"]) for row in old_activity.rows(agent="Agent beta")
+                           if row["token"] == token_ids["beta"]}
                 for root in table.get_model():
                     assert timestamp.fullmatch(root[0])
-                    assert root[view.RECORD_ID] in allowed
+                    assert root[view.RECORD_ID] in allowed and root[activity_identity] == expected_identity("beta")
                     assert all(timestamp.fullmatch(row[0]) and row[view.RECORD_ID] in allowed
-                               for row in root.iterchildren())
+                               and row[activity_identity] == expected_identity("beta") for row in root.iterchildren())
                 access = next(row for row in old_activity.rows(vault="second", action="Use password")
                               if row["entry"] == first_entry and row["entry_title"])
                 assert access["folder"] == "Root" and access["entry_title"] == fixture[0]["title"]
@@ -1201,8 +1234,9 @@ def main(root):
                 legacy, = old_activity.rows(action="Legacy fixture")
                 assert legacy["vault"] is None and legacy["folder"] is None and legacy["entry_title"] is None
 
-                app.activity_view.filters["agent"].set_text("")
+                app.activity_view.filters["identity"].set_text("")
                 app.activity_view.refresh()
+                assert activity_leaf(legacy["id"])[activity_identity] == "—"
                 token_events = [row for row in old_activity.rows(agent="Agent alpha")
                                 if row["action"] in ("Request token", "Approve token", "Disable token",
                                                      "Re-enable token", "Remove token")]
@@ -1210,12 +1244,15 @@ def main(root):
                     "Remove token", "Re-enable token", "Disable token", "Approve token", "Request token",
                 ]
                 token_summary = activity_group(token_events, "Removed")
+                assert token_summary[activity_identity] == expected_identity("alpha")
+                assert all(row[activity_identity] == expected_identity("alpha") for row in token_summary.iterchildren())
                 assert not table.row_expanded(token_summary.path)
                 for expanded in (True, False):
                     table.row_activated(token_summary.path, table.get_column(0))
                     assert table.row_expanded(token_summary.path) == expanded
 
                 row = activity_leaf(access["id"])
+                assert row[activity_identity] == expected_identity("expanded")
                 assert row[view.TITLES.index("Vault")] == "second"
                 assert row[view.TITLES.index("Group")] == "Root"
                 assert row[view.TITLES.index("Key")] == fixture[0]["title"]
@@ -1227,6 +1264,7 @@ def main(root):
                 def read_activity(dialog):
                     labels = {child.get_text() for child in descendants(dialog) if isinstance(child, Gtk.Label)}
                     assert {"Resource", "Vault", "Group", "Key", "second", "Root", fixture[0]["title"]} <= labels
+                    assert {f"{action_model} (reported)", f"{action_chat} (reported)"} <= labels
                     expander = next(child for child in descendants(dialog) if isinstance(child, Gtk.Expander))
                     assert expander.get_label() == "Technical details" and not expander.get_expanded()
                     dialog.response(Gtk.ResponseType.CLOSE)
