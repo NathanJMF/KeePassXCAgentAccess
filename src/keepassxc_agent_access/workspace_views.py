@@ -405,7 +405,10 @@ class AccessView(Gtk.Box):
         Gtk.cairo_transform_to_window(cr, table, window)
         selection = table.get_selection()
         context = table.get_style_context()
-        found, green = context.lookup_color("keeper_success")
+        found, surface = context.lookup_color("keeper_surface")
+        light_surface = found and (0.2126 * surface.red + 0.7152 * surface.green + 0.0722 * surface.blue) >= 0.5
+        palette = "keeper_separator_on_light" if light_surface else "keeper_separator_on_dark"
+        found, green = context.lookup_color(palette)
         separator_rgb = tuple(round(channel * 65535) for channel in (green.red, green.green, green.blue)) if found else None
         first_column, identity = table.get_column(0), table.get_column(2)
         for token in table.get_model():

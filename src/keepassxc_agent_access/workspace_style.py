@@ -13,6 +13,8 @@ CSS = b"""
 @define-color keeper_accent mix(@theme_fg_color, @keeper_cobalt, 0.66);
 @define-color keeper_selection mix(@theme_base_color, @keeper_cobalt, 0.20);
 @define-color keeper_success mix(@theme_fg_color, #31a777, 0.62);
+@define-color keeper_separator_on_dark #45e780;
+@define-color keeper_separator_on_light #007a39;
 @define-color keeper_warning mix(@theme_fg_color, #b38436, 0.66);
 @define-color keeper_failure mix(@theme_fg_color, #d44f5e, 0.62);
 
