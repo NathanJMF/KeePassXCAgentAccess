@@ -1,4 +1,5 @@
 import json
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from threading import Event
 from tempfile import TemporaryDirectory
@@ -63,6 +64,15 @@ class EntryProjectionTests(TestCase):
 
     def test_empty_vault(self):
         self.assertEqual(json.loads(self.listing()), {"entries": []})
+
+    def test_worker_remains_available_after_dispatched_unlock_finishes(self):
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            session = executor.submit(
+                open_vault, VaultTarget(self.database), self.password, Event()
+            ).result(timeout=5)
+        with session:
+            self.assertTrue(session.available)
+            self.assertEqual(json.loads(session.list_entries()), {"entries": []})
 
     def test_rejects_oversized_listing_without_partial_metadata(self):
         self.vault.add_entry(self.vault.root_group, "x" * RESPONSE_LIMIT, "", "")

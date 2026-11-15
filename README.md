@@ -30,7 +30,29 @@ When saved unlock fails, use **Enter password…** for a one-time unlock or **Ch
 
 ## Isolate the agent runtime
 
-Run the tray under the desktop owner's account and start the agent from the login environment of a separate, unprivileged OS account. Give that account access to its own workspace. Keep the vault, key file, and owner settings readable only by their owner, and keep the app's executable and source outside agent-writable directories. Give the agent its own session environment and keep the owner's session bus, Wayland socket, and process memory inaccessible to that account. Agent access through a broker is a later milestone.
+Run the tray under the desktop owner's account and start the agent from the login environment of a separate, unprivileged OS account. Give that account access to its own workspace. Keep the vault, key file, and owner settings readable only by their owner, and keep the app's executable and source outside agent-writable directories. Give the agent its own session environment and keep the owner's session bus, Wayland socket, and process memory inaccessible to that account.
+
+## Enable agent entry listing
+
+Provision a directory for the socket that the owner controls and the agent can traverse. The agent must be able to write to the socket inode to connect. One Ubuntu setup uses a dedicated group shared by the owner and agent. Give the agent a new login session after changing its group membership.
+
+```sh
+# The owner and the dedicated agent account are members of vault-listing.
+sudo install -d -o "$(id -un)" -g vault-listing -m 2750 /run/keepassxc-agent-access
+export KEEPASSXC_AGENT_SOCKET=/run/keepassxc-agent-access/entries.sock
+export KEEPASSXC_AGENT_UID="$(id -u agent-runner)"
+./run-tray
+```
+
+Open the tray under the owner's account, unlock the vault, and select **Enable agent listing**. The broker verifies the connecting OS UID. **Stop agent listing**, vault lock, a vault configuration change, or exit revokes access. Listing starts disabled on the next session.
+
+Provide the agent an owner-controlled installation of the `keepassxc-agent` launcher and its adjacent `src/keepassxc_agent_access` package. Put the launcher on its PATH and supply the same socket path as `KEEPASSXC_AGENT_SOCKET` in its environment. Give the agent the [KeePass skill](skills/keepassxc-agent-access/SKILL.md) for usage.
+
+```sh
+keepassxc-agent entries list --json
+```
+
+For a fresh-agent check, first configure a disposable synthetic vault. Give the agent just the skill and ask it to list entry titles and groups. Observe one successful CLI invocation through the broker and compare the agent's report to the expected fixture held by the verifier. Stop listing afterward and check that the command fails without entry data.
 
 ## Test with synthetic data
 
@@ -42,4 +64,4 @@ tests/run-linux-integration
 TRAY_TEST_ISOLATION=1 tests/run-linux-integration
 ```
 
-The integration runner starts a private GNOME Wayland compositor, D-Bus session, and disposable OS keyring. It creates a synthetic password-and-key-file database, rotates the password, and verifies tray unlock after restart with the legacy file removed. It also exercises manual recovery, **Forget saved password**, desktop lock, and the main-window fallback. The isolation option uses a Linux user namespace with subordinate UID and GID mappings to exercise the boundary from a different host identity while the owner vault is open.
+The integration runner starts a private GNOME Wayland compositor, D-Bus session, and disposable OS keyring. It creates a synthetic password-and-key-file database, rotates the password, and verifies tray unlock after restart with the legacy file removed. It also exercises manual recovery, **Forget saved password**, desktop lock, and the main-window fallback. The isolation option uses a Linux user namespace with subordinate UID and GID mappings and `setfacl` from the `acl` package. It checks broker listing and revocation from a different host identity while a synthetic vault is open.

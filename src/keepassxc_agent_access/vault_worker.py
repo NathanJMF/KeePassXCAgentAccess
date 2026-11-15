@@ -3,8 +3,9 @@
 import ctypes
 import json
 import os
-import signal
+from select import select
 import sys
+from threading import Thread
 
 from .entry_projection import entry_listing
 
@@ -33,11 +34,23 @@ def load_vault():
 
 def main():
     libc = ctypes.CDLL(None)
-    # Linux prctl: disable dumps and terminate if the owning desktop process exits.
-    if libc.prctl(4, 0, 0, 0, 0) or libc.prctl(1, signal.SIGKILL, 0, 0, 0):
+    # Disable dumps of the process holding the decrypted database.
+    if libc.prctl(4, 0, 0, 0, 0):
         return
-    if os.getppid() != int(sys.argv[1]):
+    owner_pid = int(sys.argv[1])
+    if os.getppid() != owner_pid:
         return
+    owner = os.pidfd_open(owner_pid)
+    if os.getppid() != owner_pid:
+        os.close(owner)
+        return
+
+    def watch_owner():
+        # A pidfd follows the desktop process even when its unlock thread ends.
+        select([owner], [], [])
+        os._exit(0)
+
+    Thread(target=watch_owner, daemon=True).start()
     try:
         load_vault()
     except Exception:

@@ -10,9 +10,11 @@ import gi
 gi.require_version("Gtk", "3.0")
 from gi.repository import Gio, GLib, Gtk
 
+from .broker import BrokerConfig, ListingBroker
 from .controller import VaultController, VaultState
 from .desktop import DesktopSession
 from .keyring import KeyringError, SystemKeyring
+from .protocol import ListingError
 from .settings import SettingsError, SettingsStore
 from .setup import VaultSetup
 from .vault import UnlockCancelled, VaultError, VaultTarget
@@ -81,6 +83,7 @@ class VaultApplication(Gtk.Application):
     def __init__(self, setup=None, desktop_factory=DesktopSession):
         super().__init__(application_id=APP_ID, flags=Gio.ApplicationFlags.FLAGS_NONE)
         self.setup = setup or VaultSetup(SettingsStore(), SystemKeyring(), VaultController())
+        self.broker = ListingBroker(BrokerConfig.from_environment(), self.setup.controller.current_session)
         self.desktop_factory = desktop_factory
         self.window = None
         self.dialog = None
@@ -128,6 +131,8 @@ class VaultApplication(Gtk.Application):
             ("unlock", "Unlock", self._unlock),
             ("manual", "Enter password…", self._manual_unlock),
             ("lock", "Lock now", self._lock),
+            ("enable_listing", "Enable agent listing", self._enable_listing),
+            ("stop_listing", "Stop agent listing", self._stop_listing),
             ("forget", "Forget saved password", self._forget),
             ("retry", "Retry keyring cleanup", self._retry_cleanup),
             ("quit", "Quit", self._quit),
@@ -156,6 +161,8 @@ class VaultApplication(Gtk.Application):
             ("setup", "Setup", self._configure_dialog),
             ("unlock", "Unlock", self._unlock),
             ("lock", "Lock now", self._lock),
+            ("enable_listing", "Enable agent listing", self._enable_listing),
+            ("stop_listing", "Stop agent listing", self._stop_listing),
             ("settings", "Settings", self._present),
             ("quit", "Quit", self._quit),
         ):
@@ -210,6 +217,9 @@ class VaultApplication(Gtk.Application):
             detail = "Choose an existing KeePass database to get started."
         if pending:
             detail += "\nKeyring cleanup pending."
+        listing = self.broker.enabled
+        if listing:
+            detail += "\nAgent listing enabled."
         self.details.set_text(detail)
         message = self.message
         if state is VaultState.UNLOCKED and self.setup.controller.source == "keyring":
@@ -219,23 +229,27 @@ class VaultApplication(Gtk.Application):
             "setup": True, "unlock": state is VaultState.LOCKED,
             "manual": state is VaultState.LOCKED and active_item is not None,
             "lock": state is VaultState.UNLOCKED or self.busy,
+            "enable_listing": state is VaultState.UNLOCKED and self.broker.config is not None and not listing,
+            "stop_listing": listing,
             "forget": active_item is not None,
             "retry": bool(pending), "quit": True,
         }
         self.buttons["setup"].set_label("Change vault or password" if target else "Setup")
         for key, button in self.buttons.items():
             button.set_visible(available[key])
-            button.set_sensitive(not self.busy or key in ("lock", "quit"))
+            button.set_sensitive(not self.busy or key in ("lock", "quit", "stop_listing"))
         if self.indicator is not None:
             self.indicator.set_icon_full(ICONS[state], state.value)
             tray_status = state.value
             if state is VaultState.UNLOCKED and self.setup.controller.source == "keyring":
                 tray_status += " · OS keyring"
+            if listing:
+                tray_status += " · Agent listing enabled"
             self.menu_items["status"].set_label(tray_status)
-            for key in ("setup", "unlock", "lock"):
+            for key in ("setup", "unlock", "lock", "enable_listing", "stop_listing"):
                 visible = target is None if key == "setup" else available[key]
                 self.menu_items[key].set_visible(visible)
-                self.menu_items[key].set_sensitive(not self.busy or key == "lock")
+                self.menu_items[key].set_sensitive(not self.busy or key in ("lock", "stop_listing"))
 
     def _present(self, *_):
         if not self.desktop.locked:
@@ -257,6 +271,7 @@ class VaultApplication(Gtk.Application):
             if password is not None:
                 target = dialog.selection()
                 remember = dialog.remember.get_active()
+                self.broker.stop()
                 attempt = self.setup.controller.begin()
                 self._run(self.setup.configure, attempt, target, password, remember,
                           success="Vault verified and setup saved.", cleanup=True)
@@ -338,6 +353,7 @@ class VaultApplication(Gtk.Application):
         self._lock()
 
     def _lock(self, *_):
+        self.broker.stop()
         self.setup.controller.lock()
         self.message = ""
         if self.window is not None:
@@ -345,7 +361,23 @@ class VaultApplication(Gtk.Application):
 
     def _forget(self, *_):
         if self._ready():
+            self.broker.stop()
             self._run(self.setup.forget, success="Saved password forgotten.", cleanup=True)
+
+    def _enable_listing(self, *_):
+        if not self._ready():
+            return
+        try:
+            self.broker.start()
+            self.message = ""
+        except ListingError:
+            self.message = "Agent listing could not start. Check the broker endpoint and agent account."
+            self._present()
+        self._refresh()
+
+    def _stop_listing(self, *_):
+        self.broker.stop()
+        self._refresh()
 
     def _retry_cleanup(self, *_):
         if self._ready():
@@ -358,6 +390,7 @@ class VaultApplication(Gtk.Application):
         return GLib.SOURCE_REMOVE
 
     def do_shutdown(self):
+        self.broker.stop()
         self.setup.controller.lock()
         self.desktop.close()
         Gtk.Application.do_shutdown(self)

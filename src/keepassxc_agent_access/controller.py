@@ -33,10 +33,14 @@ class VaultController:
         self._source = None
 
     def state(self, configured):
+        if self.current_session() is not None:
+            return VaultState.UNLOCKED
+        return VaultState.LOCKED if configured else VaultState.SETUP
+
+    def current_session(self):
         with self._mutex:
-            if self._session is not None:
-                return VaultState.UNLOCKED
-            return VaultState.LOCKED if configured else VaultState.SETUP
+            session = self._session
+            return session if session is not None and session.available else None
 
     @property
     def source(self):

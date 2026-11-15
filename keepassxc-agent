@@ -1,0 +1,7 @@
+#!/bin/sh
+set -eu
+
+file=$(readlink -f -- "$0")
+source_dir=$(dirname -- "$file")/src
+export PYTHONPATH="$source_dir"
+exec /usr/bin/python3 -m keepassxc_agent_access.agent_cli "$@"
