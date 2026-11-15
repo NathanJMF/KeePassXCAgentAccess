@@ -854,13 +854,25 @@ def main(root):
                 check_token_scope(first, second, first_locked=True)
                 select_tree(second)
 
-                def reject_locked_destination(dialog):
+                def check_locked_destination(dialog):
                     vault_choice, group_choice = entry_locations(dialog)
-                    assert len(vault_choice.get_model()) == 1 and vault_choice.get_active_id() == second
+                    assert len(vault_choice.get_model()) == 2 and vault_choice.get_active_id() == second
                     assert group_choice.get_active_text() == "Root"
+                    assert vault_choice.set_active_id(first)
+                    assert vault_choice.get_active_text().endswith(" · Locked")
+                    assert not group_choice.get_sensitive()
+                    assert group_choice.get_active_id() is None
+                    assert group_choice.get_active_text() == "Unlock the vault in the sidebar"
+                    title = next(child for child in descendants(dialog) if child.get_name() == "entry-title")
+                    title.set_text("Unsaved entry fixture")
+                    save = dialog.get_widget_for_response(Gtk.ResponseType.OK)
+                    assert not save.get_sensitive()
+                    assert vault_choice.set_active_id(second)
+                    assert group_choice.get_sensitive() and group_choice.get_active_text() == "Root"
+                    assert save.get_sensitive() and title.get_text() == "Unsaved entry fixture"
                     dialog.response(Gtk.ResponseType.CANCEL)
 
-                drive_dialog(app.new_entry_item.activate, reject_locked_destination)
+                drive_dialog(app.new_entry_item.activate, check_locked_destination)
                 select_tree(first)
                 app.vault_buttons["unlock"].clicked()
                 wait_for(lambda: not app.busy and app.workspace.session(first), "First vault did not unlock again")

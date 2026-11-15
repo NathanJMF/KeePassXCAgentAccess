@@ -17,10 +17,13 @@ def _form(app, title):
     return dialog, fields
 
 
-def _require_name(dialog, field):
+def _require_name(dialog, field, *, group_choice=None):
     def validate(*_):
-        dialog.set_response_sensitive(Gtk.ResponseType.OK, bool(field.get_text().strip()))
+        has_destination = group_choice is None or group_choice.get_active_id() is not None
+        dialog.set_response_sensitive(Gtk.ResponseType.OK, bool(field.get_text().strip()) and has_destination)
     field.connect("changed", validate)
+    if group_choice is not None:
+        group_choice.connect("changed", validate)
     validate()
 
 
@@ -55,18 +58,18 @@ def _group_options(groups):
 def _entry_locations(app, grid, vault, group, *, creating):
     workspace = app.workspace
     with workspace.mutex:
-        available = {
-            record.id: (record.name, session.groups)
-            for record in workspace.registrations.values()
-            if (creating or record.id == vault) and (session := workspace.owner_session(record.id))
-        }
-    if vault not in available:
+        locations = {}
+        for record in workspace.registrations.values():
+            if creating or record.id == vault:
+                session = workspace.owner_session(record.id)
+                locations[record.id] = (record.name, session.groups if session else None)
+    if vault not in locations or locations[vault][1] is None:
         return None
 
     vault_choice = Gtk.ComboBoxText()
     vault_choice.set_name("entry-vault")
-    for identifier, (name, _) in sorted(available.items(), key=lambda item: item[1][0].casefold()):
-        vault_choice.append(identifier, name)
+    for identifier, (name, groups) in sorted(locations.items(), key=lambda item: item[1][0].casefold()):
+        vault_choice.append(identifier, f"{name} · Locked" if groups is None else name)
     vault_choice.set_active_id(vault)
     vault_choice.set_sensitive(creating)
 
@@ -76,11 +79,15 @@ def _entry_locations(app, grid, vault, group, *, creating):
     def populate(widget, selected=None):
         group_choice.remove_all()
         active = widget.get_active_id()
-        if active in available:
-            for identifier, name in _group_options(available[active][1]):
+        groups = locations[active][1] if active in locations else None
+        group_choice.set_sensitive(groups is not None)
+        if groups is None:
+            group_choice.append_text("Unlock the vault in the sidebar")
+        else:
+            for identifier, name in _group_options(groups):
                 group_choice.append(identifier, name)
-            if not selected or not group_choice.set_active_id(selected):
-                group_choice.set_active(0)
+        if not selected or not group_choice.set_active_id(selected):
+            group_choice.set_active(0)
 
     populate(vault_choice, group)
     vault_choice.connect("changed", populate)
@@ -143,7 +150,7 @@ def _entry_form(app, vault, group, entry, saved_notes):
             password.set_text("")
 
     change_password.connect("toggled", change)
-    _require_name(dialog, fields["title"])
+    _require_name(dialog, fields["title"], group_choice=group_choice)
     fields["title"].grab_focus()
     response = app.run_dialog(dialog)
     updated_password = password.get_text() if entry is None or change_password.get_active() else None
@@ -158,6 +165,8 @@ def _entry_form(app, vault, group, entry, saved_notes):
         return
     destination_vault = vault_choice.get_active_id()
     destination_group = group_choice.get_active_id()
+    if destination_vault is None or destination_group is None:
+        return
     selection = "" if group_choice.get_active() == 0 else destination_group
     values = {name: field.get_text() for name, field in fields.items()}
     app._background(
