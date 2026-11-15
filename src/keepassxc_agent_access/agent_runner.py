@@ -45,6 +45,9 @@ ENROLLMENT = {
             "properties": {
                 "vault": REFERENCE,
                 "entry": REFERENCE,
+                "group": REFERENCE,
+                "edits": {"type": "array", "items": {"enum": [*EDIT_OPERATIONS, "move_into"]},
+                          "minItems": 1, "uniqueItems": True},
                 "label": {"type": "string"},
                 "metadata": {"type": "boolean"},
                 "username": {"type": "boolean"},

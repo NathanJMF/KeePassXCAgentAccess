@@ -1,6 +1,8 @@
+from concurrent.futures import ThreadPoolExecutor
 import json
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from time import monotonic, sleep
 import unittest
 from unittest.mock import patch
 from uuid import uuid4
@@ -100,6 +102,57 @@ class ScopedBrokerTests(unittest.TestCase):
         self.assertEqual(self.invoke("access_status"), {"status": "active"})
         self.assert_code("paused", "list_entries", vault=self.vaults[0])
         self.assertEqual(len(self.activity.rows(action="Request token")), 1)
+
+    def test_review_applies_once_per_scoped_use_and_never_approves_tokens(self):
+        vault = self.vaults[0]
+        item = {"vault": vault, "entry": self.entry, "metadata": True, "action": "check"}
+        self.workspace.set_review_usage(True)
+        self.assertTrue(Workspace(self.workspace.directory, None).review_usage)
+        self.approve([item])
+        self.engine.approvals.timeout = 2
+
+        def next_ticket():
+            deadline = monotonic() + 1
+            while monotonic() < deadline:
+                if tickets := self.engine.approvals.pending():
+                    return tickets[0]
+                sleep(.01)
+            self.fail("No pending usage approval")
+
+        with ThreadPoolExecutor() as pool:
+            reading = pool.submit(self.invoke, "list_entries")
+            ticket = next_ticket()
+            self.assertFalse(reading.done())
+            self.assertEqual(ticket.action, "List entries")
+            self.assertEqual(ticket.identity, "Fixture agent 0")
+            self.assertTrue(self.engine.approvals.resolve(ticket.id, True))
+            self.assertEqual(len(reading.result(timeout=2)["entries"]), 1)
+
+            using = pool.submit(self.invoke, "use_password", entry=self.entry, action="check")
+            ticket = next_ticket()
+            self.assertEqual(ticket.destination, self.action.url)
+            self.assertFalse(using.done())
+            self.assertTrue(self.engine.approvals.resolve(ticket.id, False))
+            with self.assertRaises(ListingError) as error:
+                using.result(timeout=2)
+            self.assertEqual(error.exception.code, "declined")
+
+            using = pool.submit(self.invoke, "use_password", entry=self.entry, action="check")
+            ticket = next_ticket()
+            self.assertTrue(self.engine.approvals.resolve(ticket.id, True))
+            self.assertEqual(using.result(timeout=2), {"outcome": "succeeded", "http_status": 200})
+
+            reading = pool.submit(self.invoke, "list_vaults")
+            next_ticket()
+            self.workspace.set_review_usage(False)
+            with self.assertRaises(ListingError) as error:
+                reading.result(timeout=2)
+            self.assertEqual(error.exception.code, "revoked")
+
+        self.assertFalse(Workspace(self.workspace.directory, None).review_usage)
+        self.assertEqual(len(self.invoke("list_vaults")["vaults"]), 1)
+        self.assertEqual(self.enroll([item], 1), {"status": "pending"})
+        self.assertEqual(self.activity.rows(action="List entries")[0]["decision"], "Approved once")
 
     def test_identity_reserved_until_token_is_removed_or_denied(self):
         items = [{"label": "Example entry", "metadata": True}]

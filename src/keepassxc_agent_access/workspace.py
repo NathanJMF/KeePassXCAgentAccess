@@ -77,6 +77,7 @@ class Workspace:
         self.editing = set()
         self.pending = ()
         self.paused = True
+        self.review_usage = self.legacy_access.read().review_usage
         self.generation = 0
         self._load()
 
@@ -367,6 +368,14 @@ class Workspace:
             session = self.sessions.pop(identifier, None)
         if session:
             session.worker.close()
+
+    def set_review_usage(self, reviewed):
+        with self.mutex:
+            if self.review_usage == reviewed:
+                return
+            self.legacy_access.write(replace(self.legacy_access.read(), review_usage=reviewed))
+            self.review_usage = reviewed
+            self.generation += 1
 
     def pause(self, paused=True):
         with self.mutex:

@@ -9,6 +9,7 @@ from .access_settings import Action, ActionType
 from .activity import ActivityError
 from .activity_grouping import EDIT_STAGES, ActivityResources, activity_groups, activity_matches, event_time
 from .edit_request_view import review_edit
+from .grants import EDIT_PERMISSIONS, group_location
 from .owner_views import _dialog, _label, _scroll, _table, _time, require_mouse_decisions, table_time
 from .workspace_context import DELETE_LABEL, attach_row_context
 from .workspace_editor import delete_entry, edit_entry
@@ -221,6 +222,7 @@ ACCESS_STATES = {
     "Pending": ("appointment-soon-symbolic", "keeper_warning"),
     "Edit pending": ("appointment-soon-symbolic", "keeper_warning"),
     "Applying edit": ("content-loading-symbolic", "keeper_accent"),
+    "Usage pending": ("appointment-soon-symbolic", "keeper_warning"),
     "Active": ("emblem-default-symbolic", "keeper_success"),
     "Disabled": ("action-unavailable-symbolic", "keeper_muted"),
 }
@@ -229,6 +231,7 @@ ACTIVITY_STATES = {
     "Succeeded": ("emblem-ok-symbolic", "keeper_success"),
     "Pending approval": ("appointment-soon-symbolic", "keeper_warning"),
     "Pending review": ("appointment-soon-symbolic", "keeper_warning"),
+    "Expired": ("appointment-soon-symbolic", "keeper_muted"),
     "Stale": ("action-unavailable-symbolic", "keeper_muted"),
     "Failed": ("dialog-error-symbolic", "keeper_failure"),
     "Denied": ("action-unavailable-symbolic", "keeper_failure"),
@@ -269,6 +272,7 @@ def token_permissions(record, scopes):
     labels = []
     for scope in scopes:
         labels.extend(metadata_labels(scope))
+        labels.extend(EDIT_PERMISSIONS[operation] for operation in scope.edits)
         if scope.action:
             binding = record.binding(scope.entry, scope.action) if record else None
             if binding and binding.revision == scope.revision and binding.action.enabled:
@@ -290,7 +294,8 @@ class ApprovedResource:
 def approved_resources(workspace, scopes, snapshots):
     by_vault = {}
     for scope in scopes:
-        by_vault.setdefault(scope.vault, {}).setdefault(scope.entry, []).append(scope)
+        target = ("group", scope.group) if scope.group is not None else ("entry", scope.entry)
+        by_vault.setdefault(scope.vault, {}).setdefault(target, []).append(scope)
 
     resources = {}
     needs_unlock = False
@@ -310,7 +315,16 @@ def approved_resources(workspace, scopes, snapshots):
                 title += " · Locked"
             vault = ("vault", vault_id)
             resources[vault] = ApprovedResource(vault, None, title, "drive-harddisk-symbolic")
-            for index, (entry_id, approved) in enumerate(permissions.items(), 1):
+            for index, ((kind, identifier), approved) in enumerate(permissions.items(), 1):
+                if kind == "group":
+                    if identifier in groups:
+                        name = " / ".join(group_location(tuple(groups.values()), identifier)) or "Root"
+                    else:
+                        name = f"Group {index}" if locked else "Group unavailable"
+                    key = ("group-scope", vault_id, identifier)
+                    resources[key] = ApprovedResource(key, vault, name, "folder-symbolic", token_permissions(record, approved))
+                    continue
+                entry_id = identifier
                 entry = entries.get(entry_id)
                 parent = vault
                 if entry is None:
@@ -427,6 +441,13 @@ class AccessView(Gtk.Box):
                           reported(edit.context.chat if edit.context else None),
                           state, f"{edit.token_id}/{edit.id}", "edit", edit.requested, None,
                           False, ("edit", edit.token_id, edit.id), (), ())))
+        for ticket in self.app.usage_approvals.pending():
+            identifier = str(ticket.id)
+            rows.append((False, -ticket.requested,
+                         (table_time(ticket.requested), "—", reported(ticket.identity),
+                          reported(ticket.context.model), reported(ticket.project), reported(ticket.context.chat),
+                          "Usage pending", identifier, "usage", ticket.requested, None,
+                          False, ("usage", identifier), (), ())))
         rows.sort()
         fill_table(self.table, [columns for _, _, columns in rows], self.ROW_KEY)
         self.empty.set_visible(not rows)
@@ -497,13 +518,14 @@ class AccessView(Gtk.Box):
         rows = []
         for item in resources:
             parent = paths.get(item.parent, ())
-            if item.key[0] != "entry":
+            if item.key[0] not in ("entry", "group-scope"):
                 paths[item.key] = (*parent, item.name)
                 continue
             vault, *groups = parent
-            prefix = f"{vault} > {' / '.join(groups) or '—'}"
+            prefix = vault if item.key[0] == "group-scope" else f"{vault} > {' / '.join(groups) or '—'}"
             label = f"{prefix} > {item.name}"
-            separators = tuple(len(part.encode("utf-8")) + 1 for part in (vault, prefix))
+            parts = (vault,) if item.key[0] == "group-scope" else (vault, prefix)
+            separators = tuple(len(part.encode("utf-8")) + 1 for part in parts)
             rows.append(("", "", label, "", item.permissions, "", "", "", "scope", None, None, True,
                          (grant.id, *item.key), separators, ()))
         return tuple(rows)
@@ -528,7 +550,7 @@ class AccessView(Gtk.Box):
 
         if kind == "edit":
             return [[("Review edit…", open_selected)]]
-        if state == "Pending":
+        if state in ("Pending", "Usage pending"):
             return [[("Review request…", open_selected)]]
         change = "disabled" if state == "Active" else "active"
         label = "Disable token" if state == "Active" else "Re-enable token"
@@ -539,6 +561,13 @@ class AccessView(Gtk.Box):
 
     def open_record(self, identifier, kind, *, pending_only=False):
         if self.app.desktop.locked:
+            return
+        if kind == "usage":
+            ticket = next((request for request in self.app.usage_approvals.pending()
+                           if str(request.id) == identifier), None)
+            if ticket:
+                self.app.review_popups.mark_reviewed(kind, identifier)
+                self._review_usage(ticket)
             return
         if kind == "edit":
             token_id, _, request_id = identifier.partition("/")
@@ -555,6 +584,46 @@ class AccessView(Gtk.Box):
                 self._review(grant)
             elif not pending_only:
                 self._manage(grant)
+
+    def _review_usage(self, ticket):
+        queue = self.app.usage_approvals
+        dialog, body = _dialog(self.app, "Review agent usage", 620, -1)
+        dialog.set_name("keeper-access-review")
+        dialog.set_position(Gtk.WindowPosition.CENTER_ON_PARENT)
+        dialog.set_modal(True)
+        dialog.add_buttons("Deny", Gtk.ResponseType.REJECT, "Approve once", Gtk.ResponseType.ACCEPT)
+        dialog.connect("key-press-event", lambda *_: True)
+        dialog.connect("key-release-event", lambda *_: True)
+        require_mouse_decisions(dialog)
+        styled(dialog.get_widget_for_response(Gtk.ResponseType.ACCEPT), "keeper-access-approve")
+        styled(dialog.get_widget_for_response(Gtk.ResponseType.REJECT), "keeper-access-deny")
+        add_label(body, "Requested by · agent-reported")
+        body.pack_start(styled(_label(ticket.identity), "keeper-access-agent"), False, False, 0)
+        add_label(body, ticket.project)
+        details = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        add_activity_section(details, ticket.action, (("Scope", "\n".join(ticket.scope) or "No vaults in scope"),
+                                                     ("Destination", ticket.destination)))
+        scroll = Gtk.ScrolledWindow()
+        scroll.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+        scroll.set_propagate_natural_height(True)
+        scroll.set_max_content_height(360)
+        scroll.add(details)
+        body.pack_start(scroll, True, True, 0)
+        add_label(body, "Approval applies to this operation only.")
+
+        def check_pending():
+            if ticket not in queue.pending():
+                dialog.response(Gtk.ResponseType.CANCEL)
+            return GLib.SOURCE_CONTINUE
+
+        watch = GLib.timeout_add(200, check_pending)
+        try:
+            response = self.app.run_dialog(dialog)
+        finally:
+            GLib.source_remove(watch)
+        if response in (Gtk.ResponseType.ACCEPT, Gtk.ResponseType.REJECT):
+            queue.resolve(ticket.id, response == Gtk.ResponseType.ACCEPT)
+            self.app._refresh()
 
     def _review(self, grant):
         dialog, body = _dialog(self.app, "Review access request", 620, -1)
@@ -588,7 +657,8 @@ class AccessView(Gtk.Box):
         count = len(grant.items)
         review = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
         if count > 1:
-            heading = styled(_label(f"Requested entries ({count})"), "keeper-access-caption")
+            caption = "Requested resources" if any(item.group for item in grant.items) else "Requested entries"
+            heading = styled(_label(f"{caption} ({count})"), "keeper-access-caption")
             review.pack_start(heading, False, False, 0)
         scroll = Gtk.ScrolledWindow()
         scroll.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
@@ -668,11 +738,13 @@ class AccessView(Gtk.Box):
         matches = Counter(paths)
         for choice, path in zip(choices, paths):
             if matches[path] > 1:
-                path = f"{path} · {choice.scope.vault[:8]} / {choice.scope.entry[:8]}"
+                resource_id = choice.scope.entry or choice.scope.group
+                path = f"{path} · {choice.scope.vault[:8]} / {resource_id[:8]}"
             combo.append_text(path)
 
         resource = Gtk.Box(spacing=10)
-        resource_icon = Gtk.Image.new_from_icon_name("dialog-password-symbolic", Gtk.IconSize.LARGE_TOOLBAR)
+        icon_name = "folder-symbolic" if item.group else "dialog-password-symbolic"
+        resource_icon = Gtk.Image.new_from_icon_name(icon_name, Gtk.IconSize.LARGE_TOOLBAR)
         resource_icon.set_valign(Gtk.Align.CENTER)
         resource.pack_start(styled(resource_icon, "keeper-access-resource-icon"), False, False, 0)
         resource_text = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
@@ -716,8 +788,9 @@ class AccessView(Gtk.Box):
                 location.set_text(f"{vault.name} is locked. Unlock it and reopen this request." if item.label
                                   else "Vault locked. Unlock it and reopen this request to approve.")
             else:
-                title.set_text(item.label or "Entry unavailable")
-                location.set_text("No matching entry in the unlocked vaults.")
+                resource = "group" if item.group else "entry"
+                title.set_text(item.label or f"{resource.capitalize()} unavailable")
+                location.set_text(f"No matching {resource} in the unlocked vaults.")
             location_style = location.get_style_context()
             if choice:
                 location_style.remove_class("keeper-access-unresolved")
@@ -729,6 +802,8 @@ class AccessView(Gtk.Box):
                 access_permission(permissions, "Read username", (choice.username or "—") if choice else None)
             if item.url:
                 access_permission(permissions, "Read stored URL", (choice.url or "—") if choice else None)
+            for operation in item.edits:
+                access_permission(permissions, EDIT_PERMISSIONS[operation])
             if item.action:
                 binding = vault.binding(entry_id, item.action) if choice else None
                 action = binding.action if binding else None
@@ -738,6 +813,7 @@ class AccessView(Gtk.Box):
             facts = activity_facts((
                 ("Vault ID", vault_id),
                 ("Entry ID", entry_id),
+                ("Group ID", item.group),
                 ("Database", str(vault.target.database) if vault else None),
                 ("Action ID", item.action),
             ))

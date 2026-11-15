@@ -122,6 +122,7 @@ class AccessSettings:
     uid: int | None = None
     retention_days: int = 30
     vaults: tuple[tuple[str, VaultPolicy], ...] = ()
+    review_usage: bool = False
 
     def for_vault(self, identity):
         return dict(self.vaults).get(identity, VaultPolicy())
@@ -147,7 +148,8 @@ class AccessStore:
             elif uid is not None:
                 raise ValueError
             retention = data["retention_days"]
-            if type(retention) is not int or not 1 <= retention <= 365:
+            review_usage = data.get("review_usage", False)
+            if type(retention) is not int or not 1 <= retention <= 365 or type(review_usage) is not bool:
                 raise ValueError
             vaults = tuple(
                 (uuid_text(identity), VaultPolicy(
@@ -156,7 +158,7 @@ class AccessStore:
                 ))
                 for identity, policy in data["vaults"].items()
             )
-            return AccessSettings(AccessMode(data["mode"]), endpoint, uid, retention, vaults)
+            return AccessSettings(AccessMode(data["mode"]), endpoint, uid, retention, vaults, review_usage)
         except FileNotFoundError:
             return AccessSettings()
         except (OSError, AttributeError, ValueError, TypeError, KeyError):
@@ -170,6 +172,7 @@ class AccessStore:
             raise ValueError("Choose a retention period between 1 and 365 days.")
         write_private_json(self.path, {
             "mode": settings.mode.value,
+            "review_usage": settings.review_usage,
             "endpoint": settings.endpoint,
             "uid": settings.uid,
             "retention_days": settings.retention_days,

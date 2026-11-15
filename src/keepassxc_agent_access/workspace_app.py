@@ -14,6 +14,7 @@ gi.require_version("Gdk", "3.0")
 from gi.repository import Gdk, Gio, GLib, Gtk, Pango
 
 from .activity import ActivityError, ActivityStore
+from .approvals import ApprovalQueue
 from .broker import BrokerConfig, ListingBroker
 from .desktop import DesktopSession
 from .edit_requests import EditRequests
@@ -53,6 +54,7 @@ class WorkspaceApplication(Gtk.Application):
         self.workspace = None
         self.grants = None
         self.edit_requests = None
+        self.usage_approvals = ApprovalQueue()
         self.broker = None
         self.window = None
         self.dialog = None
@@ -83,7 +85,8 @@ class WorkspaceApplication(Gtk.Application):
             self.activity.recover(previous.retention_days)
             self.grants = Grants(self.workspace, self.activity)
             self.edit_requests = EditRequests(self.workspace, self.grants, self.activity)
-            engine = ScopedBroker(self.workspace, self.grants, self.activity, edits=self.edit_requests)
+            engine = ScopedBroker(self.workspace, self.grants, self.activity, edits=self.edit_requests,
+                                  approvals=self.usage_approvals)
             self.broker = ListingBroker(previous.broker_config(BrokerConfig.from_environment()), lambda: engine, engine)
             if self.broker.config:
                 self.broker.start()
@@ -193,6 +196,11 @@ class WorkspaceApplication(Gtk.Application):
         self.pause_button.set_image(self.pause_icon)
         self.pause_button.connect("clicked", self._toggle_pause)
         header.pack_end(self.pause_button)
+        self.usage_button = styled(Gtk.ToggleButton(), "keeper-control")
+        self.usage_button.set_active(bool(self.workspace and self.workspace.review_usage))
+        self._style_usage_policy()
+        self.usage_button.connect("toggled", self._set_usage_policy)
+        header.pack_end(self.usage_button)
         header.show_all()
 
     def _build_sidebar(self):
@@ -378,6 +386,7 @@ class WorkspaceApplication(Gtk.Application):
                 style.add_class("keeper-paused" if paused else "keeper-live")
                 style.remove_class("keeper-live" if paused else "keeper-paused")
             self.pause_button.set_sensitive(bool(self.broker and self.broker.enabled and not self.desktop.locked))
+            self.usage_button.set_sensitive(bool(self.workspace and not self.desktop.locked))
             pending = self._review_requests()
             count = len(pending)
             access_label = f"Access ({count})" if count else "Access"
@@ -401,7 +410,32 @@ class WorkspaceApplication(Gtk.Application):
         grants = self.grants.rows() if self.grants else ()
         return tuple(("grant", grant.id) for grant in grants if grant.status == "pending") + tuple(
             ("edit", f"{edit.token_id}/{edit.id}") for edit in self.pending_edits() if edit.status == "pending"
+        ) + tuple(("usage", str(ticket.id)) for ticket in self.usage_approvals.pending())
+
+    def _style_usage_policy(self):
+        review = bool(self.workspace and self.workspace.review_usage)
+        self.usage_button.set_label("Review agent usage" if review else "Allow agent usage")
+        self.usage_button.set_tooltip_text(
+            "Ask for a decision on each agent operation" if review else "Run operations within each approved token’s scope"
         )
+        style = self.usage_button.get_style_context()
+        style.add_class("keeper-usage-review" if review else "keeper-usage-allow")
+        style.remove_class("keeper-usage-allow" if review else "keeper-usage-review")
+
+    def _set_usage_policy(self, item):
+        if not self.workspace or self.workspace.review_usage == item.get_active():
+            return
+        if self.desktop.locked:
+            item.set_active(self.workspace.review_usage)
+            return
+        try:
+            self.workspace.set_review_usage(item.get_active())
+            self.message = ""
+        except OWNER_ERRORS as error:
+            self.message = str(error) or "Could not save the agent usage setting."
+            item.set_active(self.workspace.review_usage)
+        self._style_usage_policy()
+        self._refresh()
 
     def _set_request_popups(self, item):
         enabled = item.get_active()

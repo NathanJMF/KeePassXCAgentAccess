@@ -2,6 +2,7 @@
 
 import atexit
 from base64 import b64encode
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 import json
 import os
@@ -91,7 +92,7 @@ def main(root):
     profiles = root / "profiles"
     profiles.mkdir()
     profiles.chmod(0o1777)
-    names = ("alpha", "beta", "review", "review-live", "review-paused", "expanded", "bearer")
+    names = ("alpha", "beta", "review", "review-live", "review-paused", "expanded", "bearer", "scoped-editor")
     directories = [str(profiles / name) for name in names]
     atexit.register(subprocess.run, [*NAMESPACE, "rm", "-rf", "--", *directories], check=True)
     subprocess.run([*NAMESPACE, "mkdir", "-m", "700", *directories], check=True)
@@ -257,6 +258,8 @@ def main(root):
                     assert "Read stored URL" in summary and STORED_URL in summary
                 elif profile == "bearer":
                     assert any("HTTPS Bearer token GET" in label and url + "/first" in label for label in summary)
+                elif profile == "scoped-editor":
+                    assert {"Requested resources (2)", "Update entry details", "Create entries in group"} <= set(summary)
                 if vault:
                     combo, = [child for child in descendants(dialog) if isinstance(child, Gtk.ComboBoxText)]
                     assert len(combo.get_model()) == 4
@@ -1465,6 +1468,33 @@ def main(root):
 
                 drive_dialog(lambda: table.row_activated(path, table.get_column(0)), read_activity)
                 check_agent_edits(first, second)
+                assert app.usage_button.get_label() == "Allow agent usage"
+                assert app.usage_button.get_style_context().has_class("keeper-usage-allow")
+                app.usage_button.set_active(True)
+                assert app.usage_button.get_label() == "Review agent usage"
+                assert app.usage_button.get_style_context().has_class("keeper-usage-review")
+                assert old_access.read().review_usage
+
+                root_group, = [group["id"] for group in app.workspace.session(second).groups if group["parent"] is None]
+                edits = [{"vault": second, "entry": nested_entry, "edits": ["update_entry"]},
+                         {"vault": second, "group": root_group, "edits": ["create_entry"]}]
+                assert enroll("scoped-editor", edits) == {"status": "pending"}
+                approve("scoped-editor")
+
+                def review_usage(dialog):
+                    assert dialog.get_title() == "Review agent usage"
+                    labels = {child.get_text() for child in descendants(dialog) if isinstance(child, Gtk.Label)}
+                    assert {"Agent beta", "List entries", "Approval applies to this operation only."} <= labels
+                    click_decision(dialog.get_widget_for_response(Gtk.ResponseType.ACCEPT))
+
+                with ThreadPoolExecutor() as pool:
+                    reviewed = pool.submit(invoke, "beta", "entries", "list")
+                    drive_dialog(app._refresh, review_usage, opens_async=True)
+                    assert reviewed.result(timeout=4)["entries"] == fixture[2:]
+
+                app.usage_button.set_active(False)
+                assert not old_access.read().review_usage
+                assert invoke("beta", "entries", "list")["entries"] == fixture[2:]
                 app.tray_items["pause"].activate()
                 assert app.workspace.paused and app.workspace.session(second)
                 assert app.indicator.get_icon() == "keeper-agent-access-paused"

@@ -92,6 +92,47 @@ class EditRequestsTests(unittest.TestCase):
                              123, None, live, live, deliver)
         return decode(direct) if direct else output[0]
 
+    def test_explicit_edit_permissions_follow_usage_policy(self):
+        credential = "6a" * 32
+        entries = [
+            {"vault": self.vault, "entry": self.entry_id,
+             "edits": ["update_entry", "move_entry", "replace_password"]},
+            {"vault": self.vault, "group": self.group_id, "edits": ["create_entry"]},
+            {"vault": self.vault, "group": self.root_id, "edits": ["move_into"]},
+        ]
+        payload = {"identity": "Scoped editor", "project": "Fixture", "items": entries}
+        self.assertEqual(self._wire("request_access", credential=credential, request=payload), {"status": "pending"})
+        pending = self.grants.authenticate(credential, 123)
+        choices = [self.grants.choices(item)[0] for item in pending.items]
+        self.grants.decide(pending.id, choices)
+
+        def submit(operation, **values):
+            proposal = self._request(operation, **values)
+            result = self._wire("request_edit", credential=credential, request=proposal)
+            self.assertEqual(proposal["id"], result["id"])
+            return result
+
+        self.assertEqual(submit("update_entry", entry=self.entry_id,
+                                fields={"title": "Allowed update"})["status"], "applied")
+        self.assertEqual(submit("create_entry", parent=self.group_id,
+                                fields={"title": "Allowed create"})["status"], "applied")
+        self.assertEqual(submit("move_entry", entry=self.entry_id, parent=self.group_id)["status"], "pending")
+        self.assertEqual(submit("move_entry", entry=self.entry_id, parent=self.root_id)["status"], "applied")
+        self.assertEqual(submit("replace_password", entry=self.entry_id, password_source="owner")["status"], "pending")
+        self.assertEqual(submit("replace_password", entry=self.entry_id, password_source="generate")["status"], "applied")
+        self.assertEqual(submit("update_entry", entry=self.unscoped,
+                                fields={"title": "Needs separate approval"})["status"], "pending")
+        self.workspace.set_review_usage(True)
+        self.assertEqual(submit("update_entry", entry=self.entry_id,
+                                fields={"title": "Review this update"})["status"], "pending")
+        saved = PyKeePass(self.path, password=self.unlock)
+        edited = saved.find_entries(uuid=UUID(self.entry_id), first=True)
+        self.assertEqual(edited.title, "Allowed update")
+        self.assertEqual(str(edited.group.uuid), self.root_id)
+        self.assertNotEqual(edited.password, "Synthetic original entry secret")
+        self.assertEqual(saved.find_entries(uuid=UUID(self.unscoped), first=True).title, "Unscoped entry")
+        self.assertTrue(saved.find_entries(title="Allowed create", first=True))
+
     def test_submission_does_not_probe_resources_and_is_isolated_per_token(self):
         real = self._request("update_entry", entry=self.unscoped, fields={"title": "Unscoped update"})
         absent = self._request("update_entry", vault=str(uuid4()), entry=str(uuid4()), fields={"title": "Other"})

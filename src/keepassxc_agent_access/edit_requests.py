@@ -232,7 +232,25 @@ class EditRequests:
             if current is None or current.generation != record.token_generation or current.status != "active":
                 self._stale(record, current, label="Cancel edit")
 
-    def submit(self, token, payload, context=None):
+    @staticmethod
+    def _permitted(token, request):
+        def covers(operation, *, entry=None, group=None):
+            return any(scope.vault == request.vault and scope.entry == entry and scope.group == group
+                       and operation in scope.edits for scope in token.scope)
+
+        if request.entry:
+            allowed = covers(request.operation, entry=request.entry)
+        else:
+            allowed = covers(request.operation, group=request.group or request.parent)
+        if request.parent and request.operation in ("move_entry", "move_group"):
+            return allowed and covers("move_into", group=request.parent)
+        return allowed
+
+    def _automatic(self, token, request):
+        return (not self.workspace.review_usage and not self.workspace.paused
+                and request.password_source != "owner" and self._permitted(token, request))
+
+    def submit(self, token, payload, context=None, *, live=lambda: True):
         request = EditRequest.parse(payload)
         frame = encode(asdict(request))
         digest = sha256(frame).hexdigest()
@@ -253,8 +271,6 @@ class EditRequests:
                 """, (token.id,)).fetchone()
                 if count >= _MAX_PENDING or own >= _MAX_PER_TOKEN:
                     raise ListingError("busy")
-            # Submission deliberately checks only syntax and token identity.
-            # Matching a vault or entry belongs to the owner preview.
             event = self._event(token, request, "Request edit", context=context)
             try:
                 with self.activity.connection() as db:
@@ -267,8 +283,26 @@ class EditRequests:
             except ActivityError:
                 self.activity.finish(event, "Failed")
                 raise
-            self.activity.finish(event, "Pending review")
-            return {"id": request.id, "status": "pending"}
+            preview = None
+            if self._automatic(token, request) and live():
+                try:
+                    preview = self.preview(token.id, request.id)
+                except VaultError:
+                    pass
+            self.activity.finish(event, "Submitted" if preview else "Pending review")
+            try:
+                claim = self._claim_edit(preview, automatic=True, live=live) if preview else None
+            except VaultError:
+                result = self.status(token, request.id)
+                if result["status"] == "pending":
+                    self.activity.finish(event, "Pending review")
+                return result
+        if claim:
+            try:
+                return self._apply_claim(*claim, live=live)
+            except VaultError:
+                return self.status(token, request.id)
+        return {"id": request.id, "status": "pending"}
 
     def status(self, token, request_id):
         try:
@@ -325,8 +359,6 @@ class EditRequests:
             self.activity.finish(event, "Denied")
 
     def approve(self, preview, password=None):
-        record = preview.record
-        request = record.request
         if preview.password_source == "owner":
             try:
                 edit_text(password, required=True)
@@ -334,6 +366,11 @@ class EditRequests:
                 raise VaultError("Enter the replacement password before approving.") from None
         elif password is not None:
             raise VaultError("This edit request does not accept a password.")
+        return self._apply_claim(*self._claim_edit(preview), password=password)
+
+    def _claim_edit(self, preview, *, automatic=False, live=lambda: True):
+        record = preview.record
+        request = record.request
         with self.workspace.mutex:
             pending = self._pending(record.token_id, record.id)
             token = self.grants.records.get(record.token_id)
@@ -342,6 +379,8 @@ class EditRequests:
                 raise VaultError("The requesting token changed. Ask the agent to submit a fresh request.")
             if self.workspace.paused:
                 raise VaultError("Resume agent access before approving this edit.")
+            if automatic and (not self._automatic(token, request) or not live()):
+                raise VaultError("The edit requires review.")
             try:
                 checked = self.preview(record.token_id, record.id)
                 if checked != preview or checked._session is not preview._session:
@@ -351,12 +390,17 @@ class EditRequests:
                 raise VaultError("The vault changed. Ask the agent to submit a fresh request.") from None
             generation = self.workspace.generation
             event = self._event(token, request, "Apply edit", record.context, checked)
-            self.activity.authorize(event, "Approved in edit review")
+            self.activity.authorize(event, "Allowed by approved edit scope" if automatic else "Approved in edit review")
             self._status(record, "pending", "applying")
+            return checked, token, generation, event
+
+    def _apply_claim(self, checked, token, generation, event, *, password=None, live=lambda: True):
+        record = checked.record
+        request = record.request
 
         def may_commit():
             return (not self.workspace.paused and self.workspace.generation == generation
-                    and self._active(token))
+                    and self._active(token) and live())
 
         dispatched = False
 
@@ -367,7 +411,7 @@ class EditRequests:
             dispatched = True
 
         values = dict(checked._values)
-        if preview.password_source == "owner":
+        if checked.password_source == "owner":
             values["password"] = password
         try:
             identifier = self.workspace._edit(request.vault, checked._change, expected=checked._session,

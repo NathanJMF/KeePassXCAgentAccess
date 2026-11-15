@@ -26,11 +26,13 @@ If the status is uninitialized, submit one JSON object on stdin. Ask for the spe
     }
     JSON
 
-If the owner supplied exact references, replace a label with both vault and entry UUIDs. An item can request discovery metadata, an action ID, or both. To request additional fields, set metadata to true and set username, url, or both to true explicitly. A label needs an exact entry title, which the owner resolves in the desktop Access pane. Supply the owner-provided action ID for credential use. An unchanged retry is safe. A wider or revised request, denied token, or removed token needs a fresh profile from the trusted runner.
+If the owner supplied exact references, replace a label with both vault and entry UUIDs. To request edit permissions, use an `edits` array of exact operation names. Entry permissions use an entry UUID or label. Group permissions use a vault UUID and a group UUID. An item can request discovery metadata, an action ID, or both. To request additional fields, set metadata to true and set username, url, or both to true explicitly. A label needs an exact entry title, which the owner resolves in the desktop Access pane. Supply the owner-provided action ID for credential use. An unchanged retry is safe. A wider or revised request, denied token, or removed token needs a fresh profile from the trusted runner. New and revised tokens always require owner approval.
 
 Tell the user if the request is pending and check status after they have reviewed it. Only active tokens can run scoped operations. Ask the owner about disabled tokens, locked vaults, or globally paused agent access.
 
 ## Discover and list
+
+In Review mode, the owner must approve each listing and credential action. Keep the active call open while they decide.
 
     keepassxc-agent vaults list --json
     keepassxc-agent entries list --vault VAULT_UUID --json
@@ -65,4 +67,4 @@ With stdio, call request_edit with the JSON object under request, and check it w
 - move_entry and move_group use entry or group and the destination parent. recycle_entry and recycle_group use entry or group.
 - replace_password uses entry and password_source set to generate or owner. Enter or generate password values in Keeper's owner dialog.
 
-A pending request awaits an owner decision. Report the status to the user. A completed create can include the new item's UUID under result.
+A pending request awaits an owner decision. Report the status to the user. In Allow mode an edit can apply immediately when the token includes the exact edit permission. For a move, the destination group also needs `move_into` permission. Create permissions belong to the parent group. Owner-entered replacement passwords always need the review window. A completed create can include the new item's UUID under result.

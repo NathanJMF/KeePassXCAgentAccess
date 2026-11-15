@@ -1,18 +1,22 @@
 """Authorize scoped requests and recheck their state before releasing data."""
 
+from time import monotonic, time
+
+from .approvals import Approval, ApprovalQueue
 from .access_settings import action_id, uuid_text
-from .activity import ActivityError, Attribution, entry_target_labels
+from .activity import ActivityError, Attribution, entry_label, entry_target_labels
 from .grants import OPTIONAL_METADATA_FIELDS
 from .protocol import RESPONSE_LIMIT, ListingError, encode
 from .settings import SettingsError
 
 
 class ScopedBroker:
-    def __init__(self, workspace, grants, activity, edits=None):
+    def __init__(self, workspace, grants, activity, edits=None, approvals=None):
         self.workspace = workspace
         self.grants = grants
         self.activity = activity
         self.edits = edits
+        self.approvals = approvals or ApprovalQueue()
 
     def __call__(self, payload, uid, _engine, live, dispatch, deliver):
         try:
@@ -59,6 +63,15 @@ class ScopedBroker:
         ).decode("ascii"):
             raise ListingError("invalid_request")
 
+        if operation == "request_edit":
+            with self.workspace.mutex:
+                if not live():
+                    raise ListingError("revoked")
+                token = self.grants.authenticate(credential, uid)
+                if self.edits is None:
+                    raise ListingError("ineligible")
+            return encode(self.edits.submit(token, payload["request"], context, live=live))
+
         with self.workspace.mutex:
             if not live():
                 raise ListingError("revoked")
@@ -68,13 +81,12 @@ class ScopedBroker:
             token = self.grants.authenticate(credential, uid)
             if operation == "access_status":
                 return encode({"status": token.status})
-            if operation in ("request_edit", "edit_status"):
+            if operation == "edit_status":
                 if self.edits is None:
                     raise ListingError("ineligible")
-                reply = (self.edits.submit(token, payload["request"], context) if operation == "request_edit"
-                         else self.edits.status(token, payload["id"]))
-                return encode(reply)
+                return encode(self.edits.status(token, payload["id"]))
             generation = self.workspace.generation
+            review_usage = self.workspace.review_usage
             name = {"list_vaults": "List vaults", "list_entries": "List entries",
                     "use_password": "Use password"}[operation]
             registered = self._catalog(token)
@@ -135,7 +147,30 @@ class ScopedBroker:
                 raise ListingError("ineligible")
             if not guard(live):
                 raise ListingError("revoked")
-            self.activity.authorize(event, "Approved token")
+            if review_usage:
+                if operation == "list_vaults":
+                    scope = tuple(registered.values())
+                elif operation == "list_entries":
+                    grants = [item for item in token.scope if item.vault == chosen and item.metadata]
+                    identifiers = {item.entry for item in grants}
+                    paths = tuple(" / ".join((*row["group_path"], entry_label(row["title"])))
+                                  for row in session.entries if row["id"] in identifiers)
+                    optional = {"username": "username", "url": "stored URL"}
+                    columns = ("entry ID", "title", "group path",
+                               *(optional[field] for field in fields if any(getattr(item, field) for item in grants)))
+                    scope = (registration.name, *(paths or ("No entries in scope",)),
+                             "Visible fields: " + ", ".join(columns))
+                else:
+                    scope = (" › ".join(part for part in (registration.name, folder, title) if part),)
+                ticket = Approval(event, uid, context, name + (f" · {binding.action.name}" if binding else ""),
+                                  scope, binding.action.url if binding else None, monotonic() + self.approvals.timeout,
+                                  identity=token.identity, project=token.project, requested=time())
+                result = self.approvals.wait(ticket, lambda: guard(live))
+                if result != "approved":
+                    raise ListingError(result)
+            self.activity.authorize(event, "Approved once" if review_usage else "Approved token")
+            if not guard(live):
+                raise ListingError("revoked")
             if operation == "list_vaults":
                 result = {"vaults": [{"id": key, "name": name} for key, name in registered.items()]}
             elif operation == "list_entries":
@@ -176,6 +211,8 @@ class ScopedBroker:
                 outcome = "Revoked"
             elif error.code == "paused":
                 outcome = "Paused"
+            elif error.code == "expired":
+                outcome = "Expired"
             self.activity.finish(event, outcome)
             raise
 

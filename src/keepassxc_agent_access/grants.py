@@ -8,16 +8,44 @@ import re
 from time import time
 
 from .access_settings import ActionType, action_id, label, uuid_text
-from .activity import Attribution, entry_target_labels
+from .activity import Attribution, entry_target_labels, folder_label
 from .protocol import ListingError
 from .settings import SettingsError, write_private_json
-from .workspace import new_id
+from .workspace import new_id, ordered_groups
 
 
 MAX_ITEMS = 16
 MAX_PENDING = 64
 LIVE_GRANT_STATES = frozenset(("pending", "active", "disabled"))
 OPTIONAL_METADATA_FIELDS = ("username", "url")
+ENTRY_EDITS = {
+    "update_entry": "Update entry details",
+    "move_entry": "Move entry",
+    "recycle_entry": "Move entry to recycle bin",
+    "replace_password": "Replace password",
+}
+GROUP_EDITS = {
+    "create_entry": "Create entries in group",
+    "create_group": "Create groups in group",
+    "rename_group": "Rename group",
+    "move_group": "Move group and its contents",
+    "recycle_group": "Move group and its contents to recycle bin",
+    "move_into": "Move entries or groups into group",
+}
+EDIT_PERMISSIONS = ENTRY_EDITS | GROUP_EDITS
+
+
+def _edit_permissions(values, allowed):
+    if not isinstance(values, (tuple, list)) or any(not isinstance(value, str) or value not in allowed for value in values):
+        raise ValueError
+    if len(set(values)) != len(values):
+        raise ValueError
+    return tuple(sorted(values))
+
+
+def group_location(groups, identifier):
+    return next((path for group, path in ordered_groups(groups) if group["id"] == identifier), ())
+
 
 
 def verifier(credential):
@@ -42,46 +70,60 @@ class Item:
     action: str | None
     username: bool = False
     url: bool = False
+    group: str | None = None
+    edits: tuple[str, ...] = ()
 
     def __post_init__(self):
         _validate_metadata(self.metadata, self.username, self.url)
+        object.__setattr__(self, "edits", _edit_permissions(self.edits, GROUP_EDITS if self.group else ENTRY_EDITS))
 
     @classmethod
     def parse(cls, data):
-        allowed = {"vault", "entry", "label", "metadata", "action", *OPTIONAL_METADATA_FIELDS}
+        allowed = {"vault", "entry", "label", "group", "metadata", "action", "edits", *OPTIONAL_METADATA_FIELDS}
         if not isinstance(data, dict) or set(data) - allowed:
             raise ValueError
-        entry, name = data.get("entry"), data.get("label")
+        entry, name, group = data.get("entry"), data.get("label"), data.get("group")
         vault, metadata, action = data.get("vault"), data.get("metadata", False), data.get("action")
-        if (entry is None) == (name is None) or entry is not None and vault is None:
+        if sum(value is not None for value in (entry, name, group)) != 1:
             raise ValueError
-        if not metadata and action is None:
+        if vault is None and (entry is not None or group is not None):
+            raise ValueError
+        edits = _edit_permissions(data.get("edits", ()), GROUP_EDITS if group is not None else ENTRY_EDITS)
+        if not metadata and action is None and not edits:
+            raise ValueError
+        if group is not None and (metadata or action is not None):
             raise ValueError
         return cls(uuid_text(vault) if vault is not None else None,
                    uuid_text(entry) if entry is not None else None,
                    label(name) if name is not None else None, metadata,
                    action_id(action) if action is not None else None,
-                   username=data.get("username", False), url=data.get("url", False))
+                   username=data.get("username", False), url=data.get("url", False),
+                   group=uuid_text(group) if group is not None else None, edits=edits)
 
 
 @dataclass(frozen=True)
 class Scope:
     vault: str
-    entry: str
+    entry: str | None
     metadata: bool
     action: str | None
     revision: str | None
     username: bool = False
     url: bool = False
+    group: str | None = None
+    edits: tuple[str, ...] = ()
 
     def __post_init__(self):
         _validate_metadata(self.metadata, self.username, self.url)
+        object.__setattr__(self, "edits", _edit_permissions(self.edits, GROUP_EDITS if self.group else ENTRY_EDITS))
 
     def audit_summary(self):
         operations = [name for name in ("metadata", *OPTIONAL_METADATA_FIELDS) if getattr(self, name)]
         if self.action:
             operations.append(f"action {self.action}")
-        return f"{self.vault}/{self.entry} ({', '.join(operations)})"
+        operations.extend(self.edits)
+        resource = self.entry if self.group is None else f"group {self.group}"
+        return f"{self.vault}/{resource} ({', '.join(operations)})"
 
 
 @dataclass(frozen=True)
@@ -195,6 +237,13 @@ class Grants:
                 session = self.workspace.session(identifier)
                 if not session:
                     continue
+                if item.group is not None:
+                    matches = [group for group in session.groups if group["id"] == item.group]
+                    if len(matches) == 1:
+                        scope = Scope(identifier, None, False, None, None, group=item.group, edits=item.edits)
+                        path = group_location(session.groups, item.group) or (matches[0]["name"] or "Root",)
+                        result.append(Choice(scope, record.name, path, None))
+                    continue
                 for entry in session.entries:
                     if item.entry and entry["id"] != item.entry or item.label and entry["title"] != item.label:
                         continue
@@ -202,7 +251,7 @@ class Grants:
                     if item.action and (binding is None or not binding.action.enabled):
                         continue
                     scope = Scope(identifier, entry["id"], item.metadata, item.action,
-                                  binding.revision if binding else None, username=item.username, url=item.url)
+                                  binding.revision if binding else None, username=item.username, url=item.url, edits=item.edits)
                     result.append(Choice(scope, record.name, (*entry["group_path"], entry["title"]),
                                          binding.action.url if binding else None,
                                          kind=binding.action.kind if binding else None,
@@ -251,14 +300,17 @@ class Grants:
         vault_id, = vault_ids
         vault = self.workspace.registrations.get(vault_id)
         target = {"vault_id": vault_id, "vault": vault.name if vault else None}
-        entry_ids = {item.entry for item in scope}
-        if len(entry_ids) > 1:
-            target["entry_title"] = "Multiple keys"
+        resources = {(item.entry, item.group) for item in scope}
+        if len(resources) > 1:
+            target["entry_title"] = "Multiple resources" if any(group for _, group in resources) else "Multiple keys"
             return target
-        entry_id, = entry_ids
+        (entry_id, group_id), = resources
         session = self.workspace.session(vault_id)
-        folder, title = entry_target_labels(session.entries, entry_id) if session else (None, None)
-        target.update(entry=entry_id, folder=folder, entry_title=title)
+        if group_id is not None:
+            target.update(group_id=group_id, folder=folder_label(group_location(session.groups, group_id)) if session else None)
+        else:
+            folder, title = entry_target_labels(session.entries, entry_id) if session else (None, None)
+            target.update(entry=entry_id, folder=folder, entry_title=title)
         return target
 
     def _change(self, record, action, outcome, *, target_scope=None):

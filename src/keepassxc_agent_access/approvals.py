@@ -18,6 +18,9 @@ class Approval:
     destination: str | None
     expires: float
     answer: str | None = None
+    identity: str = ""
+    project: str = ""
+    requested: float = 0
     ready: Event = field(default_factory=Event)
 
 

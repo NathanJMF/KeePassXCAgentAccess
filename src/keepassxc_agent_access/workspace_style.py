@@ -76,6 +76,16 @@ CSS = b"""
     outline: 2px solid @keeper_accent;
     outline-offset: -3px;
 }
+#keeper-workspace .keeper-usage-allow {
+    color: @keeper_failure;
+    background-color: mix(@keeper_surface, @keeper_failure, 0.12);
+    border-color: alpha(@keeper_failure, 0.42);
+}
+#keeper-workspace .keeper-usage-review {
+    color: @keeper_success;
+    background-color: mix(@keeper_surface, @keeper_success, 0.12);
+    border-color: alpha(@keeper_success, 0.42);
+}
 #keeper-workspace .keeper-quiet {
     background-color: transparent;
     border-color: transparent;
@@ -348,12 +358,14 @@ button.keeper-delete {
 #keeper-activity-detail .keeper-event-caption {
     color: @keeper_muted;
 }
+#keeper-access-review .keeper-event-section,
 #keeper-activity-detail .keeper-event-section {
     border-radius: 9px;
     border: 1px solid @keeper_line;
     background-color: @keeper_canvas;
     padding: 10px 12px;
 }
+#keeper-access-review .keeper-event-section-title,
 #keeper-access-detail .keeper-event-section-title,
 #keeper-activity-detail .keeper-event-section-title {
     font-weight: 800;
