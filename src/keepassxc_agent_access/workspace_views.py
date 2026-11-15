@@ -983,7 +983,7 @@ def activity_execution(row):
 
 
 def activity_dialog(app, row):
-    dialog, body = _dialog(app, "Activity Details", 640, -1)
+    dialog, body = _dialog(app, "Activity Details", 860, 740, fit_monitor=True)
     dialog.set_name("keeper-activity-detail")
     dialog.set_modal(True)
     dialog.add_button("Close", Gtk.ResponseType.CLOSE)
@@ -1010,7 +1010,7 @@ def activity_dialog(app, row):
     scroll.set_shadow_type(Gtk.ShadowType.NONE)
     scroll.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
     scroll.set_propagate_natural_height(True)
-    scroll.set_max_content_height(480)
+    scroll.set_max_content_height(600)
     body.pack_start(scroll, True, True, 0)
 
     add_activity_section(details, "Resource", activity_location(row, app.workspace))

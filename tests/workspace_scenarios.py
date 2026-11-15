@@ -1523,6 +1523,11 @@ def main(root):
                 assert context_menu(table) == ["View Details…"]
 
                 def read_activity(dialog):
+                    wait_for_paint(dialog)
+                    window = app.window.get_window()
+                    workarea = window.get_display().get_monitor_at_window(window).get_workarea()
+                    assert tuple(dialog.get_size()) == (min(860, workarea.width - 48),
+                                                       min(740, workarea.height - 80))
                     labels = [child.get_text() for child in descendants(dialog) if isinstance(child, Gtk.Label)]
                     assert {"Resource", "Vault", "Group", "Key", "second", "Root", fixture[0]["title"]} <= set(labels)
                     assert {f"{action_model} (reported)", f"{action_chat} (reported)"} <= set(labels)

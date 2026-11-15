@@ -991,14 +991,7 @@ class WorkspaceApplication(Gtk.Application):
             self.run_dialog(self._settings_dialog())
 
     def _settings_dialog(self):
-        width, height = 1080, 826
-        if window := self.window.get_window():
-            if monitor := window.get_display().get_monitor_at_window(window):
-                workarea = monitor.get_workarea()
-                # Leave room for the dialog title bar and the desktop shell.
-                width = min(width, max(1, workarea.width - 48))
-                height = min(height, max(1, workarea.height - 80))
-        dialog, body = _dialog(self, "Keeper Settings", width, height)
+        dialog, body = _dialog(self, "Keeper Settings", 1080, 826, fit_monitor=True)
         dialog.set_name("keeper-settings")
         dialog.set_modal(True)
         body.set_border_width(0)

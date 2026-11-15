@@ -39,7 +39,13 @@ def _table(model, titles):
     return table
 
 
-def _dialog(app, title, width=680, height=460):
+def _dialog(app, title, width=680, height=460, *, fit_monitor=False):
+    if fit_monitor and (window := app.window.get_window()):
+        if monitor := window.get_display().get_monitor_at_window(window):
+            workarea = monitor.get_workarea()
+            # Leave room for the dialog title bar and the desktop shell.
+            width = min(width, max(1, workarea.width - 48))
+            height = min(height, max(1, workarea.height - 80))
     dialog = styled(Gtk.Dialog(title=title, transient_for=app.window, destroy_with_parent=True), "keeper-dialog")
     dialog.set_default_size(width, height)
     content = dialog.get_content_area()
