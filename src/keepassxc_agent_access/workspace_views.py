@@ -332,8 +332,8 @@ class AccessIdentityRenderer(Gtk.CellRendererText):
 
 
 class AccessView(Gtk.Box):
-    TITLES = ("Requested", "Last used", "Identity", "Model", "Chat", "Project", "Status")
-    IDENTITY, CHAT = 2, 4
+    TITLES = ("Requested", "Last used", "Identity", "Model", "Project", "Chat", "Status")
+    IDENTITY, PROJECT = 2, 4
     STATUS, RECORD_ID, KIND = 6, 7, 8
     REQUESTED_TIME, LAST_USED_TIME, REVIEW_GROUP = 9, 10, 11
     ROW_KEY, SEPARATOR_OFFSETS = 12, 13
@@ -350,7 +350,7 @@ class AccessView(Gtk.Box):
         self.pack_start(header, False, False, 0)
         self.table, scroll = pane_table(
             Gtk.TreeStore(*([str] * 9), object, object, bool, object, object, object),
-            self.TITLES, (138, 138, 122, 106, 106, 109, 119),
+            self.TITLES, (138, 138, 122, 106, 109, 106, 119),
             status=(self.STATUS, ACCESS_STATES), muted_columns=(0, 1), expand_columns=(2, 3, 4, 5),
             time_columns={0: self.REQUESTED_TIME, 1: self.LAST_USED_TIME},
             text_renderers={self.IDENTITY: AccessIdentityRenderer}, sort_group=self.REVIEW_GROUP,
@@ -378,16 +378,16 @@ class AccessView(Gtk.Box):
             scope = self._scope_rows(grant, snapshots) if other else ()
             rows.append((other, -grant.requested,
                          (table_time(grant.requested), table_time(grant.last_used),
-                          reported(grant.identity), reported(grant.context.model), reported(grant.context.chat),
-                          reported(grant.project), grant.status.capitalize(), grant.id, "grant",
+                          reported(grant.identity), reported(grant.context.model), reported(grant.project),
+                          reported(grant.context.chat), grant.status.capitalize(), grant.id, "grant",
                           grant.requested, grant.last_used, other, ("grant", grant.id), (), scope)))
         for edit in edits:
             state = "Edit pending" if edit.status == "pending" else "Applying edit"
             rows.append((False, -edit.requested,
                          (table_time(edit.requested), "—", reported(edit.identity),
-                          reported(edit.context.model if edit.context else None),
+                          reported(edit.context.model if edit.context else None), reported(edit.project),
                           reported(edit.context.chat if edit.context else None),
-                          reported(edit.project), state, f"{edit.token_id}/{edit.id}", "edit", edit.requested, None,
+                          state, f"{edit.token_id}/{edit.id}", "edit", edit.requested, None,
                           False, ("edit", edit.token_id, edit.id), (), ())))
         rows.sort()
         fill_table(self.table, [columns for _, _, columns in rows], self.ROW_KEY)
@@ -415,7 +415,7 @@ class AccessView(Gtk.Box):
         palette = "keeper_separator_on_light" if light_surface else "keeper_separator_on_dark"
         found, green = context.lookup_color(palette)
         separator_rgb = tuple(round(channel * 65535) for channel in (green.red, green.green, green.blue)) if found else None
-        first_column, chat = table.get_column(0), table.get_column(self.CHAT)
+        first_column, project = table.get_column(0), table.get_column(self.PROJECT)
         for token in table.get_model():
             path = token.path
             if path.compare(last) > 0:
@@ -427,9 +427,9 @@ class AccessView(Gtk.Box):
                 if path.compare(first) < 0 or path.compare(last) > 0:
                     continue
                 line = table.get_cell_area(path, first_column)
-                cell = table.get_cell_area(path, chat)
+                cell = table.get_cell_area(path, project)
                 x = line.x + 6
-                width = cell.x + cell.width - x - 10
+                width = cell.x - x - 10
                 if width <= 0:
                     continue
                 layout = table.create_pango_layout(row[self.IDENTITY])
@@ -466,7 +466,7 @@ class AccessView(Gtk.Box):
             prefix = f"{vault} > {' / '.join(groups) or '—'}"
             label = f"{prefix} > {item.name}"
             separators = tuple(len(part.encode("utf-8")) + 1 for part in (vault, prefix))
-            rows.append(("", "", label, "", "", item.permissions, "", "", "scope", None, None, True,
+            rows.append(("", "", label, "", item.permissions, "", "", "", "scope", None, None, True,
                          (grant.id, *item.key), separators, ()))
         return tuple(rows)
 

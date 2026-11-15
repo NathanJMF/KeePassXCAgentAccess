@@ -965,7 +965,7 @@ def main(root):
                 access_view = app.access_view
                 access_table = access_view.table
                 assert [column.get_title() for column in access_table.get_columns()] == [
-                    "Requested", "Last used", "Identity", "Model", "Chat", "Project", "Status",
+                    "Requested", "Last used", "Identity", "Model", "Project", "Chat", "Status",
                 ]
                 assert [row[access_view.STATUS] for row in access_table.get_model()] == ["Pending", "Pending", "Active"]
                 identity_column = access_view.TITLES.index("Identity")
