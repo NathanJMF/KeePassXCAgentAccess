@@ -53,22 +53,26 @@ class SettingsStore:
             "active_item": settings.active_item,
             "pending_items": list(settings.pending_items),
         }
-        temporary = None
-        try:
-            self.path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-            with tempfile.NamedTemporaryFile(
-                mode="w", encoding="utf-8", dir=self.path.parent, delete=False
-            ) as stream:
-                temporary = Path(stream.name)
-                json.dump(data, stream)
-                stream.flush()
-                os.fsync(stream.fileno())
-            os.replace(temporary, self.path)
-        except OSError:
-            raise SettingsError("Settings could not be saved.") from None
-        finally:
-            if temporary is not None:
-                try:
-                    temporary.unlink(missing_ok=True)
-                except OSError:
-                    pass
+        write_private_json(self.path, data)
+
+
+def write_private_json(path, data):
+    temporary = None
+    try:
+        path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        with tempfile.NamedTemporaryFile(
+            mode="w", encoding="utf-8", dir=path.parent, delete=False
+        ) as stream:
+            temporary = Path(stream.name)
+            json.dump(data, stream)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, path)
+    except OSError:
+        raise SettingsError("Settings could not be saved.") from None
+    finally:
+        if temporary is not None:
+            try:
+                temporary.unlink(missing_ok=True)
+            except OSError:
+                pass

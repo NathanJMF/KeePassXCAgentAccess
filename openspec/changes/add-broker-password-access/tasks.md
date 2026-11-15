@@ -2,8 +2,8 @@
 
 ## 1. Owner settings and activity storage
 
-- [ ] 1.1 Add and validate owner-side settings for the broker endpoint, access mode, per-entry review flags, and HTTPS action bindings. Test defaults, restart persistence, entry rename and move, vault selection changes, invalid destinations, and existing environment configuration.
-- [ ] 1.2 Add local activity storage and automatic session registration. Test OS identity attribution, per-request model and chat changes and provenance, retention, safe timestamps and outcomes, and cleanup of interrupted requests after restart.
+- [x] 1.1 Add and validate owner-side settings for the broker endpoint, access mode, per-entry review flags, and HTTPS action bindings. Test defaults, restart persistence, entry rename and move, vault selection changes, invalid destinations, and existing environment configuration.
+- [x] 1.2 Add local activity storage and automatic session registration. Test OS identity attribution, per-request model and chat changes and provenance, retention, safe timestamps and outcomes, and cleanup of interrupted requests after restart.
 
 ## 2. Broker policy and desktop approvals
 
