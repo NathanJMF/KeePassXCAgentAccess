@@ -49,7 +49,7 @@ Use the exact approved reference, including owner-provided entry IDs for use-onl
 
 ## Request a vault edit
 
-Submit one exact change for the owner to review in Keeper. Use the approved vault and target references. Ask the owner for group UUIDs when needed. Generate a request UUID once and reuse it for an unchanged retry or when checking status.
+Use an active token to submit one exact change and its vault and target references. Keeper sends edits outside the token’s approved edit scope for owner review. For a one-off reviewed edit, submit the edit request directly using the active token. Ask the owner for group UUIDs when needed. Generate a request UUID once and reuse it for an unchanged retry or when checking status.
 
     keepassxc-agent edits request --json <<'JSON'
     {
