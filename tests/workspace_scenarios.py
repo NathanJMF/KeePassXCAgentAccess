@@ -1583,8 +1583,10 @@ def main(root):
                 activity_group(same_scope, "Paused")
                 app.tray_items["pause"].activate()
                 assert app.indicator.get_icon() == "keeper-agent-access-active"
-                assert not settings_switch("auto-approve", "auto_approve_token_changes")
-                assert settings_switch("auto-approve", "auto_approve_tokens", True)
+                assert not settings_switch("auto-approve", "auto_approve_token_changes",
+                                           label="Access tokens - Update permissions")
+                assert settings_switch("auto-approve", "auto_approve_tokens", True,
+                                       label="Access tokens - Create")
                 assert old_access.read().auto_approve_tokens
                 initial_item = {"vault": first, "entry": first_entry, "metadata": True}
                 assert enroll("auto-token", [initial_item]) == {"status": "active"}

@@ -1058,8 +1058,8 @@ class WorkspaceApplication(Gtk.Application):
                                   lambda control, operation=operation: self._set_action_auto_approval(control, operation),
                                   operation)
         for setting, caption in (
-            ("auto_approve_tokens", "New access tokens"),
-            ("auto_approve_token_changes", "Token permission changes"),
+            ("auto_approve_tokens", "Access tokens - Create"),
+            ("auto_approve_token_changes", "Access tokens - Update permissions"),
         ):
             actions.pack_start(Gtk.Separator(), False, False, 0)
             self._settings_switch(actions, caption, getattr(self.workspace, setting),
