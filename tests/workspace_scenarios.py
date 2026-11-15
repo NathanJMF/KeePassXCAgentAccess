@@ -232,12 +232,25 @@ def main(root):
             app.tree.row_activated(path, app.tree.get_column(0))
             return path
 
+        def wait_for_paint(widget):
+            clock = widget.get_frame_clock()
+            frame = clock.get_frame_counter()
+            widget.queue_draw()
+            wait_for(lambda: clock.get_frame_counter() > frame, "Keeper view did not repaint")
+
+        def check_date_widths(table, row, *titles):
+            wait_for_paint(table)
+            for column in table.get_columns():
+                if column.get_title() not in titles:
+                    continue
+                cell, = column.get_cells()
+                column.cell_set_cell_data(row.model, row.iter, False, False)
+                _, required = cell.get_preferred_width(table)
+                assert column.get_width() >= required, (column.get_title(), column.get_width(), required)
+
         def browse_positions(vault, group=""):
             select_tree(vault, group)
-            clock = app.browser.get_frame_clock()
-            frame = clock.get_frame_counter()
-            app.browser.queue_draw()
-            wait_for(lambda: clock.get_frame_counter() > frame, "Vault browser did not repaint")
+            wait_for_paint(app.browser)
             widgets = {
                 "icon": app.browse_icon, "title": app.browse_title, "lock": app.vault_buttons["lock"],
                 "filter": app.entry_search, "table": app.entry_scroll, "columns": app.entries.get_column(0).get_button(),
@@ -740,6 +753,7 @@ def main(root):
                 ]
                 timestamp = re.compile(r"\d{2}:\d{2} · \d{2}-\d{2}-\d{2}")
                 assert all(timestamp.fullmatch(row[index]) for row in app.entries.get_model() for index in (3, 4))
+                check_date_widths(app.entries, app.entries.get_model()[0], "Created", "Modified")
                 app.entry_search.set_text("harbor lab / FIELD")
                 assert [row[ENTRY_ID_COLUMN] for row in app.entries.get_model()] == [nested_entry]
                 app.entry_search.set_text("")
@@ -904,6 +918,7 @@ def main(root):
                 app.access_view.refresh()
                 expanded_row = next(row for row in access_table.get_model() if row[2].startswith("Agent expanded "))
                 assert timestamp.fullmatch(expanded_row[1])
+                check_date_widths(access_table, expanded_row, "Requested", "Last used")
                 check_token_scope(first, second)
                 assert STORED_URL.encode() not in old_activity.path.read_bytes()
                 assert USERNAME.encode() not in old_activity.path.read_bytes()
@@ -1068,6 +1083,7 @@ def main(root):
                 app.activity_view.filters["agent"].set_text("Agent beta")
                 app.activity_view.refresh()
                 assert len(table.get_model()) > 0
+                check_date_widths(table, table.get_model()[0], "Time")
                 allowed = {str(row["id"]) for row in old_activity.rows(agent="Agent beta")}
                 for root in table.get_model():
                     assert timestamp.fullmatch(root[0])

@@ -271,7 +271,7 @@ class WorkspaceApplication(Gtk.Application):
             Gtk.ListStore(str, str, str, str, str, str, str, object, object),
             ("Title", "Username", "URL", "Created", "Modified", "Folder"), (152, 96, 115, 125, 125, 110),
             lead_icon="dialog-password-symbolic", expand_columns=(0, 1, 2, ENTRY_FOLDER_COLUMN),
-            muted_columns=(1, 2, 3, 4, ENTRY_FOLDER_COLUMN), sort_keys={3: 7, 4: 8},
+            muted_columns=(1, 2, 3, 4, ENTRY_FOLDER_COLUMN), time_columns={3: 7, 4: 8},
         )
         self.folder_column = self.entries.get_column(ENTRY_FOLDER_COLUMN)
         created, modified = (self.entries.get_column(index) for index in (3, 4))

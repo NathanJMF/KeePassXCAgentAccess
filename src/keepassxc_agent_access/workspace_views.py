@@ -137,9 +137,10 @@ def empty_state(icon, text):
 
 
 def pane_table(model, titles, widths, *, lead_icon=None, status=None, expand_columns=(1, 2), muted_columns=(),
-               sort_keys=None, sort_group=None, replace_rows=_replace_rows):
+               time_columns=None, sort_group=None, replace_rows=_replace_rows):
+    time_columns = time_columns or {}
     table = styled(Gtk.TreeView(model=model), "keeper-table")
-    table.keeper_sort = TableSort(sort_keys, sort_group, replace_rows)
+    table.keeper_sort = TableSort(time_columns, sort_group, replace_rows)
     table.set_grid_lines(Gtk.TreeViewGridLines.HORIZONTAL)
     for index, title in enumerate(titles):
         column = Gtk.TreeViewColumn(title)
@@ -148,7 +149,8 @@ def pane_table(model, titles, widths, *, lead_icon=None, status=None, expand_col
         column.set_resizable(True)
         column.set_expand(index in expand_columns)
         column.set_min_width(widths[index])
-        text = Gtk.CellRendererText(xpad=10, ypad=9, ellipsize=Pango.EllipsizeMode.END)
+        ellipsize = Pango.EllipsizeMode.NONE if index in time_columns else Pango.EllipsizeMode.END
+        text = Gtk.CellRendererText(xpad=10, ypad=9, ellipsize=ellipsize)
         colored = status is not None and index == status[0]
         if colored or (index == 0 and lead_icon):
             icon = Gtk.CellRendererPixbuf(xpad=5, stock_size=Gtk.IconSize.MENU)
@@ -312,7 +314,7 @@ class AccessView(Gtk.Box):
         self.table, scroll = pane_table(
             Gtk.ListStore(*([str] * 7), object, object, bool), self.TITLES, (138, 138, 122, 122, 119),
             status=(self.STATUS, ACCESS_STATES), muted_columns=(0, 1), expand_columns=(2, 3),
-            sort_keys={0: self.REQUESTED_TIME, 1: self.LAST_USED_TIME}, sort_group=self.REVIEW_GROUP,
+            time_columns={0: self.REQUESTED_TIME, 1: self.LAST_USED_TIME}, sort_group=self.REVIEW_GROUP,
         )
         self.table.connect("row-activated", self._open)
         attach_row_context(self.table, self._context, destructive_labels=(self.REMOVE,))
@@ -672,7 +674,7 @@ class ActivityView(Gtk.Box):
         self.table, scroll = pane_table(
             Gtk.TreeStore(*([str] * (self.RECORD_ID + 1)), object, object, object), self.TITLES,
             (144, 64, 60, 115, 78, 86, 84, 144), status=(7, ACTIVITY_STATES),
-            expand_columns=(1, 2, 3, 4, 5, 6), muted_columns=(0,), sort_keys={0: self.TIME},
+            expand_columns=(1, 2, 3, 4, 5, 6), muted_columns=(0,), time_columns={0: self.TIME},
             replace_rows=replace_activity_rows,
         )
         self.table.set_enable_tree_lines(True)
