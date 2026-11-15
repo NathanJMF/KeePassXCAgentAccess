@@ -16,7 +16,7 @@ Run `./install-launcher` from the owner-controlled checkout to add **Keeper** to
 
 1. Select **Add vault…** and choose an existing KeePass file. The picker opens the Keeper folder in your Documents directory when that folder exists. Enter its password and select its key file if required.
 2. Select **Remember on this device** to save the password in the system keyring, then select **Verify and save**.
-3. Select a vault in the sidebar to see all its entries and their folder paths. Expand it and select a folder to browse the entries directly inside. Double-click an entry for details and credential actions.
+3. Select a vault in the sidebar to see all its entries and their folder paths. Expand it and select a folder to browse the entries directly inside. The entry table includes its Created and Modified dates. Double-click an entry for details and credential actions.
 4. Use **Lock vault** to close the selected vault independently. To check saved unlock, lock that vault and select **Unlock**.
 
 Use **Enter password…** to unlock manually or update a remembered password after rotating it in KeePassXC. **Forget password** deletes the app's saved credential. **Relink** checks the last verified contents of a moved vault before retaining its local identity and token scopes. **Remove…** removes the registration and its saved credential while keeping the database file.
@@ -25,7 +25,7 @@ Existing installations retain their registered vault, keyring reference, broker 
 
 ## Edit entries and groups
 
-Open an unlocked vault and use **New** to create an entry or group. Double-click an entry to edit it, move it to another group, or send it to the recycle bin. The vault options menu provides the same controls for the selected group. An entry edit keeps its current password until you select **Replace saved password**.
+Open an unlocked vault and use **New** to create an entry or group. Double-click an entry to edit it, move it to another group, or send it to the recycle bin. Right-click a vault, folder or entry for its actions. With the row selected, you can also press **Shift+F10**. Click a table heading to cycle through ascending, descending and default order. The arrow marks the active sort. An entry edit keeps its current password until you select **Replace saved password**.
 
 Keeper checks for external changes before replacing the encrypted file. If Keeper detects an external save, unlock that vault again to load the latest version before editing. Older KDBX formats and files you cannot write remain available for browsing. Recycling requires the vault's recycle bin to be enabled.
 
@@ -74,7 +74,7 @@ Credential use requires an enabled action on the selected entry. **HTTPS Basic-a
 
 An active runner token can submit one edit request with a new UUID and exact vault, entry or group references. In **Access**, open the pending edit to see its target, destination, and changed fields. Choose **Approve and apply** or **Deny**. If agent access is paused, you can explicitly resume it from the review first. Keeper requires a fresh request if the reviewed vault state changes.
 
-Use **Copy group reference** in the vault menu or **Copy entry reference** in entry details to give the agent the exact target.
+Right-click a folder and choose **Copy group reference**, or right-click an entry and choose **Copy entry reference**, to give the agent the exact target.
 
 The CLI submits proposals with `keepassxc-agent edits request --json` and checks their status with `keepassxc-agent edits status --request REQUEST_UUID --json`. The stdio runner offers `request_edit` and `edit_status`. See the KeePass skill for the request format. Reuse the same UUID for transport retries. Each approval applies to a single change.
 

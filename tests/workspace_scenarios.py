@@ -24,7 +24,9 @@ from keepassxc_agent_access.settings import SettingsStore
 from keepassxc_agent_access.setup import VaultSetup
 from keepassxc_agent_access.tray import GLib, Gtk
 from keepassxc_agent_access.edit_request_view import OPERATION_LABELS
-from keepassxc_agent_access.workspace_app import ENTRY_ID_COLUMN, WorkspaceApplication
+from keepassxc_agent_access.workspace_app import (
+    ENTRY_FOLDER_COLUMN, ENTRY_ID_COLUMN, Gdk, WorkspaceApplication,
+)
 from keepassxc_agent_access.workspace_editor import edit_entry, recycle_entry
 from keepassxc_agent_access.keyring import SystemKeyring
 from tls_fixture import AUTHORIZATION, PASSWORD, USERNAME, tls_service
@@ -184,6 +186,34 @@ def main(root):
 
         def use(profile, vault, entry=first_entry, expected=0):
             return invoke(profile, "use", "--vault", vault, "--entry", entry, "--action", "check", expected=expected)
+
+        def context_menu(tree, path=None):
+            previous = set(Gtk.Menu.get_for_attach_widget(tree) or ())
+            if path is None:
+                assert tree.emit("popup-menu")
+            else:
+                column = next(item for item in tree.get_columns() if item.get_visible())
+                def row_position():
+                    rect = tree.get_cell_area(path, column)
+                    x = rect.x + max(1, rect.width // 2)
+                    y = rect.y + max(1, rect.height // 2)
+                    hit = tree.get_path_at_pos(x, y)
+                    return (x, y) if hit and hit[0] == path else None
+
+                wait_for(row_position, "Entry row was not laid out")
+                x, y = row_position()
+                event = Gdk.Event.new(Gdk.EventType.BUTTON_PRESS)
+                event.button.window = tree.get_bin_window()
+                event.button.button = Gdk.BUTTON_SECONDARY
+                event.button.x = x
+                event.button.y = y
+                event.set_device(tree.get_display().get_default_seat().get_pointer())
+                assert tree.emit("button-press-event", event)
+            menu, = set(Gtk.Menu.get_for_attach_widget(tree) or ()) - previous
+            labels = [item.get_label() for item in menu.get_children() if not isinstance(item, Gtk.SeparatorMenuItem)]
+            menu.popdown()
+            menu.destroy()
+            return labels
 
         def open_entry(identifier):
             table = app.entries
@@ -388,18 +418,45 @@ def main(root):
                 subprocess.run(["setfacl", "-m", f"u:{uid}:rw", endpoint], check=True)
                 verify_isolation(target)
                 assert "token is required" in invoke(None, "entries", "list", expected=1)
+                select_tree(first)
+                locked_actions = context_menu(app.tree)
+                assert "Unlock" in locked_actions and "Relink vault…" in locked_actions
+                assert "Lock vault" not in locked_actions and "New entry…" not in locked_actions
                 app.vault_buttons["unlock"].clicked()
                 wait_for(lambda: not app.busy and app.workspace.session(first), "Migrated keyring did not unlock")
                 assert app.workspace.registrations[first].bindings[0].action == imported
-                assert {row[ENTRY_ID_COLUMN]: row[3] for row in app.entries.get_model()} == {
+                assert {row[ENTRY_ID_COLUMN]: row[ENTRY_FOLDER_COLUMN] for row in app.entries.get_model()} == {
                     first_entry: "Root", direct_entry: "Harbor Lab", nested_entry: "Harbor Lab / Field Notes",
                 }
                 assert [column.get_title() for column in app.entries.get_columns() if column.get_visible()] == [
-                    "Folder", "Title", "Username", "URL",
+                    "Folder", "Title", "Username", "URL", "Created", "Modified",
                 ]
+                assert all(row[3] != "—" and row[4] != "—" for row in app.entries.get_model())
                 app.entry_search.set_text("harbor lab / FIELD")
                 assert [row[ENTRY_ID_COLUMN] for row in app.entries.get_model()] == [nested_entry]
                 app.entry_search.set_text("")
+                assert "Copy root group reference" in context_menu(app.tree)
+                assert not any(widget.get_tooltip_text() == "Vault options" for widget in descendants(app.window))
+                entry_table = app.entries
+                first_path = next(row.path for row in entry_table.get_model() if row[ENTRY_ID_COLUMN] == first_entry)
+                nested_path = next(row.path for row in entry_table.get_model() if row[ENTRY_ID_COLUMN] == nested_entry)
+                entry_table.get_selection().select_path(first_path)
+                assert context_menu(entry_table, nested_path) == [
+                    "View entry details…", "Edit entry…", "Copy entry reference", "Move entry to recycle bin…",
+                ]
+                entry_model, selected = entry_table.get_selection().get_selected()
+                assert entry_model[selected][ENTRY_ID_COLUMN] == nested_entry
+
+                title_column = next(column for column in entry_table.get_columns() if column.get_title() == "Title")
+                original = [tuple(row) for row in entry_table.get_model()]
+                for direction in (Gtk.SortType.ASCENDING, Gtk.SortType.DESCENDING):
+                    title_column.clicked()
+                    assert title_column.get_sort_indicator() and title_column.get_sort_order() == direction
+                    expected = sorted(original, key=lambda row: row[0].casefold(), reverse=direction == Gtk.SortType.DESCENDING)
+                    assert [tuple(row) for row in entry_table.get_model()] == expected
+                title_column.clicked()
+                assert not title_column.get_sort_indicator()
+                assert [tuple(row) for row in entry_table.get_model()] == original
 
                 def setup_secondary(dialog):
                     assert dialog.database.set_filename(str(second_path))
@@ -447,9 +504,12 @@ def main(root):
                 outer = next(row["id"] for row in first_groups if row["name"] == "Harbor Lab")
                 inner = next(row["id"] for row in first_groups if row["name"] == "Field Notes")
                 select_tree(first, outer)
+                assert context_menu(app.tree) == [
+                    "New entry…", "New group…", "Edit group…", "Copy group reference", "Move group to recycle bin…",
+                ]
                 assert [row[ENTRY_ID_COLUMN] for row in app.entries.get_model()] == [direct_entry]
                 assert [column.get_title() for column in app.entries.get_columns() if column.get_visible()] == [
-                    "Title", "Username", "URL",
+                    "Title", "Username", "URL", "Created", "Modified",
                 ]
                 selected_path = select_tree(first, inner)
                 assert [row[ENTRY_ID_COLUMN] for row in app.entries.get_model()] == [nested_entry]
@@ -602,6 +662,7 @@ def main(root):
                 assert row[app.activity_view.TITLES.index("Vault")] == "second"
                 assert row[app.activity_view.TITLES.index("Target")] == "Root / " + fixture[0]["title"]
                 activity_table.get_selection().select_path(path)
+                assert context_menu(activity_table) == ["View details…"]
 
                 def read_activity(dialog):
                     labels = {child.get_text() for child in descendants(dialog) if isinstance(child, Gtk.Label)}

@@ -16,8 +16,11 @@ def reported(value):
     return f"{value} (reported)" if value else "—"
 
 
-def table_time(timestamp):
-    return datetime.fromtimestamp(timestamp).astimezone().strftime("%b %d · %H:%M:%S") if timestamp else "—"
+def table_time(timestamp, *, include_year=False):
+    if timestamp is None:
+        return "—"
+    pattern = "%Y-%m-%d · %H:%M" if include_year else "%b %d · %H:%M:%S"
+    return datetime.fromtimestamp(timestamp).astimezone().strftime(pattern)
 
 
 def add_label(container, text):
@@ -40,6 +43,15 @@ def selected_key(table, column):
 
 
 def fill_table(table, rows, key_column):
+    sorting = table.keeper_sort
+    rows = list(rows)
+    if sorting.rows != rows or sorting.key_column != key_column:
+        sorting.rows = rows
+        sorting.key_column = key_column
+        _replace_rows(table, sorting.visible_rows(), key_column)
+
+
+def _replace_rows(table, rows, key_column):
     selected = selected_key(table, key_column)
     model = table.get_model()
     if list(map(tuple, model)) == rows:
@@ -49,6 +61,61 @@ def fill_table(table, rows, key_column):
         row = model.append(values)
         if values[key_column] == selected:
             table.get_selection().select_iter(row)
+
+
+def sorted_table_rows(rows, key_column, descending=False, group_column=None):
+    batches = {}
+    for row in rows:
+        group = row[group_column] if group_column is not None else None
+        known, blank = batches.setdefault(group, ([], []))
+        value = row[key_column]
+        if isinstance(value, str):
+            value = value.strip().casefold()
+        if value is None or value in ("", "—"):
+            blank.append(row)
+        else:
+            known.append((value, row))
+
+    result = []
+    for known, blank in batches.values():
+        known.sort(key=lambda item: item[0], reverse=descending)
+        result.extend(row for _, row in known)
+        result.extend(blank)
+    return result
+
+
+class TableSort:
+    def __init__(self, sort_keys, sort_group):
+        self.sort_keys = sort_keys or {}
+        self.sort_group = sort_group
+        self.rows = []
+        self.key_column = None
+        self.active = None
+        self.sort_column = None
+        self.descending = False
+
+    def visible_rows(self):
+        if self.sort_column is None:
+            return self.rows
+        return sorted_table_rows(self.rows, self.sort_column, self.descending, self.sort_group)
+
+    def click(self, column, table, model_index):
+        if column != self.active:
+            self.active = column
+            self.sort_column = self.sort_keys.get(model_index, model_index)
+            self.descending = False
+        elif not self.descending:
+            self.descending = True
+        else:
+            self.active = None
+            self.sort_column = None
+            self.descending = False
+        for header in table.get_columns():
+            header.set_sort_indicator(header == self.active)
+        if self.active is not None:
+            self.active.set_sort_order(Gtk.SortType.DESCENDING if self.descending else Gtk.SortType.ASCENDING)
+        if self.key_column is not None:
+            _replace_rows(table, self.visible_rows(), self.key_column)
 
 
 def section_heading(title, icon):
@@ -75,11 +142,15 @@ def empty_state(icon, text):
     return block, label, image
 
 
-def pane_table(model, titles, widths, *, lead_icon=None, status=None, expand_columns=(1, 2), muted_columns=()):
+def pane_table(model, titles, widths, *, lead_icon=None, status=None, expand_columns=(1, 2), muted_columns=(),
+               sort_keys=None, sort_group=None):
     table = styled(Gtk.TreeView(model=model), "keeper-table")
+    table.keeper_sort = TableSort(sort_keys, sort_group)
     table.set_grid_lines(Gtk.TreeViewGridLines.HORIZONTAL)
     for index, title in enumerate(titles):
         column = Gtk.TreeViewColumn(title)
+        column.set_clickable(True)
+        column.connect("clicked", table.keeper_sort.click, table, index)
         column.set_resizable(True)
         column.set_expand(index in expand_columns)
         column.set_min_width(widths[index])
@@ -158,6 +229,7 @@ def metadata_labels(permission):
 
 class AccessView(Gtk.Box):
     TITLES = ("Requested", "Identity", "Project", "Status", "Last used")
+    REQUESTED_TIME, LAST_USED_TIME, REVIEW_GROUP = 7, 8, 9
 
     def __init__(self, app):
         super().__init__(orientation=Gtk.Orientation.VERTICAL, spacing=18)
@@ -168,8 +240,11 @@ class AccessView(Gtk.Box):
         self.review_button = button(tools, "Review or manage", self._open, icon="view-reveal-symbolic")
         self.review_button.set_sensitive(False)
         self.pack_start(header, False, False, 0)
-        self.table, scroll = pane_table(Gtk.ListStore(*([str] * 7)), self.TITLES,
-                                       (138, 122, 122, 119, 136), status=(3, ACCESS_STATES), muted_columns=(0, 4))
+        self.table, scroll = pane_table(
+            Gtk.ListStore(*([str] * 7), object, object, bool), self.TITLES, (138, 122, 122, 119, 136),
+            status=(3, ACCESS_STATES), muted_columns=(0, 4),
+            sort_keys={0: self.REQUESTED_TIME, 4: self.LAST_USED_TIME}, sort_group=self.REVIEW_GROUP,
+        )
         self.table.connect("row-activated", self._open)
         self.table.get_selection().connect("changed", lambda *_: self.review_button.set_sensitive(
             selected_key(self.table, 5) is not None))
@@ -181,23 +256,28 @@ class AccessView(Gtk.Box):
         edits = self.app.pending_edits()
         rows = []
         for grant in grants:
-            rows.append((grant.status != "pending", -grant.requested,
+            other = grant.status != "pending"
+            rows.append((other, -grant.requested,
                          (table_time(grant.requested), reported(grant.identity), reported(grant.project),
-                          grant.status.capitalize(), table_time(grant.last_used), grant.id, "grant")))
+                          grant.status.capitalize(), table_time(grant.last_used), grant.id, "grant",
+                          grant.requested, grant.last_used, other)))
         for edit in edits:
             state = "Edit pending" if edit.status == "pending" else "Applying edit"
             rows.append((False, -edit.requested,
                          (table_time(edit.requested), reported(edit.identity), reported(edit.project),
-                          state, "—", f"{edit.token_id}/{edit.id}", "edit")))
+                          state, "—", f"{edit.token_id}/{edit.id}", "edit", edit.requested, None, False)))
         rows.sort()
         fill_table(self.table, [columns for _, _, columns in rows], 5)
         self.empty.set_visible(not rows)
 
     def _open(self, *_):
         model, selected = self.table.get_selection().get_selected()
-        if selected is None or self.app.desktop.locked:
+        if selected is not None:
+            self.open_record(*model[selected][5:7])
+
+    def open_record(self, identifier, kind):
+        if self.app.desktop.locked:
             return
-        identifier, kind = model[selected][5:7]
         if kind == "edit":
             token_id, request_id = identifier.split("/")
             record = next((edit for edit in self.app.pending_edits()
@@ -385,7 +465,7 @@ def activity_edit_fields(row):
 
 
 def activity_execution(row):
-    requested, decided, completed = (_time(row[key]) if row.get(key) else None
+    requested, decided, completed = (_time(row[key]) if row.get(key) is not None else None
                                       for key in ("requested", "decided", "completed"))
     fields = activity_edit_fields(row)
     facts = (
@@ -454,6 +534,7 @@ def activity_dialog(app, row):
 class ActivityView(Gtk.Box):
     TITLES = ("Time", "Model", "Chat", "Action", "Vault", "Target", "Outcome")
     RECORD_ID = len(TITLES)
+    REQUESTED_TIME = RECORD_ID + 1
 
     def __init__(self, app):
         super().__init__(orientation=Gtk.Orientation.VERTICAL, spacing=18)
@@ -478,9 +559,11 @@ class ActivityView(Gtk.Box):
         button(tools, "Filters", self._toggle_filters, icon="system-search-symbolic")
         self.pack_start(header, False, False, 0)
         self.pack_start(self.filter_panel, False, False, 0)
-        self.table, scroll = pane_table(Gtk.ListStore(*([str] * (self.RECORD_ID + 1))), self.TITLES,
-                                       (140, 70, 68, 104, 75, 174, 147), status=(6, ACTIVITY_STATES),
-                                       expand_columns=(1, 2, 3, 4, 5), muted_columns=(0,))
+        self.table, scroll = pane_table(
+            Gtk.ListStore(*([str] * (self.RECORD_ID + 1)), object), self.TITLES,
+            (140, 70, 68, 104, 75, 174, 147), status=(6, ACTIVITY_STATES),
+            expand_columns=(1, 2, 3, 4, 5), muted_columns=(0,), sort_keys={0: self.REQUESTED_TIME},
+        )
         self.table.connect("row-activated", self._details)
         self.empty, self.empty_label, _ = empty_state("document-open-recent-symbolic", "No activity recorded")
         self.pack_start(table_card(scroll, self.empty), True, True, 0)
@@ -504,7 +587,7 @@ class ActivityView(Gtk.Box):
         self.rows = {str(row["id"]): row for row in rows}
         fill_table(self.table, [
             (table_time(row["requested"]), reported(row["model"]), reported(row["chat"]), row["action"],
-             row.get("vault") or "—", activity_target(row), row["outcome"], str(row["id"]))
+             row.get("vault") or "—", activity_target(row), row["outcome"], str(row["id"]), row["requested"])
             for row in rows
         ], self.RECORD_ID)
         filtered = any(field.get_text() for field in self.filters.values())
@@ -512,7 +595,10 @@ class ActivityView(Gtk.Box):
         self.empty.set_visible(not rows)
 
     def _details(self, *_):
-        row = self.rows.get(selected_key(self.table, self.RECORD_ID))
+        self.open_record(selected_key(self.table, self.RECORD_ID))
+
+    def open_record(self, identifier):
+        row = self.rows.get(identifier)
         if row and not self.app.desktop.locked:
             self.app.run_dialog(activity_dialog(self.app, row))
 
@@ -531,6 +617,7 @@ def entry_details(app, vault, entry):
                            "Edit action", Gtk.ResponseType.ACCEPT, "Remove action", Gtk.ResponseType.REJECT)
         add_label(body, f"{record.name} · {' / '.join(entry['group_path']) or 'Root'}\nEntry  {entry['id']}")
         add_label(body, f"Username  {entry['username'] or '—'}\nURL  {entry['url'] or '—'}")
+        add_label(body, f"Created  {_time(entry.get('created'))}\nModified  {_time(entry.get('modified'))}")
         entry_actions = Gtk.Box(spacing=8)
         button(entry_actions, "Copy entry reference", lambda *_: app.copy_reference(vault, "entry", entry["id"]))
         button(entry_actions, "Edit entry…", lambda *_: dialog.response(EDIT_ENTRY_RESPONSE))

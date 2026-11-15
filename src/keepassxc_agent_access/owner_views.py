@@ -382,4 +382,4 @@ def _entry_name(row):
 
 
 def _time(timestamp):
-    return datetime.fromtimestamp(timestamp).astimezone().strftime("%Y-%m-%d %H:%M:%S %Z") if timestamp else "—"
+    return datetime.fromtimestamp(timestamp).astimezone().strftime("%Y-%m-%d %H:%M:%S %Z") if timestamp is not None else "—"

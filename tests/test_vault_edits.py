@@ -1,3 +1,4 @@
+from datetime import datetime, timezone
 import errno
 from hashlib import sha256
 import os
@@ -30,6 +31,8 @@ class VaultEditsTests(unittest.TestCase):
             self.fixture.root_group, "Fixture", "previous username", "Synthetic original password",
             notes="Preserve notes",
         )
+        self.entry.ctime = datetime(2004, 6, 1, tzinfo=timezone.utc)
+        self.entry.mtime = datetime(2008, 2, 1, tzinfo=timezone.utc)
         self.fixture.save()
         self.path.chmod(0o640)
         self.workspace = Workspace(self.root, None)
@@ -57,6 +60,9 @@ class VaultEditsTests(unittest.TestCase):
         self.assertEqual(rows, [{"id": entry, "title": "Edited", "group_path": ["Relocated"]}])
         owner = {row["id"]: row for row in session.entries}
         self.assertEqual(owner[entry]["username"], "fixture-account")
+        self.assertEqual(owner[entry]["created"], original.entries[0]["created"])
+        self.assertGreater(owner[entry]["modified"], original.entries[0]["modified"])
+        self.assertEqual(owner[new_entry]["created"], owner[new_entry]["modified"])
         self.assertTrue(all("password" not in row for row in session.entries))
 
         self.workspace.remove_entry(vault, new_entry)

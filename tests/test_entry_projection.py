@@ -1,5 +1,6 @@
 import json
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timezone
 from pathlib import Path
 from threading import Event
 from tempfile import TemporaryDirectory
@@ -61,6 +62,32 @@ class EntryProjectionTests(TestCase):
         self.vault.save()
         expected[2].update(title="Renamed", group_path=["Archive"])
         self.assertCountEqual(json.loads(self.listing())["entries"], expected)
+
+    def test_owner_timestamps_preserve_valid_dates_and_skip_malformed_values(self):
+        root = self.vault.root_group
+        complete = self.vault.add_entry(root, "Dated", "", "")
+        old = datetime(1953, 4, 10, 14, 30, tzinfo=timezone.utc)
+        current = datetime(2025, 6, 2, 15, 45, tzinfo=timezone.utc)
+        complete.ctime, complete.mtime = old, current
+        partial = self.vault.add_entry(root, "Partial", "", "")
+        partial.mtime = current
+        partial._element.find("Times").remove(partial._element.find("Times/CreationTime"))
+        malformed = self.vault.add_entry(root, "Malformed", "", "")
+        malformed._element.find("Times/CreationTime").text = "QkFCQg=="
+        malformed._element.find("Times/LastModificationTime").text = "//////////8="
+        self.vault.save()
+
+        with open_vault(VaultTarget(self.database), self.password, Event()) as session:
+            rows = {row["title"]: row for row in session.owner_snapshot()["entries"]}
+            self.assertEqual((rows["Dated"]["created"], rows["Dated"]["modified"]),
+                             (old.timestamp(), current.timestamp()))
+            self.assertIsInstance(rows["Dated"]["created"], float)
+            self.assertEqual((rows["Partial"]["created"], rows["Partial"]["modified"]),
+                             (None, current.timestamp()))
+            self.assertEqual((rows["Malformed"]["created"], rows["Malformed"]["modified"]), (None, None))
+            self.assertEqual(set(session.entry(str(complete.uuid))), {"id", "title", "group_path"})
+            self.assertTrue(all(set(row) == {"id", "title", "group_path"}
+                                for row in json.loads(session.list_entries())["entries"]))
 
     def test_empty_vault(self):
         self.assertEqual(json.loads(self.listing()), {"entries": []})

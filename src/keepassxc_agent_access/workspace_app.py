@@ -26,15 +26,17 @@ from .settings import SettingsError, SettingsStore
 from .tray import APP_ID, APP_TITLE, SetupDialog, password_entry
 from .vault import UnlockCancelled, VaultError
 from .workspace import Workspace
-from .workspace_editor import edit_entry, edit_group, recycle_group
+from .workspace_context import attach_row_context
+from .workspace_editor import edit_entry, edit_group, recycle_entry, recycle_group
 from .workspace_style import install_style, styled
 from .workspace_views import (
-    AccessView, ActivityView, add_label, button, empty_state, entry_details, fill_table, pane_table, section_heading,
+    AccessView, ActivityView, add_label, button, empty_state, entry_details, fill_table, pane_table, section_heading, table_time,
 )
 
 
 OWNER_ERRORS = (ActivityError, KeyringError, ListingError, OSError, SettingsError, ValueError, VaultError)
-ENTRY_ID_COLUMN = 4
+ENTRY_FOLDER_COLUMN = 5
+ENTRY_ID_COLUMN = 6
 
 
 class WorkspaceApplication(Gtk.Application):
@@ -129,6 +131,8 @@ class WorkspaceApplication(Gtk.Application):
 
         self.access_view = AccessView(self)
         self.activity_view = ActivityView(self)
+        attach_row_context(self.access_view.table, self._access_context)
+        attach_row_context(self.activity_view.table, self._activity_context)
         self.stack.add_named(self.access_view, "access")
         self.stack.add_named(self.activity_view, "activity")
         footer = styled(Gtk.Box(spacing=8), "keeper-footer")
@@ -204,6 +208,7 @@ class WorkspaceApplication(Gtk.Application):
         self.tree.get_selection().connect("changed", self._select)
         self.tree.connect("button-release-event", self._tree_click)
         self.tree.connect("row-activated", lambda *_: self._select(self.tree.get_selection()))
+        attach_row_context(self.tree, self._vault_context)
         scroll = _scroll(self.tree)
         scroll.set_shadow_type(Gtk.ShadowType.NONE)
         scroll.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
@@ -245,36 +250,6 @@ class WorkspaceApplication(Gtk.Application):
         self.new_item.set_popup(new_menu)
         self.vault_tools.pack_start(self.new_item, False, False, 0)
 
-        self.vault_menu = Gtk.MenuButton()
-        self.vault_menu.set_image(Gtk.Image.new_from_icon_name("view-more-symbolic", Gtk.IconSize.BUTTON))
-        self.vault_menu.set_tooltip_text("Vault options")
-        self.vault_menu.get_accessible().set_name("Vault options")
-        menu = Gtk.Menu()
-        for name, title, handler in (
-            ("rename", "Rename…", self._rename),
-            ("relink", "Relink…", lambda *_: self._configure(self._record())),
-            ("forget", "Forget password", self._forget),
-            ("remove", "Remove…", self._remove),
-        ):
-            item = Gtk.MenuItem(label=title)
-            item.connect("activate", handler)
-            menu.append(item)
-            self.vault_buttons[name] = item
-        self.group_reference = Gtk.MenuItem(label="Copy group reference")
-        self.group_reference.connect("activate", self._copy_group_reference)
-        menu.append(self.group_reference)
-        self.group_separator = Gtk.SeparatorMenuItem()
-        menu.append(self.group_separator)
-        self.group_actions = []
-        for label, handler in (("Edit group…", self._edit_group), ("Move group to recycle bin…", self._recycle_group)):
-            item = Gtk.MenuItem(label=label)
-            item.connect("activate", handler)
-            menu.append(item)
-            self.group_actions.append(item)
-        menu.show_all()
-        self.vault_menu.set_popup(menu)
-        self.vault_tools.pack_end(self.vault_menu, False, False, 0)
-
         card = styled(Gtk.Box(orientation=Gtk.Orientation.VERTICAL), "keeper-card")
         self.browser.pack_start(card, True, True, 0)
         self.entry_tools = styled(Gtk.Box(), "keeper-card-toolbar")
@@ -285,12 +260,15 @@ class WorkspaceApplication(Gtk.Application):
         card.pack_start(self.entry_tools, False, False, 0)
 
         self.entries, self.entry_scroll = pane_table(
-            Gtk.ListStore(str, str, str, str, str), ("Title", "Username", "URL", "Folder"), (165, 110, 125, 128),
-            lead_icon="dialog-password-symbolic", expand_columns=(0, 1, 2, 3), muted_columns=(1, 2, 3),
+            Gtk.ListStore(str, str, str, str, str, str, str, object, object),
+            ("Title", "Username", "URL", "Created", "Modified", "Folder"), (152, 96, 115, 125, 125, 110),
+            lead_icon="dialog-password-symbolic", expand_columns=(0, 1, 2, ENTRY_FOLDER_COLUMN),
+            muted_columns=(1, 2, 3, 4, ENTRY_FOLDER_COLUMN), sort_keys={3: 7, 4: 8},
         )
-        self.folder_column = self.entries.get_column(3)
+        self.folder_column = self.entries.get_column(ENTRY_FOLDER_COLUMN)
         self.entries.move_column_after(self.folder_column, None)
         self.entries.connect("row-activated", self._entry)
+        attach_row_context(self.entries, self._entry_context)
         card.pack_start(self.entry_scroll, True, True, 0)
         self.empty_state, self.empty_entries, self.empty_icon = empty_state("drive-harddisk-symbolic", "")
         area = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, valign=Gtk.Align.FILL, halign=Gtk.Align.FILL)
@@ -532,24 +510,95 @@ class WorkspaceApplication(Gtk.Application):
         self.entry_count.set_text(f"{len(matches)} of {count}" if session and len(matches) != total
                                   else count if session else "")
         self.entry_rows = {row["id"]: row for row, _ in matches}
-        values = [(row["title"] or "(Untitled entry)", row["username"], row["url"], folder, row["id"])
-                  for row, folder in matches]
+        values = []
+        for row, folder in matches:
+            created, modified = row.get("created"), row.get("modified")
+            values.append((row["title"] or "(Untitled entry)", row["username"], row["url"],
+                           table_time(created, include_year=True), table_time(modified, include_year=True),
+                           folder, row["id"], created, modified))
         fill_table(self.entries, values, ENTRY_ID_COLUMN)
         self.new_item.set_visible(bool(session))
         self.new_item.set_sensitive(not self.busy and not self.desktop.locked)
-        self.group_reference.set_visible(bool(session))
-        for item in (self.group_separator, *self.group_actions):
-            item.set_visible(bool(session and group_id))
-        self.vault_menu.set_visible(bool(record))
-        self.vault_menu.set_sensitive(not self.busy and not self.desktop.locked)
         for key, control in self.vault_buttons.items():
             visible = {
                 "unlock": bool(record and record.item and not session), "manual": bool(record and not session),
-                "lock": bool(session), "rename": bool(record), "relink": bool(record),
-                "forget": bool(record and record.item), "remove": bool(record),
+                "lock": bool(session),
             }[key]
             control.set_visible(visible)
             control.set_sensitive(not self.busy and not self.desktop.locked)
+
+    def _actions_for(self, target, sections):
+        def invoke(action):
+            if self.selection == target and not self.busy and not self.desktop.locked:
+                action()
+
+        return [[(label, lambda action=action: invoke(action)) for label, action in section] for section in sections]
+
+    def _vault_context(self, row):
+        target = tuple(row[1:3])
+        if self.busy or self.desktop.locked or not self.workspace:
+            return []
+        self._select(self.tree.get_selection())
+        vault, group = target
+        record = self.workspace.registrations.get(vault)
+        if record is None:
+            return []
+        session = self.workspace.owner_session(vault)
+        create = [("New entry…", self._new_entry), ("New group…", self._new_group)]
+        if group:
+            if not session:
+                return []
+            return self._actions_for(target, [
+                create,
+                [("Edit group…", self._edit_group), ("Copy group reference", self._copy_group_reference)],
+                [("Move group to recycle bin…", self._recycle_group)],
+            ])
+        if session:
+            session_actions = [("Lock vault", self._lock_selected)]
+        else:
+            session_actions = [("Unlock", lambda: self._unlock(use_saved=True))] if record.item else []
+            session_actions.append(("Enter password…", self._unlock))
+        management = [("Rename vault…", self._rename), ("Relink vault…", lambda: self._configure(self._record()))]
+        if record.item:
+            management.append(("Forget saved password…", self._forget))
+        if session:
+            management.append(("Copy root group reference", self._copy_group_reference))
+        return self._actions_for(target, [
+            session_actions, create if session else [], management, [("Remove from Keeper…", self._remove)],
+        ])
+
+    def _entry_context(self, row):
+        target = self.selection
+        identifier = row[ENTRY_ID_COLUMN]
+        if not target or self.busy or self.desktop.locked or identifier not in self.entry_rows:
+            return []
+        vault, group = target
+
+        def with_entry(action):
+            entry = self.entry_rows.get(identifier)
+            if entry:
+                action(entry)
+
+        return self._actions_for(target, [
+            [("View entry details…", lambda: with_entry(lambda entry: entry_details(self, vault, entry))),
+             ("Edit entry…", lambda: with_entry(lambda entry: edit_entry(self, vault, group, entry))),
+             ("Copy entry reference", lambda: with_entry(lambda _: self.copy_reference(vault, "entry", identifier)))],
+            [("Move entry to recycle bin…", lambda: with_entry(lambda entry: recycle_entry(self, vault, group, entry)))],
+        ])
+
+    def _access_context(self, row):
+        if self.desktop.locked or row[3] == "Applying edit":
+            return []
+        identifier, kind = row[5:7]
+        if kind == "edit":
+            label = "Review edit…"
+        else:
+            label = "Review access request…" if row[3] == "Pending" else "Manage token…"
+        return [[(label, lambda: self.access_view.open_record(identifier, kind))]]
+
+    def _activity_context(self, row):
+        identifier = row[self.activity_view.RECORD_ID]
+        return [[("View details…", lambda: self.activity_view.open_record(identifier))]]
 
     def copy_reference(self, vault, field, identifier):
         if not self.desktop.locked and self.workspace.owner_session(vault):

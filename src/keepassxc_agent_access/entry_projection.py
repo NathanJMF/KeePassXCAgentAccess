@@ -1,6 +1,8 @@
-"""Serialize only the entry fields the agent is allowed to receive."""
+"""Serialize owner snapshots and scoped agent entry metadata."""
 
 from base64 import b64decode
+from datetime import datetime, timezone
+from struct import error as StructError
 from uuid import UUID
 
 from .protocol import RESPONSE_LIMIT, encode
@@ -60,6 +62,18 @@ def active_group(vault, identifier):
     return group if group is not None and _active_group(group, _recycle_id(vault)) else None
 
 
+def _entry_timestamp(entry, field):
+    try:
+        value = getattr(entry, field, None)
+        if not isinstance(value, datetime):
+            return None
+        if value.tzinfo is None:
+            value = value.replace(tzinfo=timezone.utc)
+        return value.timestamp()
+    except (OverflowError, OSError, StructError, ValueError):
+        return None
+
+
 def owner_snapshot(vault):
     recycle_id = _recycle_id(vault)
     groups = [{"id": str(group.uuid), "name": group.name or "",
@@ -70,7 +84,9 @@ def owner_snapshot(vault):
         row = _project(entry, recycle_id)
         if row is not None:
             entries.append(dict(row, group=str(entry.group.uuid),
-                                username=entry.username or "", url=entry.url or ""))
+                                username=entry.username or "", url=entry.url or "",
+                                created=_entry_timestamp(entry, "ctime"),
+                                modified=_entry_timestamp(entry, "mtime")))
     recycle_group = next((group for group in vault.groups if group.uuid == recycle_id), None)
     if recycle_group is None:
         recycle_path = [vault.root_group.name or "", "Recycle Bin"]
