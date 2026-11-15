@@ -1,8 +1,9 @@
 """GTK views for request review, entry actions, and local activity."""
 
+from collections import Counter
 from dataclasses import dataclass
 
-from gi.repository import Gtk, Pango
+from gi.repository import GLib, Gtk, Pango
 
 from .access_settings import Action, ActionType
 from .activity import ActivityError
@@ -520,73 +521,156 @@ class AccessView(Gtk.Box):
             elif not pending_only:
                 self._manage(grant)
 
-    def _header(self, title, grant):
-        dialog, body = _dialog(self.app, title, 640, 430)
-        dialog.set_modal(True)
-        for value in (f"Requested  {_time(grant.requested)}", f"OS identity  UID {grant.uid} (verified)",
-                      f"Identity  {reported(grant.identity)}", f"Project  {reported(grant.project)}",
-                      f"Model  {reported(grant.context.model)}", f"Chat  {reported(grant.context.chat)}",
-                      f"Token record  {grant.id}"):
-            add_label(body, value)
-        return dialog, body
-
     def _review(self, grant):
-        dialog, body = self._header("Review access request", grant)
+        dialog, body = _dialog(self.app, "Review access request", 620, -1)
+        dialog.set_name("keeper-access-review")
+        dialog.set_modal(True)
         dialog.add_buttons("Close", Gtk.ResponseType.CLOSE, "Deny", Gtk.ResponseType.REJECT,
                            "Approve", Gtk.ResponseType.ACCEPT)
-        items = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10, margin=10)
-        body.pack_start(_scroll(items), True, True, 0)
-        controls = []
+        dialog.set_default_response(Gtk.ResponseType.CLOSE)
+        approve = styled(dialog.get_widget_for_response(Gtk.ResponseType.ACCEPT), "suggested-action")
+        resume_label = "Resume Access and Approve"
+
+        body.pack_start(styled(_label(reported(grant.identity)), "keeper-event-title"), False, False, 0)
+        body.pack_start(styled(_label(grant.project), "keeper-event-caption"), False, False, 0)
+        count = len(grant.items)
+        heading = "Requested entry" if count == 1 else f"Requested entries ({count})"
+        review = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
+        review.pack_start(styled(_label(heading), "keeper-event-section-title"), False, False, 0)
+        scroll = Gtk.ScrolledWindow()
+        scroll.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+        scroll.set_propagate_natural_height(True)
+        scroll.set_max_content_height(440)
+        scroll.add(review)
+        body.pack_start(scroll, True, True, 0)
+        pause_notice = styled(_label("Agent access is paused. Approving will resume it for all approved agents."),
+                              "keeper-event-caption")
+        pause_notice.set_no_show_all(True)
+        body.pack_start(pause_notice, False, False, 0)
+
+        technical = Gtk.Expander(label="Technical details")
+        details = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10, margin_top=8)
+        details.pack_start(activity_facts((
+            ("Requested", table_time(grant.requested)),
+            ("Agent account", f"UID {grant.uid} (verified)"),
+            ("Project", reported(grant.project)),
+            ("Model", reported(grant.context.model)),
+            ("Chat", reported(grant.context.chat)),
+            ("Token record", grant.id),
+        )), False, False, 0)
+        technical.add(details)
+
+        controls = [self._review_entry(review, details, item) for item in grant.items]
 
         def changed(*_):
-            dialog.set_response_sensitive(Gtk.ResponseType.ACCEPT,
-                                          bool(controls) and all(combo.get_active() >= 0 for combo, _ in controls))
+            paused = self.app.workspace.paused
+            approve.set_label(resume_label if paused else "Approve")
+            pause_notice.set_visible(paused)
+            ready = bool(controls) and all(combo.get_active() >= 0 for combo, _ in controls)
+            can_resume = self.app.broker and self.app.broker.enabled
+            approve.set_sensitive(ready and (not paused or bool(can_resume)))
+            return GLib.SOURCE_CONTINUE
 
-        for item in grant.items:
-            operations = metadata_labels(item)
-            if item.action:
-                operations.append(f"Credential action · {item.action}")
-            selector = item.label or f"{item.vault} / {item.entry}"
-            add_label(items, f"{selector}\nRequested operations  {', '.join(operations)}")
-            choices = self.app.grants.choices(item)
-            combo = Gtk.ComboBoxText()
-            for choice in choices:
-                combo.append_text(f"{choice.vault_name} · {' / '.join(choice.path)} [{choice.scope.entry}]")
-            detail = _label("")
-            items.pack_start(combo, False, False, 0)
-            items.pack_start(detail, False, False, 0)
-            controls.append((combo, choices))
-
-            def show_choice(widget, options=choices, label=detail):
-                index = widget.get_active()
-                if index < 0:
-                    label.set_text("Select the exact match." if options else "No eligible match in the unlocked vaults.")
-                else:
-                    choice = options[index]
-                    vault = self.app.workspace.registrations.get(choice.scope.vault)
-                    source = f"\nDatabase  {vault.target.database}" if vault else ""
-                    values = [f"Vault  {choice.scope.vault}{source}", f"Entry  {choice.scope.entry}"]
-                    if choice.kind:
-                        values.append(choice.kind.label)
-                    for field, caption in ((choice.username, "Username"), (choice.url, "Stored URL"),
-                                           (choice.destination, "GET")):
-                        if field is not None:
-                            values.append(f"{caption}  {field or '—'}")
-                    label.set_text("\n".join(values))
-                changed()
-
-            combo.connect("changed", show_choice)
-            if len(choices) == 1:
-                combo.set_active(0)
-            else:
-                show_choice(combo)
+        for combo, _ in controls:
+            combo.connect("changed", changed)
         changed()
-        response = self.app.run_dialog(dialog)
-        if response in (Gtk.ResponseType.REJECT, Gtk.ResponseType.ACCEPT):
-            self.app.owner_operation(lambda: self.app.grants.decide(
-                grant.id, [options[combo.get_active()] for combo, options in controls]
-                if response == Gtk.ResponseType.ACCEPT else None,
+        review.pack_start(technical, False, False, 0)
+
+        watch = GLib.timeout_add(250, changed)
+        try:
+            response = self.app.run_dialog(dialog)
+        finally:
+            GLib.source_remove(watch)
+        if response == Gtk.ResponseType.REJECT:
+            self.app.owner_operation(lambda: self.app.grants.decide(grant.id, None))
+        elif response == Gtk.ResponseType.ACCEPT:
+            choices = [options[combo.get_active()] for combo, options in controls]
+            resume = approve.get_label() == resume_label
+
+            def approve_request():
+                if resume and not (self.app.broker and self.app.broker.enabled):
+                    raise ValueError("Agent access is unavailable. Reopen the request when the broker is running.")
+                with self.app.workspace.mutex:
+                    if self.app.workspace.paused and not resume:
+                        raise ValueError("Agent access was paused. Reopen the request to review your options.")
+                    self.app.grants.decide(grant.id, choices)
+                    if resume:
+                        self.app.workspace.pause(False)
+
+            self.app.owner_operation(approve_request)
+
+    def _review_entry(self, review, details, item):
+        choices = self.app.grants.choices(item)
+        card = styled(Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6), "keeper-event-section")
+        review.pack_start(card, False, False, 0)
+        combo = Gtk.ComboBoxText()
+        paths = [" › ".join((choice.vault_name, *choice.path)) for choice in choices]
+        matches = Counter(paths)
+        for choice, path in zip(choices, paths):
+            if matches[path] > 1:
+                path = f"{path} · {choice.scope.vault[:8]} / {choice.scope.entry[:8]}"
+            combo.append_text(path)
+        if len(choices) > 1:
+            for renderer in combo.get_cells():
+                renderer.set_property("ellipsize", Pango.EllipsizeMode.MIDDLE)
+            card.pack_start(_label("Choose the exact entry"), False, False, 0)
+            card.pack_start(combo, False, False, 0)
+        title = styled(_label(""), "keeper-event-section-title")
+        location = styled(_label(""), "keeper-event-caption")
+        permissions = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=5)
+        for widget in (title, location, permissions):
+            card.pack_start(widget, False, False, 0)
+        references = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        details.pack_start(references, False, False, 0)
+
+        def show_choice(widget):
+            for box in (permissions, references):
+                for child in box.get_children():
+                    box.remove(child)
+            index = widget.get_active()
+            choice = choices[index] if index >= 0 else None
+            vault_id, entry_id = (choice.scope.vault, choice.scope.entry) if choice else (item.vault, item.entry)
+            vault = self.app.workspace.registrations.get(vault_id)
+            if choice:
+                title.set_text(choice.path[-1])
+                location.set_text(" › ".join((choice.vault_name, *choice.path[:-1])))
+            else:
+                title.set_text(item.label or "Requested entry")
+                if choices:
+                    location.set_text("Multiple entries match this request.")
+                elif vault and not self.app.workspace.session(vault_id):
+                    location.set_text(f"Unlock {vault.name}, then reopen this request.")
+                else:
+                    location.set_text("No matching entry in the unlocked vaults.")
+            if item.metadata:
+                add_label(permissions, "Read entry title and group")
+            if item.username:
+                add_label(permissions, f"Read username · {choice.username or '—'}" if choice else "Read username")
+            if item.url:
+                add_label(permissions, f"Read stored URL · {choice.url or '—'}" if choice else "Read stored URL")
+            if item.action:
+                binding = vault.binding(entry_id, item.action) if choice else None
+                action = binding.action if binding else None
+                add_label(permissions, f"Run {action.name}" if action else f"Run credential action {item.action}")
+                if action:
+                    add_label(permissions, f"{action.kind.label} · {action.url}")
+            facts = activity_facts((
+                ("Vault ID", vault_id),
+                ("Entry ID", entry_id),
+                ("Database", str(vault.target.database) if vault else None),
+                ("Action ID", item.action),
             ))
+            if facts:
+                references.pack_start(facts, False, False, 0)
+            permissions.show_all()
+            references.show_all()
+
+        combo.connect("changed", show_choice)
+        if len(choices) == 1:
+            combo.set_active(0)
+        else:
+            show_choice(combo)
+        return combo, choices
 
     def _manage(self, grant):
         dialog, body = _dialog(self.app, "Access token", 690, -1)

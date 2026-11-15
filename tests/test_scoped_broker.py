@@ -89,6 +89,17 @@ class ScopedBrokerTests(unittest.TestCase):
             self.invoke(operation, *args, **kwargs)
         self.assertEqual(error.exception.code, code)
 
+    def test_paused_workspace_does_not_accept_new_requests(self):
+        item = {"vault": self.vaults[0], "entry": self.entry, "metadata": True}
+        self.assertEqual(self.enroll([item]), {"status": "pending"})
+        self.workspace.pause()
+        request = {"identity": "Other fixture agent", "project": "Fixture", "items": [item]}
+        self.assert_code("paused", "request_access", 1, request=request)
+        self.assert_code("paused", "request_edit", request={})
+        self.assertEqual(self.invoke("access_status"), {"status": "pending"})
+        self.assertEqual(len(self.grants.rows()), 1)
+        self.assertEqual(len(self.activity.rows(action="Request token")), 1)
+
     def test_identity_reserved_until_token_is_removed_or_denied(self):
         items = [{"label": "Example entry", "metadata": True}]
         label = "Straße agent"

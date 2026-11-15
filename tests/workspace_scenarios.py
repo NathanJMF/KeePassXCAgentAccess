@@ -250,29 +250,50 @@ def main(root):
             table.get_selection().select_path(path)
             return lambda: table.row_activated(path, table.get_column(0))
 
-        def approve(profile, vault=None, *, notice=None):
+        def approve(profile, vault=None, *, notice=None, resume=False):
             def confirm(dialog):
                 assert dialog.get_title() == "Review access request"
                 assert app.window.get_visible()
-                labels = [child.get_text() for child in descendants(dialog) if isinstance(child, Gtk.Label)]
-                assert any("verified" in label for label in labels)
-                assert any(expected_identity(profile) in label for label in labels)
-                assert any("Disposable project (reported)" in label for label in labels)
+                labels = [child for child in descendants(dialog) if isinstance(child, Gtk.Label)]
+                expander, = [child for child in descendants(dialog) if isinstance(child, Gtk.Expander)]
+                assert not expander.get_expanded()
+                summary = [label.get_text() for label in labels
+                           if label.get_mapped() and not label.is_ancestor(expander)]
+                assert expected_identity(profile) in summary, summary
+                assert "Disposable project" in summary, summary
+                assert all(token_ids[profile] not in text and "verified" not in text for text in summary)
+                details = [child.get_text() for child in descendants(expander) if isinstance(child, Gtk.Label)]
+                assert token_ids[profile] in details, details
+                assert any("verified" in text for text in details)
+                assert "Disposable project (reported)" in details, details
                 if profile == "alpha":
-                    assert any(f"Username  {USERNAME}" in label for label in labels)
+                    assert fixture[0]["title"] in summary, summary
+                    assert "Read entry title and group" in summary, summary
+                    assert f"Read username · {USERNAME}" in summary, summary
+                    assert "Run Imported fixture action" in summary, summary
+                    assert first_entry in details and all(first_entry not in text for text in summary)
+                    assert not any(isinstance(child, Gtk.ComboBoxText) for child in descendants(dialog))
                 elif profile == "expanded":
-                    assert any(f"Stored URL  {STORED_URL}" in label for label in labels)
+                    assert "Requested entries (3)" in summary
+                    assert f"Read stored URL · {STORED_URL}" in summary
                 elif profile == "bearer":
-                    assert any("HTTPS Bearer token GET" in label and url + "/first" in label for label in labels)
+                    assert any("HTTPS Bearer token GET" in label and url + "/first" in label for label in summary)
                 if vault:
                     combo, = [child for child in descendants(dialog) if isinstance(child, Gtk.ComboBoxText)]
                     assert len(combo.get_model()) == 4
+                    assert "Choose the exact entry" in summary
                     assert not dialog.get_widget_for_response(Gtk.ResponseType.ACCEPT).get_sensitive()
                     choices = app.grants.choices(next(row for row in app.grants.rows() if row.status == "pending").items[0])
                     index = next(i for i, choice in enumerate(choices)
                                  if choice.scope.vault == vault and choice.scope.entry == nested_entry)
                     combo.set_active(index)
-                assert dialog.get_widget_for_response(Gtk.ResponseType.ACCEPT).get_sensitive()
+                    updated = [child.get_text() for child in descendants(dialog) if isinstance(child, Gtk.Label)]
+                    assert duplicate_title in updated
+                    assert " › ".join((choices[index].vault_name, *choices[index].path[:-1])) in updated
+                approve_button = dialog.get_widget_for_response(Gtk.ResponseType.ACCEPT)
+                assert approve_button.get_label() == ("Resume Access and Approve" if resume else "Approve")
+                assert any("for all approved agents" in label for label in summary) == resume
+                assert approve_button.get_sensitive()
                 dialog.response(Gtk.ResponseType.ACCEPT)
             if notice:
                 app.window.hide()
@@ -1071,6 +1092,11 @@ def main(root):
                 expanded = [{"vault": first, "entry": first_entry, "action": "check"},
                             {"vault": second, "entry": first_entry, "action": "check", "metadata": True, "url": True},
                             {"vault": second, "entry": nested_entry, "metadata": True}]
+                assert "paused" in enroll("alpha", alpha, expected=1)
+                assert not app.grants.rows()
+                assert not any(method == "AddNotification" and args[0] == app.get_application_id()
+                               for method, args in notification_messages)
+                app.set_agent_paused(False)
                 assert enroll("alpha", alpha) == enroll("alpha", alpha) == {"status": "pending"}
                 assert enroll("beta", beta) == {"status": "pending"}
                 alpha_notice = get_notification("grant", token_ids["alpha"], "Keeper access request")
@@ -1120,18 +1146,20 @@ def main(root):
                 assert token_context_menu("beta") == ["Review request…"]
                 assert token_context_menu("alpha") == ["View permissions…", "Disable token", "Remove token…"]
                 assert toggle.get_active() is False
+                app.set_agent_paused(True)
                 drive_dialog(access_row("review"), lambda dialog: dialog.response(Gtk.ResponseType.REJECT))
+                assert app.workspace.paused
                 assert invoke("review", "access", "status") == {"status": "denied"}
                 assert "unavailable for this token" in invoke("review", "vaults", "list", expected=1)
                 toggle.set_active(True)
                 assert toggle.get_active()
                 assert json.loads(config.read_text()) == {"desktop_notifications": True}
                 beta_notice = get_notification("grant", token_ids["beta"], "Keeper access request", count=2)
-                approve("beta", second, notice=beta_notice)
                 assert "paused" in invoke("alpha", "vaults", "list", expected=1)
+                approve("beta", second, notice=beta_notice, resume=True)
+                assert not app.workspace.paused
                 assert app.workspace.session(first) and app.workspace.session(second)
 
-                app.pause_button.clicked()
                 assert invoke("alpha", "access", "status") == {"status": "active"}
                 assert [row["id"] for row in invoke("alpha", "vaults", "list")["vaults"]] == [first]
                 assert [row["id"] for row in invoke("beta", "vaults", "list")["vaults"]] == [second]

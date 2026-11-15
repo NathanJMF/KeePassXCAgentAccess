@@ -37,7 +37,7 @@ def check(root):
     subprocess.run([*NAMESPACE, "mkdir", "-m", "700", str(runner_home)], check=True)
     profile = runner_home / "profile"
 
-    def invoke(tool, arguments=None):
+    def invoke(tool, arguments=None, *, error=False):
         process = subprocess.run(
             [*NAMESPACE, "/usr/bin/env", "-i", "PATH=/usr/bin:/bin",
              str(runtime / "keeper-agent-runner"), "--socket", str(endpoint), "--profile-dir", str(profile)],
@@ -46,8 +46,9 @@ def check(root):
         )
         reply = json.loads(process.stdout)["result"]
         assert process.stderr == ""
-        assert not reply["isError"], reply
-        return json.loads(reply["content"][0]["text"])
+        assert reply["isError"] == error, reply
+        content = reply["content"][0]["text"]
+        return content if error else json.loads(content)
 
     try:
         vault = workspace.add(target, PASSWORD, False, name="Runner fixture")
@@ -58,12 +59,14 @@ def check(root):
         assert invoke("access_status") == {"status": "uninitialized"}
         request = {"identity": "Runner fixture", "project": "Synthetic",
                    "items": [{"metadata": True, "vault": vault, "entry": row["id"]}]}
+        assert "paused" in invoke("request_access", {"request": request}, error=True)
+        assert not grants.rows()
+        workspace.pause(False)
         assert invoke("request_access", {"request": request}) == {"status": "pending"}
         record, = grants.rows()
         assert record.uid == uid
         match, = grants.choices(record.items[0])
         grants.decide(record.id, [match])
-        workspace.pause(False)
         assert invoke("access_status") == {"status": "active"}
         assert invoke("list_entries", {"vault": vault}) == {"entries": [row]}
         deadline = monotonic() + 2

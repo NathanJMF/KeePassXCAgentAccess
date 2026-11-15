@@ -257,21 +257,25 @@ button.keeper-delete {
 #keeper-edit-review .keeper-review-blocker image {
     color: @keeper_warning;
 }
+#keeper-access-review .keeper-event-title,
 #keeper-access-detail .keeper-event-title,
 #keeper-activity-detail .keeper-event-title {
     font-size: 1.45em;
     font-weight: 800;
 }
+#keeper-access-review .keeper-event-caption,
 #keeper-access-detail .keeper-event-caption,
 #keeper-activity-detail .keeper-event-caption {
     color: @keeper_muted;
 }
+#keeper-access-review .keeper-event-section,
 #keeper-activity-detail .keeper-event-section {
     border-radius: 9px;
     border: 1px solid @keeper_line;
     background-color: @keeper_canvas;
     padding: 10px 12px;
 }
+#keeper-access-review .keeper-event-section-title,
 #keeper-access-detail .keeper-event-section-title,
 #keeper-activity-detail .keeper-event-section-title {
     font-weight: 800;
