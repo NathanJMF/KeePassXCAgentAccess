@@ -150,7 +150,8 @@ class VaultSession:
             return decode(read())["entry"]
 
     def use(self, action, gate):
-        request = encode({"operation": "use_password", "entry": action.entry, "url": action.url})
+        request = encode({"operation": "use_password", "entry": action.entry,
+                          "url": action.url, "kind": action.kind})
         with self._exchange(request, 12) as read:
             response = decode(read())
             if response != {"ready": True}:

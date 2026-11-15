@@ -344,7 +344,8 @@ class Workspace:
             existing = record.binding(action.entry, action.id)
             if existing and existing is not old:
                 raise ValueError("This entry already has that action ID.")
-            revision = old.revision if old and old.action.url == action.url and old.action.id == action.id else new_id()
+            compatible = old and (old.action.kind, old.action.url, old.action.id) == (action.kind, action.url, action.id)
+            revision = old.revision if compatible else new_id()
             bindings = tuple(b for b in record.bindings if b is not old) + (Binding(action, revision),)
             self._replace(replace(record, bindings=bindings))
 

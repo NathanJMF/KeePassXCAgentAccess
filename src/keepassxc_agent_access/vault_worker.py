@@ -8,6 +8,7 @@ from select import select
 import sys
 from threading import Thread
 
+from .access_settings import ActionType
 from .entry_projection import active_entry, entry_listing, owner_snapshot
 from .https_action import authenticate, failure, prepare_https
 from .protocol import encode
@@ -66,7 +67,7 @@ def load_vault():
         if data["operation"] == "entry":
             reply(encode({"entry": metadata}))
         elif data["operation"] == "use_password":
-            use(entry, data["url"])
+            use(entry, data["url"], ActionType(data["kind"]))
         else:
             return
 
@@ -76,7 +77,7 @@ def reply(data):
     sys.stdout.buffer.flush()
 
 
-def use(entry, url):
+def use(entry, url, kind):
     if entry is None:
         reply(encode(failure()))
         return
@@ -84,7 +85,7 @@ def use(entry, url):
         with prepare_https(url) as (connection, path):
             reply(encode({"ready": True}))
             decision = sys.stdin.buffer.readline(16)
-            result = authenticate(connection, path, entry) if decision == b"dispatch\n" else failure()
+            result = authenticate(connection, path, entry, kind) if decision == b"dispatch\n" else failure()
             reply(encode(result))
     except (OSError, HTTPException, ValueError):
         reply(encode(failure()))

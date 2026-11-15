@@ -1,4 +1,5 @@
 from dataclasses import replace
+import json
 import os
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -6,7 +7,7 @@ from unittest import TestCase
 from unittest.mock import patch
 from uuid import uuid4
 
-from keepassxc_agent_access.access_settings import AccessMode, AccessStore, Action, Destination, VaultPolicy
+from keepassxc_agent_access.access_settings import AccessMode, AccessStore, Action, ActionType, Destination, VaultPolicy
 from keepassxc_agent_access.activity import ActivityError, ActivityStore, Attribution
 from keepassxc_agent_access.broker import BrokerConfig
 
@@ -43,6 +44,22 @@ class AccessStorageTests(TestCase):
             with self.subTest(invalid=invalid), self.assertRaises(ValueError):
                 Destination.parse(invalid)
         self.assertEqual(Destination.parse("https://[::1]:443/check").url, "https://[::1]:443/check")
+
+    def test_action_type_survives_saving_and_legacy_defaults_to_basic(self):
+        store = AccessStore(self.root / "actions.json")
+        vault, entry = str(uuid4()), str(uuid4())
+        basic = Action("legacy", "Check legacy service", entry, "https://example.invalid/legacy")
+        bearer = Action("api", "Check API", entry, "https://example.invalid/api", kind=ActionType.BEARER)
+        policy = VaultPolicy(actions=(basic, bearer))
+        store.write(replace(store.read(), vaults=((vault, policy),)))
+        persisted = json.loads(store.path.read_text())
+        actions = persisted["vaults"][vault]["actions"]
+        self.assertEqual(actions[1]["kind"], "https_bearer_get")
+        del actions[0]["kind"]
+        store.path.write_text(json.dumps(persisted))
+        self.assertEqual(store.read().for_vault(vault), policy)
+        with self.assertRaisesRegex(ValueError, "supported credential action"):
+            replace(bearer, kind="unknown")
 
     def test_activity_sessions_per_request_labels_and_recovery(self):
         store = ActivityStore(self.root / "activity.sqlite")

@@ -2,7 +2,7 @@
 
 from gi.repository import Gtk, Pango
 
-from .access_settings import Action
+from .access_settings import Action, ActionType
 from .activity import ActivityError
 from .owner_views import _dialog, _label, _scroll, _table, _time
 from .workspace_editor import edit_entry, recycle_entry
@@ -115,7 +115,7 @@ class AccessView(Gtk.Box):
         for item in grant.items:
             operations = metadata_labels(item)
             if item.action:
-                operations.append(f"HTTPS Basic-auth GET · {item.action}")
+                operations.append(f"Credential action · {item.action}")
             selector = item.label or f"{item.vault} / {item.entry}"
             add_label(items, f"{selector}\nRequested operations  {', '.join(operations)}")
             choices = self.app.grants.choices(item)
@@ -136,6 +136,8 @@ class AccessView(Gtk.Box):
                     vault = self.app.workspace.registrations.get(choice.scope.vault)
                     source = f"\nDatabase  {vault.target.database}" if vault else ""
                     values = [f"Vault  {choice.scope.vault}{source}", f"Entry  {choice.scope.entry}"]
+                    if choice.kind:
+                        values.append(choice.kind.label)
                     for field, caption in ((choice.username, "Username"), (choice.url, "Stored URL"),
                                            (choice.destination, "GET")):
                         if field is not None:
@@ -175,7 +177,10 @@ class AccessView(Gtk.Box):
             if scope.action:
                 binding = record.binding(scope.entry, scope.action) if record else None
                 current = binding and binding.revision == scope.revision and binding.action.enabled
-                operations.append(f"{scope.action} · {binding.action.url if current else 'Unavailable binding'}")
+                if current:
+                    operations.append(f"{scope.action} · {binding.action.kind.label} · {binding.action.url}")
+                else:
+                    operations.append(f"{scope.action} · Unavailable binding")
             add_label(scope_box, f"{record.name if record else 'Removed vault'} · {title}\n" +
                       f"{', '.join(operations)}\n{scope.vault} / {scope.entry}")
         response = self.app.run_dialog(dialog)
@@ -247,7 +252,7 @@ def entry_details(app, vault, entry):
     group = app.selection[1]
     while app.workspace.owner_session(vault) and not app.desktop.locked and not app.busy:
         record = app.workspace.registrations[vault]
-        dialog, body = _dialog(app, entry["title"] or "(Untitled entry)", 650, 390)
+        dialog, body = _dialog(app, entry["title"] or "(Untitled entry)", 710, 420)
         dialog.set_modal(True)
         dialog.add_buttons("Close", Gtk.ResponseType.CLOSE, "Add action", Gtk.ResponseType.APPLY,
                            "Edit action", Gtk.ResponseType.ACCEPT, "Remove action", Gtk.ResponseType.REJECT)
@@ -257,13 +262,14 @@ def entry_details(app, vault, entry):
         button(entry_actions, "Edit entry…", lambda *_: dialog.response(EDIT_ENTRY_RESPONSE))
         button(entry_actions, "Move entry to recycle bin…", lambda *_: dialog.response(RECYCLE_ENTRY_RESPONSE))
         body.pack_start(entry_actions, False, False, 0)
-        add_label(body, "Credential actions · HTTPS Basic-auth GET")
-        store = Gtk.ListStore(str, str, str, str)
+        add_label(body, "Credential actions")
+        store = Gtk.ListStore(str, str, str, str, str)
         for binding in record.bindings:
             action = binding.action
             if action.entry == entry["id"]:
-                store.append((action.id, action.name, action.url, "Enabled" if action.enabled else "Disabled"))
-        table = _table(store, ("ID", "Name", "Destination", "Status"))
+                store.append((action.id, action.name, action.kind.label, action.url,
+                              "Enabled" if action.enabled else "Disabled"))
+        table = _table(store, ("ID", "Name", "Type", "Destination", "Status"))
         body.pack_start(_scroll(table), True, True, 0)
         for code in (Gtk.ResponseType.ACCEPT, Gtk.ResponseType.REJECT):
             dialog.set_response_sensitive(code, False)
@@ -293,9 +299,16 @@ def entry_details(app, vault, entry):
 
 
 def edit_binding(app, vault, entry, previous):
-    dialog, body = _dialog(app, "HTTPS Basic-auth GET", 560, 250)
+    dialog, body = _dialog(app, "Credential action", 560, 300)
     dialog.set_modal(True)
     dialog.add_buttons("Cancel", Gtk.ResponseType.CANCEL, "Save", Gtk.ResponseType.OK)
+    add_label(body, "Type")
+    kind = Gtk.ComboBoxText()
+    kind.set_name("action-kind")
+    for option in ActionType:
+        kind.append(option.value, option.label)
+    kind.set_active_id(previous.action.kind.value if previous else ActionType.BASIC.value)
+    body.pack_start(kind, False, False, 0)
     fields = []
     for title, default in (("Action ID", "health-check"), ("Name", "Health check"), ("Destination", "")):
         add_label(body, title)
@@ -313,6 +326,6 @@ def edit_binding(app, vault, entry, previous):
     if response == Gtk.ResponseType.OK:
         def save():
             identifier, name, url = (field.get_text() for field in fields)
-            action = Action(identifier, name, entry, url, enabled.get_active())
+            action = Action(identifier, name, entry, url, enabled.get_active(), kind=kind.get_active_id())
             app.workspace.save_binding(vault, action, previous.action.id if previous else None)
         app.owner_operation(save)

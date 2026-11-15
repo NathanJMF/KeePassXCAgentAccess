@@ -7,7 +7,7 @@ from pathlib import Path
 import re
 from time import time
 
-from .access_settings import action_id, label, uuid_text
+from .access_settings import ActionType, action_id, label, uuid_text
 from .activity import Attribution
 from .protocol import ListingError
 from .settings import SettingsError, write_private_json
@@ -89,6 +89,7 @@ class Choice:
     vault_name: str
     path: tuple[str, ...]
     destination: str | None
+    kind: ActionType | None = None
     username: str | None = None
     url: str | None = None
 
@@ -197,6 +198,7 @@ class Grants:
                                   binding.revision if binding else None, username=item.username, url=item.url)
                     result.append(Choice(scope, record.name, (*entry["group_path"], entry["title"]),
                                          binding.action.url if binding else None,
+                                         kind=binding.action.kind if binding else None,
                                          username=entry.get("username") if item.username else None,
                                          url=entry.get("url") if item.url else None))
             return tuple(result)

@@ -2,18 +2,44 @@ import os
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from threading import Event
+from types import SimpleNamespace
 from unittest import TestCase
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from pykeepass import create_database
 
-from keepassxc_agent_access.access_settings import Action
+from keepassxc_agent_access.access_settings import Action, ActionType
+from keepassxc_agent_access.https_action import authenticate, prepare_https
 from keepassxc_agent_access.protocol import ListingError
 from keepassxc_agent_access.vault import VaultTarget, open_vault
 from tls_fixture import AUTHORIZATION, PASSWORD, USERNAME, tls_service
 
 
 class HTTPSActionTests(TestCase):
+    def test_bearer_uses_only_the_password_and_returns_only_status(self):
+        secret = "fixture_token.+~/-=="
+        authorization = f"Bearer {secret}"
+        entry = SimpleNamespace(password=secret)
+        with TemporaryDirectory() as directory, tls_service(directory, authorization=authorization) as (cert, url, calls):
+            with patch.dict(os.environ, {"SSL_CERT_FILE": str(cert)}):
+                for path, expected in (("/check", {"outcome": "succeeded", "http_status": 200}),
+                                       ("/redirect", {"outcome": "failed", "http_status": 302})):
+                    with self.subTest(path=path), prepare_https(url + path) as (connection, resource):
+                        self.assertEqual(authenticate(connection, resource, entry, ActionType.BEARER.value), expected)
+            self.assertEqual(calls, [("/check", authorization), ("/redirect", authorization)])
+
+    def test_bearer_rejects_invalid_tokens_before_sending_a_request(self):
+        connection = Mock()
+        for invalid in (None, "", " leading", "contains space", "token\r\nX-Injected: yes",
+                        "part=middle", "á", "token,append", "\t", "=padding-only"):
+            with self.subTest(invalid=invalid):
+                self.assertEqual(authenticate(connection, "/check", SimpleNamespace(password=invalid), ActionType.BEARER),
+                                 {"outcome": "failed"})
+        connection.request.assert_not_called()
+        self.assertEqual(authenticate(connection, "/check", SimpleNamespace(password="fixture"), "unknown"),
+                         {"outcome": "failed"})
+        connection.request.assert_not_called()
+
     def test_worker_sends_only_authorized_request_and_returns_status(self):
         with TemporaryDirectory() as directory, tls_service(directory) as (cert, url, calls):
             database = Path(directory) / "synthetic.kdbx"

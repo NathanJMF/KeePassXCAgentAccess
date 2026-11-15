@@ -16,7 +16,7 @@ AUTHORIZATION = "Basic " + b64encode(f"{USERNAME}:{PASSWORD}".encode()).decode("
 
 
 @contextmanager
-def tls_service(root):
+def tls_service(root, *, authorization=AUTHORIZATION, extra_authorization=()):
     root = Path(root)
     cert, key = root / "certificate.pem", root / "key.pem"
     subprocess.run([
@@ -42,7 +42,8 @@ def tls_service(root):
             calls.append((self.path, header))
             if self.path == "/slow":
                 sleep(5)
-            status = 302 if self.path == "/redirect" else 200 if header == AUTHORIZATION else 401
+            accepted = header in (authorization, *extra_authorization)
+            status = 302 if self.path == "/redirect" else 200 if accepted else 401
             try:
                 self.send_response(status)
                 if self.path == "/redirect":

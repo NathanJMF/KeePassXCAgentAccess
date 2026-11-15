@@ -68,7 +68,7 @@ Open **Access** to review requests. Double-click a pending request to inspect th
 
 Use **Resume agent access** in the tray or main window to let approved tokens run. **Pause agent access** stops broker discovery and credential operations while the owner keeps browsing. Locking the desktop pauses agent access and closes all vault sessions.
 
-Credential use requires an enabled, owner-configured **HTTPS Basic-auth GET** binding on the selected entry. Approval applies to that exact binding and destination. **Activity** shows Time, Model, Chat, Action, and Outcome. Filter by vault, agent, or other columns, and double-click a row for more context. `KEEPASSXC_AGENT_MODEL`, `KEEPASSXC_AGENT_CHAT`, and `KEEPASSXC_AGENT_CHAT_ID` supply optional agent-reported attribution.
+Credential use requires an enabled action on the selected entry. **HTTPS Basic-auth GET** uses the entry's username and password. **HTTPS Bearer token GET** uses the password field as the bearer token. Both use fixed HTTPS destinations. Changing the type or destination requires fresh approval. **Activity** shows Time, Model, Chat, Action, and Outcome. Filter by vault, agent, or other columns, and double-click a row for more context. `KEEPASSXC_AGENT_MODEL`, `KEEPASSXC_AGENT_CHAT`, and `KEEPASSXC_AGENT_CHAT_ID` supply optional agent-reported attribution.
 
 ## Test with synthetic data
 

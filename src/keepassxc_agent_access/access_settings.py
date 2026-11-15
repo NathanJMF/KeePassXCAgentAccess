@@ -18,6 +18,18 @@ class AccessMode(str, Enum):
     SMART = "Smart access"
 
 
+class ActionType(str, Enum):
+    BASIC = "https_basic_get"
+    BEARER = "https_bearer_get"
+
+    @property
+    def label(self):
+        return {
+            self.BASIC: "HTTPS Basic-auth GET",
+            self.BEARER: "HTTPS Bearer token GET",
+        }[self]
+
+
 def uuid_text(value):
     return str(UUID(value))
 
@@ -77,14 +89,20 @@ class Action:
     entry: str
     url: str
     enabled: bool = True
+    kind: ActionType = ActionType.BASIC
 
     def __post_init__(self):
         action_id(self.id)
         label(self.name)
         if type(self.enabled) is not bool:
             raise ValueError("Invalid action setting.")
+        try:
+            kind = ActionType(self.kind)
+        except ValueError:
+            raise ValueError("Choose a supported credential action.") from None
         object.__setattr__(self, "entry", uuid_text(self.entry))
         object.__setattr__(self, "url", Destination.parse(self.url).url)
+        object.__setattr__(self, "kind", kind)
 
 
 @dataclass(frozen=True)

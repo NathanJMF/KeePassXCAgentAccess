@@ -17,7 +17,7 @@ from pykeepass import PyKeePass
 from broker_scenarios import NAMESPACE, PASSWORD as UNLOCK, isolated_uid, prepare, verify_isolation
 from desktop_scenarios import set_screen_active, wait_for
 from password_scenarios import button, descendants
-from keepassxc_agent_access.access_settings import AccessMode, AccessStore, Action, VaultPolicy
+from keepassxc_agent_access.access_settings import AccessMode, AccessStore, Action, ActionType, VaultPolicy
 from keepassxc_agent_access.activity import ActivityStore
 from keepassxc_agent_access.controller import VaultController
 from keepassxc_agent_access.settings import SettingsStore
@@ -31,6 +31,7 @@ from tls_fixture import AUTHORIZATION, PASSWORD, USERNAME, tls_service
 
 OTHER_PASSWORD = "synthetic-second-password-sentinel"
 STORED_URL = "https://fixture.example.test/owner-preview"
+BEARER_AUTHORIZATION = f"Bearer {PASSWORD}"
 EDIT_PASSWORD = "synthetic-owner-edit-password"
 
 
@@ -53,7 +54,7 @@ def main(root):
     profiles = root / "profiles"
     profiles.mkdir()
     profiles.chmod(0o1777)
-    names = ("alpha", "beta", "review", "expanded")
+    names = ("alpha", "beta", "review", "expanded", "bearer")
     directories = [str(profiles / name) for name in names]
     atexit.register(subprocess.run, [*NAMESPACE, "rm", "-rf", "--", *directories], check=True)
     subprocess.run([*NAMESPACE, "mkdir", "-m", "700", *directories], check=True)
@@ -77,7 +78,7 @@ def main(root):
             VALUES(1,1,strftime('%s','now'),strftime('%s','now'),'Legacy fixture','Succeeded');
         """)
 
-    with tls_service(private) as (certificate, url, calls):
+    with tls_service(private, extra_authorization=(BEARER_AUTHORIZATION,)) as (certificate, url, calls):
         os.environ["SSL_CERT_FILE"] = str(certificate)
         old_access = AccessStore(private / "access.json")
         imported = Action("check", "Imported fixture action", first_entry, url + "/first")
@@ -145,6 +146,8 @@ def main(root):
                     assert any(f"Username  {USERNAME}" in label for label in labels)
                 elif profile == "expanded":
                     assert any(f"Stored URL  {STORED_URL}" in label for label in labels)
+                elif profile == "bearer":
+                    assert any("HTTPS Bearer token GET" in label and url + "/first" in label for label in labels)
                 if vault:
                     combo, = [child for child in descendants(dialog) if isinstance(child, Gtk.ComboBoxText)]
                     assert len(combo.get_model()) == 4
@@ -264,7 +267,7 @@ def main(root):
                 assert not app.workspace.registrations[second].bindings
 
                 def edit_action(dialog):
-                    assert dialog.get_title() == "HTTPS Basic-auth GET"
+                    assert dialog.get_title() == "Credential action"
                     fields = [child for child in dialog.get_content_area().get_children() if isinstance(child, Gtk.Entry)]
                     for field, value in zip(fields, ("check", "Second vault action", url + "/second")):
                         field.set_text(value)
@@ -275,7 +278,7 @@ def main(root):
                     GLib.timeout_add(25, lambda: follow_up())
 
                 def follow_up():
-                    if app.dialog and app.dialog.get_title() == "HTTPS Basic-auth GET":
+                    if app.dialog and app.dialog.get_title() == "Credential action":
                         edit_action(app.dialog)
                         GLib.timeout_add(25, close_details)
                         return GLib.SOURCE_REMOVE
@@ -368,8 +371,37 @@ def main(root):
                 assert use("expanded", second, expected=1) == {"outcome": "failed", "http_status": 401}
                 other_header = "Basic " + b64encode(f"{USERNAME}:{OTHER_PASSWORD}".encode()).decode("ascii")
                 assert calls[-1] == ("/second", other_header)
+                select_tree(first)
+
+                def edit_type(dialog):
+                    table = next(child for child in descendants(dialog) if isinstance(child, Gtk.TreeView))
+                    table.get_selection().select_path(Gtk.TreePath.new_from_string("0"))
+                    dialog.response(Gtk.ResponseType.ACCEPT)
+                    GLib.timeout_add(25, choose_bearer)
+
+                def choose_bearer():
+                    if not app.dialog or app.dialog.get_title() != "Credential action":
+                        return GLib.SOURCE_CONTINUE
+                    chooser = next(child for child in descendants(app.dialog) if child.get_name() == "action-kind")
+                    chooser.set_active_id(ActionType.BEARER.value)
+                    app.dialog.response(Gtk.ResponseType.OK)
+                    GLib.timeout_add(25, close_details)
+                    return GLib.SOURCE_REMOVE
+
+                drive_dialog(lambda: app.entries.row_activated(Gtk.TreePath.new_from_string("0"),
+                                                               app.entries.get_column(0)), edit_type)
+                rebound = app.workspace.registrations[first].binding(first_entry, "check")
+                assert rebound.action.kind is ActionType.BEARER and rebound.action.url == imported.url
+                assert use("alpha", first, expected=1) == denied
+                bearer = [{"vault": first, "entry": first_entry, "action": "check"}]
+                assert enroll("bearer", bearer) == {"status": "pending"}
+                approve("bearer")
+                assert use("bearer", first) == {"outcome": "succeeded", "http_status": 200}
+                assert calls[-1] == ("/first", BEARER_AUTHORIZATION)
+
                 app.workspace.save_binding(first, replace(imported, url=url + "/changed"), "check")
                 assert use("alpha", first, expected=1) == denied
+                assert use("bearer", first, expected=1) == denied
                 assert all(path != "/changed" for path, _ in calls)
                 assert "unavailable for this token" in enroll("alpha", beta, expected=1)
 
@@ -421,10 +453,10 @@ def main(root):
                     raw = subprocess.check_output([*NAMESPACE, "cat", str(profiles / name / "token")]).strip()
                     assert all(raw not in data for data in persisted)
                     assert all(raw not in data for call in captured for data in call)
-                for sentinel in (UNLOCK, PASSWORD, OTHER_PASSWORD, EDIT_PASSWORD, AUTHORIZATION, other_header):
+                for sentinel in (UNLOCK, PASSWORD, OTHER_PASSWORD, EDIT_PASSWORD, AUTHORIZATION, BEARER_AUTHORIZATION, other_header):
                     assert all(sentinel.encode() not in data for data in persisted)
                     assert all(sentinel.encode() not in data for call in captured for data in call)
-                print("Workspace scenario passed: two vaults, scoped CLI, GNOME review and edits, migration, locks and Activity", flush=True)
+                print("Workspace scenario passed: two vaults, scoped CLI, GNOME review and edits, credential types, migration, locks and Activity", flush=True)
                 result = 0
             except Exception:
                 traceback.print_exc()
