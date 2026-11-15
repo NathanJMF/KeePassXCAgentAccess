@@ -5,7 +5,7 @@ from datetime import datetime
 import pwd
 from threading import Thread
 
-from gi.repository import GLib, Gtk
+from gi.repository import Gdk, GLib, Gtk
 
 from .access_settings import AccessMode, Action
 from .activity import ActivityError
@@ -45,6 +45,31 @@ def _dialog(app, title, width=680, height=460):
     content.set_border_width(14)
     content.set_spacing(10)
     return dialog, content
+
+
+def mouse_click():
+    event = Gtk.get_current_event()
+    if event is None or event.type != Gdk.EventType.BUTTON_RELEASE:
+        return False
+    is_button, button = event.get_button()
+    if not is_button or button != Gdk.BUTTON_PRIMARY:
+        return False
+    device = event.get_source_device()
+    return device is not None and device.get_source() in (
+        Gdk.InputSource.MOUSE, Gdk.InputSource.TOUCHPAD, Gdk.InputSource.TRACKPOINT,
+    )
+
+
+def require_mouse_decisions(dialog):
+    decisions = (Gtk.ResponseType.ACCEPT, Gtk.ResponseType.REJECT)
+    for decision in decisions:
+        dialog.get_widget_for_response(decision).set_can_focus(False)
+
+    def reject_non_mouse_response(widget, response):
+        if response in decisions and not mouse_click():
+            widget.stop_emission_by_name("response")
+
+    dialog.connect("response", reject_non_mouse_response)
 
 
 class ApprovalPresenter:

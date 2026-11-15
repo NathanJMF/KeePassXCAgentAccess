@@ -3,7 +3,7 @@
 from gi.repository import Gtk, Pango
 
 from .activity import ActivityError
-from .owner_views import _dialog, _label, _scroll, _time
+from .owner_views import _dialog, _label, _scroll, _time, mouse_click, require_mouse_decisions
 from .tray import password_entry
 from .vault import VaultError
 from .workspace_style import styled
@@ -80,10 +80,12 @@ def review_edit(app, record):
     operation = record.request.operation
     dialog, body = _dialog(app, OPERATION_LABELS[operation], 640, -1)
     dialog.set_name("keeper-edit-review")
+    dialog.set_position(Gtk.WindowPosition.CENTER_ON_PARENT)
     dialog.set_modal(True)
     dialog.add_buttons("Close", Gtk.ResponseType.CLOSE, "Deny", Gtk.ResponseType.REJECT,
                        "Approve and apply", Gtk.ResponseType.ACCEPT)
     dialog.set_default_response(Gtk.ResponseType.CLOSE)
+    require_mouse_decisions(dialog)
     styled(dialog.get_widget_for_response(Gtk.ResponseType.ACCEPT), "suggested-action")
 
     preview, error = None, None
@@ -143,7 +145,8 @@ def review_edit(app, record):
     _add(explanation, "Agent access is paused", "keeper-review-label")
     reason = _add(explanation, "Resuming lets all approved tokens run again.", "keeper-review-muted")
     resume = Gtk.Button(label="Resume agent access", valign=Gtk.Align.CENTER)
-    resume.connect("clicked", lambda *_: app.set_agent_paused(False))
+    resume.set_can_focus(False)
+    resume.connect("clicked", lambda *_: app.set_agent_paused(False) if mouse_click() else None)
     blocker.pack_end(resume, False, False, 0)
     body.pack_start(blocker, False, False, 0)
     blocker.show_all()

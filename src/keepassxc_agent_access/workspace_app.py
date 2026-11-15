@@ -21,7 +21,7 @@ from .grants import Grants
 from .keyring import KeyringError, SystemKeyring
 from .owner_views import _dialog, _label, _scroll, table_time
 from .protocol import ListingError
-from .review_notifications import REVIEW_ACTION, ReviewNotifications
+from .review_popups import ReviewPopups
 from .scoped_broker import ScopedBroker
 from .settings import SettingsError, SettingsStore
 from .tray import APP_ID, APP_TITLE, SetupDialog, password_entry
@@ -65,18 +65,15 @@ class WorkspaceApplication(Gtk.Application):
         self.tree_signature = None
         self.tree_open_vaults = set()
         self.entry_rows = {}
-        self.review_notifications = ReviewNotifications(self, Path(self.directory) / "desktop-notifications.json")
-        self.queued_review = None
+        self.review_popups = ReviewPopups(Path(self.directory) / "desktop-notifications.json")
+        self.popup_source = None
 
     def do_startup(self):
         Gtk.Application.do_startup(self)
         self.hold()
         self.desktop = self.desktop_factory(self._desktop_lock, self._quit)
-        review = Gio.SimpleAction.new(REVIEW_ACTION, GLib.VariantType.new("(ss)"))
-        review.connect("activate", self._notification_activated)
-        self.add_action(review)
         try:
-            self.review_notifications.load()
+            self.review_popups.load()
         except SettingsError as error:
             self.message = str(error)
         self.activity = ActivityStore(Path(self.directory) / "activity.sqlite")
@@ -180,9 +177,9 @@ class WorkspaceApplication(Gtk.Application):
         settings.get_accessible().set_name("Keeper settings")
         settings.set_image(Gtk.Image.new_from_icon_name("open-menu-symbolic", Gtk.IconSize.BUTTON))
         settings_menu = Gtk.Menu()
-        notifications = Gtk.CheckMenuItem(label="Desktop notifications", active=self.review_notifications.enabled)
-        notifications.connect("toggled", self._set_desktop_notifications)
-        settings_menu.append(notifications)
+        popups = Gtk.CheckMenuItem(label="Request pop-ups", active=self.review_popups.enabled)
+        popups.connect("toggled", self._set_request_popups)
+        settings_menu.append(popups)
         for label, action in (("Broker settings…", self._broker_settings), ("Lock all vaults", self._lock_all)):
             item = Gtk.MenuItem(label=label)
             item.connect("activate", action)
@@ -382,7 +379,6 @@ class WorkspaceApplication(Gtk.Application):
                 style.remove_class("keeper-live" if paused else "keeper-paused")
             self.pause_button.set_sensitive(bool(self.broker and self.broker.enabled and not self.desktop.locked))
             pending = self._review_requests()
-            self.review_notifications.sync(pending if not self.desktop.locked else ())
             count = len(pending)
             access_label = f"Access ({count})" if count else "Access"
             self.access_button.set_label(access_label)
@@ -398,7 +394,7 @@ class WorkspaceApplication(Gtk.Application):
                 self.access_view.refresh()
             elif self.stack.get_visible_child_name() == "activity":
                 self.activity_view.refresh()
-            self._schedule_notification_review(pending)
+            self._schedule_request_popup(pending)
         return GLib.SOURCE_CONTINUE
 
     def _review_requests(self):
@@ -407,50 +403,33 @@ class WorkspaceApplication(Gtk.Application):
             ("edit", f"{edit.token_id}/{edit.id}") for edit in self.pending_edits() if edit.status == "pending"
         )
 
-    def _set_desktop_notifications(self, item):
+    def _set_request_popups(self, item):
         enabled = item.get_active()
-        if enabled == self.review_notifications.enabled:
+        if enabled == self.review_popups.enabled:
             return
         try:
-            self.review_notifications.set_enabled(enabled)
+            self.review_popups.set_enabled(enabled)
             self.message = ""
         except SettingsError as error:
             self.message = str(error)
-            item.set_active(self.review_notifications.enabled)
+            item.set_active(self.review_popups.enabled)
         self._refresh()
 
-    def _notification_activated(self, _action, parameter):
-        if self.exiting or self.desktop.locked or not self.review_notifications.enabled:
-            return
-        request = parameter.unpack()
-        if request not in self._review_requests():
-            return
-        self.queued_review = request
-        if self.window is None:
-            self.activate()
-        self._present()
-        self._refresh()
+    def _can_open_request_popup(self):
+        return (self.review_popups.enabled and not self.exiting and not self.desktop.locked
+                and self.dialog is None and not self.busy)
 
-    def _schedule_notification_review(self, pending):
-        if self.queued_review is None:
-            return
-        if self.desktop.locked or not self.review_notifications.enabled or self.queued_review not in pending:
-            self.queued_review = None
-        elif not self.dialog and not self.busy:
-            request, self.queued_review = self.queued_review, None
-            GLib.idle_add(self._open_notification_review, request)
+    def _schedule_request_popup(self, pending):
+        request = self.review_popups.next_request(pending)
+        if request and self.popup_source is None and self._can_open_request_popup():
+            self.popup_source = GLib.idle_add(self._open_request_popup, request)
 
-    def _open_notification_review(self, request):
-        if self.exiting or self.desktop.locked or not self.review_notifications.enabled:
-            return GLib.SOURCE_REMOVE
-        if request not in self._review_requests():
-            return GLib.SOURCE_REMOVE
-        if self.dialog or self.busy:
-            self.queued_review = request
+    def _open_request_popup(self, request):
+        self.popup_source = None
+        if not self._can_open_request_popup() or request != self.review_popups.next_request(self._review_requests()):
             return GLib.SOURCE_REMOVE
         kind, identifier = request
         self._present()
-        self._view("access")
         self.access_view.open_record(identifier, kind, pending_only=True)
         return GLib.SOURCE_REMOVE
 
@@ -948,7 +927,9 @@ class WorkspaceApplication(Gtk.Application):
         return GLib.SOURCE_REMOVE
 
     def do_shutdown(self):
-        self.review_notifications.sync(())
+        if self.popup_source is not None:
+            GLib.source_remove(self.popup_source)
+            self.popup_source = None
         if self.broker:
             self.broker.stop()
         if self.workspace:

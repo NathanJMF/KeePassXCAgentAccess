@@ -89,15 +89,16 @@ class ScopedBrokerTests(unittest.TestCase):
             self.invoke(operation, *args, **kwargs)
         self.assertEqual(error.exception.code, code)
 
-    def test_paused_workspace_does_not_accept_new_requests(self):
+    def test_paused_workspace_accepts_enrollment_but_blocks_vault_access(self):
         item = {"vault": self.vaults[0], "entry": self.entry, "metadata": True}
-        self.assertEqual(self.enroll([item]), {"status": "pending"})
         self.workspace.pause()
-        request = {"identity": "Other fixture agent", "project": "Fixture", "items": [item]}
-        self.assert_code("paused", "request_access", 1, request=request)
-        self.assert_code("paused", "request_edit", request={})
-        self.assertEqual(self.invoke("access_status"), {"status": "pending"})
-        self.assertEqual(len(self.grants.rows()), 1)
+        self.assertEqual(self.enroll([item]), {"status": "pending"})
+        record, = self.grants.rows()
+        self.assertEqual(record.status, "pending")
+        choice, = self.grants.choices(record.items[0])
+        self.grants.decide(record.id, [choice])
+        self.assertEqual(self.invoke("access_status"), {"status": "active"})
+        self.assert_code("paused", "list_entries", vault=self.vaults[0])
         self.assertEqual(len(self.activity.rows(action="Request token")), 1)
 
     def test_identity_reserved_until_token_is_removed_or_denied(self):

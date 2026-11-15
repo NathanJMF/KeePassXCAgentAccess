@@ -11,6 +11,7 @@ import shutil
 import subprocess
 import sys
 import traceback
+from unittest.mock import patch
 from uuid import UUID, uuid4
 
 from pykeepass import PyKeePass, create_database
@@ -90,7 +91,7 @@ def main(root):
     profiles = root / "profiles"
     profiles.mkdir()
     profiles.chmod(0o1777)
-    names = ("alpha", "beta", "review", "expanded", "bearer")
+    names = ("alpha", "beta", "review", "review-live", "review-paused", "expanded", "bearer")
     directories = [str(profiles / name) for name in names]
     atexit.register(subprocess.run, [*NAMESPACE, "rm", "-rf", "--", *directories], check=True)
     subprocess.run([*NAMESPACE, "mkdir", "-m", "700", *directories], check=True)
@@ -127,64 +128,40 @@ def main(root):
         enrollment_model, enrollment_chat = "Synthetic enrollment model", "Synthetic enrollment chat"
         action_model, action_chat = "Synthetic test model", "Synthetic test chat"
 
-        def notifications(kind, identifier):
-            return [message for method, (application, _, *payload) in notification_messages
-                    if method == "AddNotification" and application == app.get_application_id()
-                    and (message := payload[0]).get("default-action-target") == (kind, identifier)]
-
-        def get_notification(kind, identifier, title, *, count=1):
-            matches = lambda: notifications(kind, identifier)
-            wait_for(lambda: len(matches()) >= count, f"No desktop notification for {kind} request")
-            assert len(matches()) == count
-            notice = matches()[-1]
-            assert notice["title"] == title
-            assert notice["default-action"] == "app.review-request"
-            review, = notice["buttons"]
-            assert review["label"] == "Review request" and review["action"] == notice["default-action"]
-            assert review["target"] == notice["default-action-target"]
-            return notice
-
-        def activate_notice(notice, *, button=False):
-            if button:
-                action, target = (notice["buttons"][0][key] for key in ("action", "target"))
-            else:
-                action, target = (notice[key] for key in ("default-action", "default-action-target"))
-            bus = Gio.bus_get_sync(Gio.BusType.SESSION, None)
-            results = []
-
-            def completed(connection, result):
-                try:
-                    results.append(connection.call_finish(result))
-                except GLib.Error as error:
-                    results.append(error)
-
-            arguments = GLib.Variant("(sava{sv})", (action.removeprefix("app."), [GLib.Variant("(ss)", target)], {}))
-            bus.call(app.get_application_id(), app.get_dbus_object_path(), "org.freedesktop.Application",
-                     "ActivateAction", arguments,
-                     None, Gio.DBusCallFlags.NONE, 5000, None, completed)
-            wait_for(lambda: results, "Desktop notification action did not return")
-            assert not isinstance(results[0], GLib.Error), results[0]
-
-        def ignore_notice(notice):
-            visible = []
-
-            def inspect():
-                visible.append(app.dialog is not None)
-                if app.dialog:
-                    app.dialog.response(Gtk.ResponseType.CLOSE)
-                return GLib.SOURCE_REMOVE
-
-            GLib.timeout_add(50, inspect)
-            activate_notice(notice)
-            wait_for(lambda: visible, "Keeper did not process notification activation")
-            assert not visible[0]
-
-        def notification_setting():
+        def popup_setting():
             settings, = [child for child in descendants(app.window.get_titlebar())
                          if isinstance(child, Gtk.MenuButton) and child.get_tooltip_text() == "Keeper settings"]
             toggle, = [item for item in settings.get_popup().get_children()
-                       if isinstance(item, Gtk.CheckMenuItem) and item.get_label() == "Desktop notifications"]
+                       if isinstance(item, Gtk.CheckMenuItem) and item.get_label() == "Request pop-ups"]
             return toggle
+
+        def click_decision(widget):
+            event = Gdk.Event.new(Gdk.EventType.BUTTON_RELEASE)
+            event.button.button = Gdk.BUTTON_PRIMARY
+            mouse = widget.get_display().get_default_seat().get_pointer()
+            event.set_device(mouse)
+            event.set_source_device(mouse)
+            with patch("keepassxc_agent_access.owner_views.Gtk.get_current_event", return_value=event):
+                widget.clicked()
+
+        def assert_keypress_ignored(dialog, profile):
+            responses = []
+            listener = dialog.connect("response", lambda _, response: responses.append(response))
+            try:
+                for kind in (Gdk.EventType.KEY_PRESS, Gdk.EventType.KEY_RELEASE):
+                    for key in (Gdk.KEY_Return, Gdk.KEY_space, Gdk.KEY_Escape):
+                        event = Gdk.Event.new(kind)
+                        event.key.keyval = key
+                        assert dialog.emit("key-press-event" if kind == Gdk.EventType.KEY_PRESS
+                                           else "key-release-event", event)
+                for response in (Gtk.ResponseType.ACCEPT, Gtk.ResponseType.REJECT):
+                    widget = dialog.get_widget_for_response(response)
+                    assert not widget.get_can_focus()
+                    widget.clicked()
+                assert not responses
+                assert app.grants.records[token_ids[profile]].status == "pending"
+            finally:
+                dialog.disconnect(listener)
 
         def invoke(profile, *command, request=None, expected=0, model=action_model, chat=action_chat):
             env = [f"KEEPASSXC_AGENT_SOCKET={endpoint}", f"KEEPASSXC_AGENT_MODEL={model}",
@@ -250,7 +227,7 @@ def main(root):
             table.get_selection().select_path(path)
             return lambda: table.row_activated(path, table.get_column(0))
 
-        def approve(profile, vault=None, *, notice=None, resume=False):
+        def approve(profile, vault=None, *, popup=False, resume=False):
             def confirm(dialog):
                 assert dialog.get_title() == "Review access request"
                 assert app.window.get_visible()
@@ -292,14 +269,32 @@ def main(root):
                     assert " › ".join((choices[index].vault_name, *choices[index].path[:-1])) in updated
                 approve_button = dialog.get_widget_for_response(Gtk.ResponseType.ACCEPT)
                 assert approve_button.get_label() == ("Resume Access and Approve" if resume else "Approve")
+                assert dialog.get_widget_for_response(Gtk.ResponseType.REJECT).get_label() == "Deny"
+                assert dialog.get_widget_for_response(Gtk.ResponseType.CLOSE) is None
                 assert any("for all approved agents" in label for label in summary) == resume
                 assert approve_button.get_sensitive()
-                dialog.response(Gtk.ResponseType.ACCEPT)
-            if notice:
-                app.window.hide()
-                drive_dialog(lambda: activate_notice(notice), confirm, opens_async=True)
+                assert_keypress_ignored(dialog, profile)
+                click_decision(approve_button)
+            if popup:
+                drive_dialog(app._refresh, confirm, opens_async=True)
             else:
                 drive_dialog(access_row(profile), confirm)
+
+        def deny(profile, *, popup=False):
+            def reject(dialog):
+                paused = app.workspace.paused
+                approval = dialog.get_widget_for_response(Gtk.ResponseType.ACCEPT)
+                assert approval.get_label() == ("Resume Access and Approve" if paused else "Approve")
+                assert_keypress_ignored(dialog, profile)
+                click_decision(dialog.get_widget_for_response(Gtk.ResponseType.REJECT))
+
+            paused = app.workspace.paused
+            if popup:
+                drive_dialog(app._refresh, reject, opens_async=True)
+            else:
+                drive_dialog(access_row(profile), reject)
+            assert app.workspace.paused == paused
+            assert invoke(profile, "access", "status") == {"status": "denied"}
 
         def expanded_scope(tree, rows, name_column, permissions_column):
             leaves = {}
@@ -763,7 +758,7 @@ def main(root):
                 return proposal
 
             def decide(proposal, response, *, strings=(), password=None, before=None, allow=True,
-                       resume=False, notice=None):
+                       resume=False, popup=False):
                 app.access_button.clicked()
                 view = app.access_view
                 table = view.table
@@ -788,16 +783,19 @@ def main(root):
                         assert "Agent access is paused" in labels
                         resume_control = button(dialog, "Resume agent access")
                         assert resume_control.get_visible() and resume_control.get_sensitive()
-                        resume_control.clicked()
+                        click_decision(resume_control)
                         assert not app.workspace.paused and status(proposal)["status"] == "pending"
                         assert not resume_control.get_parent().get_visible()
                     assert approve.get_sensitive() == allow
                     if before:
                         before()
-                    dialog.response(response)
+                    if response in (Gtk.ResponseType.ACCEPT, Gtk.ResponseType.REJECT):
+                        click_decision(dialog.get_widget_for_response(response))
+                    else:
+                        dialog.response(response)
 
-                if notice:
-                    drive_dialog(lambda: activate_notice(notice, button=True), check, opens_async=True)
+                if popup:
+                    drive_dialog(app._refresh, check, opens_async=True)
                 else:
                     drive_dialog(lambda: table.row_activated(path, table.get_column(0)), check)
                 wait_for(lambda: not app.busy, "Approved agent edit did not finish")
@@ -810,16 +808,12 @@ def main(root):
 
             session = app.workspace.owner_session(first)
             root_group, = [item["id"] for item in session.groups if item["parent"] is None]
+            app.set_agent_paused(True)
             first_group = propose("create_group", parent=root_group, fields={"name": "Reviewed group"})
             duplicate = runner("beta", "request_edit", {"request": first_group})
             assert duplicate["status"] == "pending"
             assert runner("expanded", "edit_status", {"id": first_group["id"]}, error=True)
-            notice_id = f"{token_ids['beta']}/{first_group['id']}"
-            edit_notice = get_notification("edit", notice_id, "Keeper edit request")
-            app.set_agent_paused(True)
-            group = apply(first_group, strings=("Reviewed group", "Proposed"), resume=True, notice=edit_notice)
-            ignore_notice(edit_notice)
-            assert len(notifications("edit", notice_id)) == 1
+            group = apply(first_group, strings=("Reviewed group", "Proposed"), resume=True, popup=True)
             assert runner("beta", "request_edit", {"request": first_group}) == {
                 "id": first_group["id"], "status": "applied", "result": group,
             }
@@ -1092,36 +1086,32 @@ def main(root):
                 expanded = [{"vault": first, "entry": first_entry, "action": "check"},
                             {"vault": second, "entry": first_entry, "action": "check", "metadata": True, "url": True},
                             {"vault": second, "entry": nested_entry, "metadata": True}]
-                assert "paused" in enroll("alpha", alpha, expected=1)
-                assert not app.grants.rows()
-                assert not any(method == "AddNotification" and args[0] == app.get_application_id()
-                               for method, args in notification_messages)
+                assert app.workspace.paused
                 app.set_agent_paused(False)
-                assert enroll("alpha", alpha) == enroll("alpha", alpha) == {"status": "pending"}
-                assert enroll("beta", beta) == {"status": "pending"}
-                alpha_notice = get_notification("grant", token_ids["alpha"], "Keeper access request")
-                beta_notice = get_notification("grant", token_ids["beta"], "Keeper access request")
-                toggle = notification_setting()
+                toggle = popup_setting()
                 assert toggle.get_active()
-                duplicate_identity = enroll("review", beta, expected=1, identity="  aGENT beta  ")
-                assert "identity" in duplicate_identity.casefold()
-                approve("alpha", notice=alpha_notice)
-                ignore_notice(alpha_notice)
-                assert len(notifications("grant", token_ids["alpha"])) == 1
+                app.window.hide()
+                assert enroll("alpha", alpha) == enroll("alpha", alpha) == {"status": "pending"}
+                approve("alpha", popup=True)
+                app.set_agent_paused(True)
+                assert enroll("review-paused", alpha) == {"status": "pending"}
+                deny("review-paused", popup=True)
+                assert app.workspace.paused
                 toggle.set_active(False)
                 assert not toggle.get_active()
                 config = private / "desktop-notifications.json"
                 assert json.loads(config.read_text()) == {"desktop_notifications": False}
-                wait_for(lambda: ("RemoveNotification", (app.get_application_id(), f"grant:{token_ids['beta']}"))
-                         in notification_messages, "Turning off notifications did not withdraw the pending notice")
-                ignore_notice(beta_notice)
+                assert enroll("beta", beta) == {"status": "pending"}
+                duplicate_identity = enroll("review", beta, expected=1, identity="  aGENT beta  ")
+                assert "identity" in duplicate_identity.casefold()
                 assert enroll("review", beta) == {"status": "pending"}
                 assert len(app.grants.rows()) == 3
                 assert "unavailable for this token" in invoke("beta", "vaults", "list", expected=1)
                 settled = []
-                GLib.timeout_add(1100, lambda: settled.append(True))
+                GLib.timeout_add(1100, lambda: settled.append(app.dialog is None))
                 wait_for(lambda: settled, "Keeper did not poll for pending requests")
-                assert not notifications("grant", token_ids["review"])
+                assert settled == [True]
+                app.access_button.clicked()
                 access_view = app.access_view
                 access_table = access_view.table
                 assert [column.get_title() for column in access_table.get_columns()] == [
@@ -1146,19 +1136,19 @@ def main(root):
                 assert token_context_menu("beta") == ["Review request…"]
                 assert token_context_menu("alpha") == ["View permissions…", "Disable token", "Remove token…"]
                 assert toggle.get_active() is False
-                app.set_agent_paused(True)
-                drive_dialog(access_row("review"), lambda dialog: dialog.response(Gtk.ResponseType.REJECT))
+                deny("review")
                 assert app.workspace.paused
-                assert invoke("review", "access", "status") == {"status": "denied"}
                 assert "unavailable for this token" in invoke("review", "vaults", "list", expected=1)
                 toggle.set_active(True)
                 assert toggle.get_active()
                 assert json.loads(config.read_text()) == {"desktop_notifications": True}
-                beta_notice = get_notification("grant", token_ids["beta"], "Keeper access request", count=2)
                 assert "paused" in invoke("alpha", "vaults", "list", expected=1)
-                approve("beta", second, notice=beta_notice, resume=True)
+                approve("beta", second, popup=True, resume=True)
                 assert not app.workspace.paused
                 assert app.workspace.session(first) and app.workspace.session(second)
+                assert enroll("review-live", alpha) == {"status": "pending"}
+                deny("review-live", popup=True)
+                assert not app.workspace.paused
 
                 assert invoke("alpha", "access", "status") == {"status": "active"}
                 assert [row["id"] for row in invoke("alpha", "vaults", "list")["vaults"]] == [first]
@@ -1467,7 +1457,9 @@ def main(root):
                 for sentinel in (UNLOCK, PASSWORD, OTHER_PASSWORD, EDIT_PASSWORD, REQUESTED_PASSWORD, AUTHORIZATION, BEARER_AUTHORIZATION, other_header):
                     assert all(sentinel.encode() not in data for data in persisted)
                     assert all(sentinel.encode() not in data for call in captured for data in call)
-                print("Workspace scenario passed: two vaults, scoped CLI, GNOME owner and agent edits, desktop notifications, credential types, migration, locks and Activity", flush=True)
+                assert not any(application == app.get_application_id()
+                               for _, (application, *_) in notification_messages)
+                print("Workspace scenario passed: two vaults, scoped CLI, GNOME mouse-only request pop-ups, four access decisions, credential types, migration, locks and Activity", flush=True)
                 result = 0
             except Exception:
                 traceback.print_exc()

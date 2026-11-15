@@ -62,8 +62,6 @@ class ScopedBroker:
         with self.workspace.mutex:
             if not live():
                 raise ListingError("revoked")
-            if self.workspace.paused and operation in ("request_access", "request_edit"):
-                raise ListingError("paused")
             if operation == "request_access":
                 status = self.grants.enroll(credential, uid, payload["request"], context)
                 return encode({"status": status})

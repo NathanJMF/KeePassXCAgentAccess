@@ -95,6 +95,7 @@ class EditRequestsTests(unittest.TestCase):
     def test_submission_does_not_probe_resources_and_is_isolated_per_token(self):
         real = self._request("update_entry", entry=self.unscoped, fields={"title": "Unscoped update"})
         absent = self._request("update_entry", vault=str(uuid4()), entry=str(uuid4()), fields={"title": "Other"})
+        self.workspace.pause()
         for payload in (real, absent):
             self.assertEqual(self._wire("request_edit", request=payload), {"id": payload["id"], "status": "pending"})
             self.assertEqual(self._wire("request_edit", request=dict(payload)), self._wire("edit_status", id=payload["id"]))
@@ -120,7 +121,6 @@ class EditRequestsTests(unittest.TestCase):
         review = self.edits.preview(self.token.id, real["id"])
         self.assertEqual(review.old, (("title", "Unscoped entry"),))
         self.assertEqual(review.new, (("title", "Unscoped update"),))
-        self.workspace.pause()
         with self.assertRaisesRegex(VaultError, "Resume"):
             self.edits.approve(review)
         self.workspace.pause(False)

@@ -59,15 +59,14 @@ def check(root):
         assert invoke("access_status") == {"status": "uninitialized"}
         request = {"identity": "Runner fixture", "project": "Synthetic",
                    "items": [{"metadata": True, "vault": vault, "entry": row["id"]}]}
-        assert "paused" in invoke("request_access", {"request": request}, error=True)
-        assert not grants.rows()
-        workspace.pause(False)
         assert invoke("request_access", {"request": request}) == {"status": "pending"}
         record, = grants.rows()
         assert record.uid == uid
         match, = grants.choices(record.items[0])
         grants.decide(record.id, [match])
         assert invoke("access_status") == {"status": "active"}
+        assert "paused" in invoke("list_entries", {"vault": vault}, error=True)
+        workspace.pause(False)
         assert invoke("list_entries", {"vault": vault}) == {"entries": [row]}
         deadline = monotonic() + 2
         while monotonic() < deadline:

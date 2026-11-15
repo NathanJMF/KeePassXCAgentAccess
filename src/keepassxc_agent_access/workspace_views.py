@@ -9,7 +9,7 @@ from .access_settings import Action, ActionType
 from .activity import ActivityError
 from .activity_grouping import EDIT_STAGES, ActivityResources, activity_groups, activity_matches, event_time
 from .edit_request_view import review_edit
-from .owner_views import _dialog, _label, _scroll, _table, _time, table_time
+from .owner_views import _dialog, _label, _scroll, _table, _time, require_mouse_decisions, table_time
 from .workspace_context import DELETE_LABEL, attach_row_context
 from .workspace_editor import delete_entry, edit_entry
 from .workspace_style import styled
@@ -511,12 +511,14 @@ class AccessView(Gtk.Box):
             token_id, _, request_id = identifier.partition("/")
             record = next((edit for edit in self.app.pending_edits()
                            if edit.token_id == token_id and edit.id == request_id), None)
-            if record is not None and (not pending_only or record.status == "pending"):
+            if record is not None and record.status == "pending" and not self.app.busy:
+                self.app.review_popups.mark_reviewed(kind, identifier)
                 review_edit(self.app, record)
             return
         grant = self.app.grants.records.get(identifier) if self.app.grants else None
         if grant:
             if grant.status == "pending":
+                self.app.review_popups.mark_reviewed(kind, identifier)
                 self._review(grant)
             elif not pending_only:
                 self._manage(grant)
@@ -524,10 +526,12 @@ class AccessView(Gtk.Box):
     def _review(self, grant):
         dialog, body = _dialog(self.app, "Review access request", 620, -1)
         dialog.set_name("keeper-access-review")
+        dialog.set_position(Gtk.WindowPosition.CENTER_ON_PARENT)
         dialog.set_modal(True)
-        dialog.add_buttons("Close", Gtk.ResponseType.CLOSE, "Deny", Gtk.ResponseType.REJECT,
-                           "Approve", Gtk.ResponseType.ACCEPT)
-        dialog.set_default_response(Gtk.ResponseType.CLOSE)
+        dialog.add_buttons("Deny", Gtk.ResponseType.REJECT, "Approve", Gtk.ResponseType.ACCEPT)
+        dialog.connect("key-press-event", lambda *_: True)
+        dialog.connect("key-release-event", lambda *_: True)
+        require_mouse_decisions(dialog)
         approve = styled(dialog.get_widget_for_response(Gtk.ResponseType.ACCEPT), "suggested-action")
         resume_label = "Resume Access and Approve"
 
