@@ -1,5 +1,7 @@
 """GTK views for request review, entry actions, and local activity."""
 
+from dataclasses import dataclass
+
 from gi.repository import Gtk, Pango
 
 from .access_settings import Action, ActionType
@@ -137,8 +139,9 @@ def empty_state(icon, text):
 
 
 def pane_table(model, titles, widths, *, lead_icon=None, status=None, expand_columns=(1, 2), muted_columns=(),
-               time_columns=None, sort_group=None, replace_rows=_replace_rows):
+               time_columns=None, icon_columns=None, sort_group=None, replace_rows=_replace_rows):
     time_columns = time_columns or {}
+    icon_columns = icon_columns or {}
     table = styled(Gtk.TreeView(model=model), "keeper-table")
     table.keeper_sort = TableSort(time_columns, sort_group, replace_rows)
     table.set_grid_lines(Gtk.TreeViewGridLines.HORIZONTAL)
@@ -152,11 +155,13 @@ def pane_table(model, titles, widths, *, lead_icon=None, status=None, expand_col
         ellipsize = Pango.EllipsizeMode.NONE if index in time_columns else Pango.EllipsizeMode.END
         text = Gtk.CellRendererText(xpad=10, ypad=9, ellipsize=ellipsize)
         colored = status is not None and index == status[0]
-        if colored or (index == 0 and lead_icon):
+        if colored or index in icon_columns or (index == 0 and lead_icon):
             icon = Gtk.CellRendererPixbuf(xpad=5, stock_size=Gtk.IconSize.MENU)
             column.pack_start(icon, False)
             if colored:
                 column.set_cell_data_func(icon, _status_icon, status)
+            elif index in icon_columns:
+                column.add_attribute(icon, "icon-name", icon_columns[index])
             else:
                 icon.set_property("icon-name", lead_icon)
             text.set_property("xpad", 3)
@@ -236,26 +241,38 @@ def token_permissions(record, scopes):
     return ", ".join(dict.fromkeys(labels))
 
 
-def approved_entries_tree(workspace, scopes):
+@dataclass(frozen=True)
+class ApprovedResource:
+    key: tuple
+    parent: tuple | None
+    name: str
+    icon: str
+    permissions: str = ""
+
+
+def approved_resources(workspace, scopes, snapshots):
     by_vault = {}
     for scope in scopes:
         by_vault.setdefault(scope.vault, {}).setdefault(scope.entry, []).append(scope)
 
-    model = Gtk.TreeStore(str, str, str)
+    resources = {}
     needs_unlock = False
     with workspace.mutex:
         for vault_id, permissions in by_vault.items():
-            record = workspace.registrations.get(vault_id)
-            session = workspace.owner_session(vault_id) if record else None
-            title = record.name if record else "Removed database"
-            locked = record is not None and session is None
+            if vault_id not in snapshots:
+                record = workspace.registrations.get(vault_id)
+                session = workspace.owner_session(vault_id) if record else None
+                entries = {row["id"]: row for row in session.entries} if session else {}
+                groups = {row["id"]: row for row in session.groups} if session else {}
+                snapshots[vault_id] = record, bool(session), entries, groups
+            record, unlocked, entries, groups = snapshots[vault_id]
+            locked = record is not None and not unlocked
             needs_unlock |= locked
+            title = record.name if record else "Removed database"
             if locked:
                 title += " · Locked"
-            vault = model.append(None, (title, "", "drive-harddisk-symbolic"))
-            entries = {row["id"]: row for row in session.entries if row["id"] in permissions} if session else {}
-            groups = {row["id"]: row for row in session.groups} if session else {}
-            branches = {}
+            vault = ("vault", vault_id)
+            resources[vault] = ApprovedResource(vault, None, title, "drive-harddisk-symbolic")
             for index, (entry_id, approved) in enumerate(permissions.items(), 1):
                 entry = entries.get(entry_id)
                 parent = vault
@@ -268,14 +285,25 @@ def approved_entries_tree(workspace, scopes):
                         path.append(group)
                         group = groups.get(group["parent"])
                     for group in reversed(path):
-                        key = group["id"]
-                        if key not in branches:
-                            branches[key] = model.append(parent, (
-                                group["name"] or "(Untitled group)", "", "folder-symbolic",
-                            ))
-                        parent = branches[key]
+                        key = ("group", vault_id, group["id"])
+                        if key not in resources:
+                            name = group["name"] or "(Untitled group)"
+                            resources[key] = ApprovedResource(key, parent, name, "folder-symbolic")
+                        parent = key
                     name = entry["title"] or "(Untitled entry)"
-                model.append(parent, (name, token_permissions(record, approved), "dialog-password-symbolic"))
+                key = ("entry", vault_id, entry_id)
+                resources[key] = ApprovedResource(
+                    key, parent, name, "dialog-password-symbolic", token_permissions(record, approved),
+                )
+    return tuple(resources.values()), needs_unlock
+
+
+def approved_entries_tree(workspace, scopes):
+    resources, needs_unlock = approved_resources(workspace, scopes, {})
+    model = Gtk.TreeStore(str, str, str)
+    nodes = {}
+    for item in resources:
+        nodes[item.key] = model.append(nodes.get(item.parent), (item.name, item.permissions, item.icon))
 
     tree = Gtk.TreeView(model=model, enable_tree_lines=True)
     tree.get_selection().set_mode(Gtk.SelectionMode.NONE)
@@ -300,6 +328,7 @@ class AccessView(Gtk.Box):
     TITLES = ("Requested", "Last used", "Identity", "Project", "Status")
     STATUS, RECORD_ID, KIND = 4, 5, 6
     REQUESTED_TIME, LAST_USED_TIME, REVIEW_GROUP = 7, 8, 9
+    ICON, ROW_KEY = 10, 11
     REMOVE = "Remove token…"
 
     def __init__(self, app):
@@ -312,14 +341,19 @@ class AccessView(Gtk.Box):
         self.review_button.set_sensitive(False)
         self.pack_start(header, False, False, 0)
         self.table, scroll = pane_table(
-            Gtk.ListStore(*([str] * 7), object, object, bool), self.TITLES, (138, 138, 122, 122, 119),
+            Gtk.TreeStore(*([str] * 7), object, object, bool, str, object, object),
+            self.TITLES, (138, 138, 122, 122, 119),
             status=(self.STATUS, ACCESS_STATES), muted_columns=(0, 1), expand_columns=(2, 3),
-            time_columns={0: self.REQUESTED_TIME, 1: self.LAST_USED_TIME}, sort_group=self.REVIEW_GROUP,
+            time_columns={0: self.REQUESTED_TIME, 1: self.LAST_USED_TIME}, icon_columns={2: self.ICON},
+            sort_group=self.REVIEW_GROUP, replace_rows=replace_tree_rows,
         )
+        self.table.set_enable_tree_lines(True)
+        self.table.set_expander_column(self.table.get_column(0))
+        self.table.connect("row-expanded", self._expand_scope)
         self.table.connect("row-activated", self._open)
         attach_row_context(self.table, self._context, destructive_labels=(self.REMOVE,))
         self.table.get_selection().connect("changed", lambda *_: self.review_button.set_sensitive(
-            selected_key(self.table, self.RECORD_ID) is not None))
+            bool(selected_key(self.table, self.RECORD_ID))))
         self.empty, _, _ = empty_state("changes-prevent-symbolic", "No access requests or tokens")
         self.pack_start(table_card(scroll, self.empty), True, True, 0)
 
@@ -327,32 +361,54 @@ class AccessView(Gtk.Box):
         grants = self.app.grants.rows() if self.app.grants else []
         edits = self.app.pending_edits()
         rows = []
+        snapshots = {}
         for grant in grants:
             other = grant.status != "pending"
+            scope = self._scope_rows(grant, snapshots) if other else ()
             rows.append((other, -grant.requested,
                          (table_time(grant.requested), table_time(grant.last_used),
                           reported(grant.identity), reported(grant.project), grant.status.capitalize(), grant.id, "grant",
-                          grant.requested, grant.last_used, other)))
+                          grant.requested, grant.last_used, other, None, ("grant", grant.id), scope)))
         for edit in edits:
             state = "Edit pending" if edit.status == "pending" else "Applying edit"
             rows.append((False, -edit.requested,
                          (table_time(edit.requested), "—", reported(edit.identity),
-                          reported(edit.project), state, f"{edit.token_id}/{edit.id}", "edit", edit.requested, None, False)))
+                          reported(edit.project), state, f"{edit.token_id}/{edit.id}", "edit", edit.requested, None,
+                          False, None, ("edit", edit.token_id, edit.id), ())))
         rows.sort()
-        fill_table(self.table, [columns for _, _, columns in rows], self.RECORD_ID)
+        fill_table(self.table, [columns for _, _, columns in rows], self.ROW_KEY)
         self.empty.set_visible(not rows)
+
+    def _scope_rows(self, grant, snapshots):
+        resources, _ = approved_resources(self.app.workspace, grant.scope, snapshots)
+        branches = {}
+        for item in reversed(resources):
+            children = tuple(reversed(branches.get(item.key, ())))
+            row = ("", "", item.name, item.permissions, "", "", "scope", None, None, True,
+                   item.icon, (grant.id, *item.key), children)
+            branches.setdefault(item.parent, []).append(row)
+        return tuple(reversed(branches.get(None, ())))
+
+    def _expand_scope(self, table, iterator, _path):
+        model = table.get_model()
+        if not getattr(table, "keeper_restoring_tree", False) and model[iterator][self.KIND] == "grant":
+            for vault in model[iterator].iterchildren():
+                table.expand_row(vault.path, True)
 
     def _open(self, *_):
         model, selected = self.table.get_selection().get_selected()
         if selected is not None:
             row = model[selected]
-            self.open_record(row[self.RECORD_ID], row[self.KIND])
+            if row[self.RECORD_ID]:
+                self.open_record(row[self.RECORD_ID], row[self.KIND])
 
     def _context(self, row):
         state = row[self.STATUS]
         if self.app.desktop.locked or state == "Applying edit":
             return []
         identifier, kind = row[self.RECORD_ID], row[self.KIND]
+        if not identifier:
+            return []
 
         def open_selected():
             self.open_record(identifier, kind)
@@ -619,7 +675,7 @@ def activity_dialog(app, row):
     return dialog
 
 
-def replace_activity_rows(table, rows, key_column):
+def replace_tree_rows(table, rows, key_column):
     model = table.get_model()
     if list(map(tuple, model)) == rows:
         return
@@ -628,18 +684,25 @@ def replace_activity_rows(table, rows, key_column):
     table.map_expanded_rows(lambda _, path: expanded.add(model[path][key_column]))
     model.clear()
     restored = None
-    for values in rows:
-        parent = model.append(None, values)
-        for child in values[-1]:
-            node = model.append(parent, child)
-            if child[key_column] == selected:
-                restored = node
+    open_nodes = []
+    pending = [(None, values) for values in reversed(rows)]
+    while pending:
+        parent, values = pending.pop()
+        node = model.append(parent, values)
         if values[key_column] in expanded:
-            table.expand_row(model.get_path(parent), False)
+            open_nodes.append(node)
         if values[key_column] == selected:
-            restored = parent
-    if restored is not None:
-        table.get_selection().select_iter(restored)
+            restored = node
+        pending.extend((node, child) for child in reversed(values[-1]))
+
+    table.keeper_restoring_tree = True
+    try:
+        for node in open_nodes:
+            table.expand_row(model.get_path(node), False)
+        if restored is not None:
+            table.get_selection().select_iter(restored)
+    finally:
+        table.keeper_restoring_tree = False
 
 
 class ActivityView(Gtk.Box):
@@ -675,10 +738,10 @@ class ActivityView(Gtk.Box):
             Gtk.TreeStore(*([str] * (self.RECORD_ID + 1)), object, object, object), self.TITLES,
             (144, 64, 60, 115, 78, 86, 84, 144), status=(7, ACTIVITY_STATES),
             expand_columns=(1, 2, 3, 4, 5, 6), muted_columns=(0,), time_columns={0: self.TIME},
-            replace_rows=replace_activity_rows,
+            replace_rows=replace_tree_rows,
         )
         self.table.set_enable_tree_lines(True)
-        self.table.set_expander_column(self.table.get_column(3))
+        self.table.set_expander_column(self.table.get_column(0))
         self.table.connect("row-activated", self._details)
         self.empty, self.empty_label, _ = empty_state("document-open-recent-symbolic", "No activity recorded")
         self.pack_start(table_card(scroll, self.empty), True, True, 0)

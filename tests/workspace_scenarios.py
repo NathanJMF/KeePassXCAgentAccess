@@ -141,11 +141,15 @@ def main(root):
             if failures:
                 raise failures[0]
 
+        def access_root(profile):
+            table = app.access_view.table
+            identity = app.access_view.TITLES.index("Identity")
+            return next(row for row in table.get_model() if row[identity].startswith(f"Agent {profile} "))
+
         def access_row(profile):
             app.access_button.clicked()
             table = app.access_view.table
-            identity = app.access_view.TITLES.index("Identity")
-            path = next(row.path for row in table.get_model() if row[identity].startswith(f"Agent {profile} "))
+            path = access_root(profile).path
             table.get_selection().select_path(path)
             return lambda: table.row_activated(path, table.get_column(0))
 
@@ -173,12 +177,54 @@ def main(root):
                 dialog.response(Gtk.ResponseType.ACCEPT)
             drive_dialog(access_row(profile), confirm)
 
+        def expanded_scope(tree, rows, name_column, permissions_column):
+            leaves = {}
+
+            def collect(row, parent_path):
+                path = (*parent_path, row[name_column])
+                if row.model.iter_has_child(row.iter):
+                    assert tree.row_expanded(row.path), path
+                    for child in row.iterchildren():
+                        collect(child, path)
+                else:
+                    assert path not in leaves
+                    leaves[path] = row[permissions_column]
+
+            for row in rows:
+                collect(row, ())
+            return leaves
+
         def check_token_scope(first, second, *, first_locked=False):
             first_name = app.workspace.registrations[first].name
             second_name = app.workspace.registrations[second].name
             root_entry = fixture[0]["title"]
             nested_path = (second_name, *fixture[2]["group_path"], fixture[2]["title"])
             first_entry_path = (f"{first_name} · Locked", "Entry 1") if first_locked else (first_name, root_entry)
+            app.access_button.clicked()
+            table = app.access_view.table
+            identity = app.access_view.TITLES.index("Identity")
+            project = app.access_view.TITLES.index("Project")
+            token = access_root("expanded")
+            if not first_locked:
+                assert not table.row_expanded(token.path)
+            table.expand_row(token.path, False)
+
+            def read_inline():
+                token = access_root("expanded")
+                assert table.row_expanded(token.path)
+                return expanded_scope(table, token.iterchildren(), identity, project)
+
+            inline = read_inline()
+            assert set(inline) == {first_entry_path, (second_name, root_entry), nested_path}
+            assert all(secret not in value for paths, permissions in inline.items() for value in (*paths, permissions)
+                       for secret in (STORED_URL, USERNAME, PASSWORD, OTHER_PASSWORD))
+            if not first_locked:
+                invoke("expanded", "vaults", "list")
+                app.access_view.refresh()
+                assert read_inline() == inline
+                for _ in range(3):
+                    table.get_column(identity).clicked()
+                    assert read_inline() == inline
 
             def inspect(dialog):
                 assert dialog.get_title() == "Access token"
@@ -189,23 +235,8 @@ def main(root):
                 assert all(first not in value and second not in value for value in labels)
                 tree, = [child for child in descendants(dialog) if isinstance(child, Gtk.TreeView)]
                 assert [column.get_title() for column in tree.get_columns()] == ["Database / Group / Entry", "Permissions"]
-                model = tree.get_model()
-                entries = {}
-
-                def collect(model, path, node, names):
-                    if model.iter_has_child(node):
-                        assert tree.row_expanded(path)
-                    else:
-                        lineage = []
-                        while node is not None:
-                            lineage.append(model[node][0])
-                            node = model.iter_parent(node)
-                        names_path = tuple(reversed(lineage))
-                        assert names_path not in names
-                        names[names_path] = model[path][1]
-
-                model.foreach(collect, entries)
-                assert set(entries) == {first_entry_path, (second_name, root_entry), nested_path}
+                entries = expanded_scope(tree, tree.get_model(), 0, 1)
+                assert entries == inline
                 assert entries[first_entry_path] and "Entry metadata" not in entries[first_entry_path]
                 assert "Entry metadata" in entries[second_name, root_entry]
                 assert "Stored URL" in entries[second_name, root_entry]
@@ -874,6 +905,11 @@ def main(root):
                     "Requested", "Last used", "Identity", "Project", "Status",
                 ]
                 assert [row[4] for row in access_table.get_model()] == ["Pending", "Pending", "Active"]
+                assert isinstance(access_table.get_model(), Gtk.TreeStore)
+                assert access_table.get_expander_column() == access_table.get_column(0)
+                access_model = access_table.get_model()
+                assert not access_model.iter_has_child(access_root("beta").iter)
+                assert access_model.iter_has_child(access_root("alpha").iter)
                 assert all(timestamp.fullmatch(row[0]) and row[1] == "—" for row in access_table.get_model())
                 assert token_context_menu("beta") == ["Review request…"]
                 assert token_context_menu("alpha") == ["View permissions…", "Disable token", "Remove token…"]
@@ -1060,6 +1096,12 @@ def main(root):
                 assert invoke("alpha", "entries", "list", expected=1) == denied
                 assert invoke("beta", "entries", "list")["entries"] == fixture[2:]
                 assert token_context_menu("alpha") == ["View permissions…", "Re-enable token", "Remove token…"]
+                disabled = access_root("alpha")
+                assert disabled[app.access_view.STATUS] == "Disabled"
+                access_table.expand_row(disabled.path, False)
+                assert access_table.row_expanded(disabled.path)
+                permissions, = expanded_scope(access_table, disabled.iterchildren(), 2, 3).values()
+                assert "Entry metadata" in permissions and "Username" in permissions
                 drive_dialog(access_row("alpha"), lambda dialog: dialog.response(Gtk.ResponseType.APPLY))
                 assert invoke("alpha", "entries", "list")["entries"] == fixture[:1]
                 alpha_record = next(row for row in app.grants.rows() if row.identity == "Agent alpha")
@@ -1080,6 +1122,7 @@ def main(root):
                     "Time", "Model", "Chat", "Action", "Vault", "Group", "Key", "Outcome",
                 ]
                 assert isinstance(table.get_model(), Gtk.TreeStore)
+                assert table.get_expander_column() == table.get_column(0)
                 app.activity_view.filters["agent"].set_text("Agent beta")
                 app.activity_view.refresh()
                 assert len(table.get_model()) > 0
