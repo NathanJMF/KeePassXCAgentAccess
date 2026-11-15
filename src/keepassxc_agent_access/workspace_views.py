@@ -8,7 +8,8 @@ from .access_settings import Action, ActionType
 from .activity import ActivityError
 from .edit_request_view import review_edit
 from .owner_views import _dialog, _label, _scroll, _table, _time
-from .workspace_editor import edit_entry, recycle_entry
+from .workspace_context import DELETE_LABEL
+from .workspace_editor import delete_entry, edit_entry
 from .workspace_style import styled
 
 
@@ -16,10 +17,10 @@ def reported(value):
     return f"{value} (reported)" if value else "—"
 
 
-def table_time(timestamp, *, include_year=False):
+def table_time(timestamp, *, entry_date=False):
     if timestamp is None:
         return "—"
-    pattern = "%Y-%m-%d · %H:%M" if include_year else "%b %d · %H:%M:%S"
+    pattern = "%H:%M %d/%m/%y" if entry_date else "%b %d · %H:%M:%S"
     return datetime.fromtimestamp(timestamp).astimezone().strftime(pattern)
 
 
@@ -604,7 +605,7 @@ class ActivityView(Gtk.Box):
 
 
 EDIT_ENTRY_RESPONSE = 1
-RECYCLE_ENTRY_RESPONSE = 2
+DELETE_ENTRY_RESPONSE = 2
 
 
 def entry_details(app, vault, entry):
@@ -617,11 +618,13 @@ def entry_details(app, vault, entry):
                            "Edit action", Gtk.ResponseType.ACCEPT, "Remove action", Gtk.ResponseType.REJECT)
         add_label(body, f"{record.name} · {' / '.join(entry['group_path']) or 'Root'}\nEntry  {entry['id']}")
         add_label(body, f"Username  {entry['username'] or '—'}\nURL  {entry['url'] or '—'}")
-        add_label(body, f"Created  {_time(entry.get('created'))}\nModified  {_time(entry.get('modified'))}")
+        created = table_time(entry.get("created"), entry_date=True)
+        modified = table_time(entry.get("modified"), entry_date=True)
+        add_label(body, f"Created  {created}\nModified  {modified}")
         entry_actions = Gtk.Box(spacing=8)
         button(entry_actions, "Copy entry reference", lambda *_: app.copy_reference(vault, "entry", entry["id"]))
         button(entry_actions, "Edit entry…", lambda *_: dialog.response(EDIT_ENTRY_RESPONSE))
-        button(entry_actions, "Move entry to recycle bin…", lambda *_: dialog.response(RECYCLE_ENTRY_RESPONSE))
+        styled(button(entry_actions, DELETE_LABEL, lambda *_: dialog.response(DELETE_ENTRY_RESPONSE)), "keeper-delete")
         body.pack_start(entry_actions, False, False, 0)
         add_label(body, "Credential actions")
         store = Gtk.ListStore(str, str, str, str, str)
@@ -646,8 +649,8 @@ def entry_details(app, vault, entry):
         if response == EDIT_ENTRY_RESPONSE:
             edit_entry(app, vault, entry["group"], entry)
             return
-        if response == RECYCLE_ENTRY_RESPONSE:
-            recycle_entry(app, vault, group, entry)
+        if response == DELETE_ENTRY_RESPONSE:
+            delete_entry(app, vault, group, entry)
             return
         if response == Gtk.ResponseType.REJECT and identifier:
             if app.confirm("Remove this action?", "Existing tokens will lose permission to run this binding."):

@@ -26,8 +26,8 @@ from .settings import SettingsError, SettingsStore
 from .tray import APP_ID, APP_TITLE, SetupDialog, password_entry
 from .vault import UnlockCancelled, VaultError
 from .workspace import Workspace
-from .workspace_context import attach_row_context
-from .workspace_editor import edit_entry, edit_group, recycle_entry, recycle_group
+from .workspace_context import DELETE_LABEL, attach_row_context
+from .workspace_editor import delete_entry, delete_group, edit_entry, edit_group
 from .workspace_style import install_style, styled
 from .workspace_views import (
     AccessView, ActivityView, add_label, button, empty_state, entry_details, fill_table, pane_table, section_heading, table_time,
@@ -59,6 +59,7 @@ class WorkspaceApplication(Gtk.Application):
         self.busy = False
         self.selection = None
         self.tree_signature = None
+        self.tree_open_vaults = set()
         self.entry_rows = {}
 
     def do_startup(self):
@@ -249,6 +250,9 @@ class WorkspaceApplication(Gtk.Application):
         new_menu.show_all()
         self.new_item.set_popup(new_menu)
         self.vault_tools.pack_start(self.new_item, False, False, 0)
+        button_heights = Gtk.SizeGroup(mode=Gtk.SizeGroupMode.VERTICAL)
+        for control in (*self.vault_buttons.values(), self.new_item):
+            button_heights.add_widget(control)
 
         card = styled(Gtk.Box(orientation=Gtk.Orientation.VERTICAL), "keeper-card")
         self.browser.pack_start(card, True, True, 0)
@@ -266,7 +270,10 @@ class WorkspaceApplication(Gtk.Application):
             muted_columns=(1, 2, 3, 4, ENTRY_FOLDER_COLUMN), sort_keys={3: 7, 4: 8},
         )
         self.folder_column = self.entries.get_column(ENTRY_FOLDER_COLUMN)
-        self.entries.move_column_after(self.folder_column, None)
+        created, modified = (self.entries.get_column(index) for index in (3, 4))
+        self.entries.move_column_after(created, None)
+        self.entries.move_column_after(modified, created)
+        self.entries.move_column_after(self.folder_column, modified)
         self.entries.connect("row-activated", self._entry)
         attach_row_context(self.entries, self._entry_context)
         card.pack_start(self.entry_scroll, True, True, 0)
@@ -417,6 +424,9 @@ class WorkspaceApplication(Gtk.Application):
                                                  group["id"], "folder-symbolic"))
                     nodes[identifier, group["id"]] = node
                     todo.extend((node, child) for child in reversed(children.get(group["id"], ())))
+        open_vaults = {record.id for record, session in records if session}
+        expanded.update((identifier, "") for identifier in open_vaults - self.tree_open_vaults)
+        self.tree_open_vaults = open_vaults
         for key in expanded:
             if key in nodes:
                 self.tree.expand_to_path(model.get_path(nodes[key]))
@@ -514,9 +524,10 @@ class WorkspaceApplication(Gtk.Application):
         for row, folder in matches:
             created, modified = row.get("created"), row.get("modified")
             values.append((row["title"] or "(Untitled entry)", row["username"], row["url"],
-                           table_time(created, include_year=True), table_time(modified, include_year=True),
+                           table_time(created, entry_date=True), table_time(modified, entry_date=True),
                            folder, row["id"], created, modified))
         fill_table(self.entries, values, ENTRY_ID_COLUMN)
+        self.new_group_item.set_visible(bool(session and not group_id))
         self.new_item.set_visible(bool(session))
         self.new_item.set_sensitive(not self.busy and not self.desktop.locked)
         for key, control in self.vault_buttons.items():
@@ -544,15 +555,16 @@ class WorkspaceApplication(Gtk.Application):
         if record is None:
             return []
         session = self.workspace.owner_session(vault)
-        create = [("New entry…", self._new_entry), ("New group…", self._new_group)]
+        create = [("New entry…", self._new_entry)]
         if group:
             if not session:
                 return []
             return self._actions_for(target, [
                 create,
                 [("Edit group…", self._edit_group), ("Copy group reference", self._copy_group_reference)],
-                [("Move group to recycle bin…", self._recycle_group)],
+                [(DELETE_LABEL, self._delete_group)],
             ])
+        create.append(("New group…", self._new_group))
         if session:
             session_actions = [("Lock vault", self._lock_selected)]
         else:
@@ -583,7 +595,7 @@ class WorkspaceApplication(Gtk.Application):
             [("View entry details…", lambda: with_entry(lambda entry: entry_details(self, vault, entry))),
              ("Edit entry…", lambda: with_entry(lambda entry: edit_entry(self, vault, group, entry))),
              ("Copy entry reference", lambda: with_entry(lambda _: self.copy_reference(vault, "entry", identifier)))],
-            [("Move entry to recycle bin…", lambda: with_entry(lambda entry: recycle_entry(self, vault, group, entry)))],
+            [(DELETE_LABEL, lambda: with_entry(lambda entry: delete_entry(self, vault, group, entry)))],
         ])
 
     def _access_context(self, row):
@@ -623,17 +635,16 @@ class WorkspaceApplication(Gtk.Application):
             edit_entry(self, *self.selection)
 
     def _new_group(self):
-        if self.selection:
-            vault, parent = self.selection
-            edit_group(self, vault, None, parent=parent)
+        if self.selection and not self.selection[1]:
+            edit_group(self, self.selection[0], None)
 
     def _edit_group(self, *_):
         if self.selection and self.selection[1]:
             edit_group(self, *self.selection)
 
-    def _recycle_group(self, *_):
+    def _delete_group(self, *_):
         if self.selection and self.selection[1]:
-            recycle_group(self, *self.selection)
+            delete_group(self, *self.selection)
 
     def _entry(self, _table, path, _column):
         if not self.busy and not self.desktop.locked and self.selection:
@@ -655,9 +666,14 @@ class WorkspaceApplication(Gtk.Application):
             # Let the caller read submitted controls before disposing of the dialog.
             GLib.idle_add(dialog.destroy)
 
-    def confirm(self, title, detail):
+    def confirm(self, title, detail, *, delete=False):
+        buttons = Gtk.ButtonsType.NONE if delete else Gtk.ButtonsType.OK_CANCEL
         dialog = Gtk.MessageDialog(transient_for=self.window, modal=True, text=title,
-                                   secondary_text=detail, buttons=Gtk.ButtonsType.OK_CANCEL)
+                                   secondary_text=detail, buttons=buttons)
+        if delete:
+            dialog.add_buttons("Cancel", Gtk.ResponseType.CANCEL, "Delete", Gtk.ResponseType.OK)
+            styled(dialog.get_widget_for_response(Gtk.ResponseType.OK), "destructive-action")
+            dialog.set_default_response(Gtk.ResponseType.CANCEL)
         return self.run_dialog(dialog) == Gtk.ResponseType.OK
 
     def owner_operation(self, operation):

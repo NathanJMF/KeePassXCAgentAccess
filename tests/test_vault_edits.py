@@ -89,6 +89,42 @@ class VaultEditsTests(unittest.TestCase):
         inner_after = current.kdbx.body.payload.inner_header
         self.assertNotEqual(inner_before.protected_stream_key.data, inner_after.protected_stream_key.data)
 
+    def test_owner_deletes_entries_and_subtrees_permanently(self):
+        group = self.fixture.add_group(self.fixture.root_group, "Group to delete")
+        subgroup = self.fixture.add_group(group, "Existing nested group")
+        nested = self.fixture.add_entry(subgroup, "Nested entry", "", "Synthetic nested password")
+        survivor = self.fixture.add_entry(self.fixture.root_group, "Other entry", "", "Synthetic retained password")
+        entry_binary = self.fixture.add_binary(b"Entry attachment fixture")
+        shared_binary = self.fixture.add_binary(b"Shared attachment fixture")
+        group_binary = self.fixture.add_binary(b"Nested attachment fixture")
+        self.entry.add_attachment(entry_binary, "entry.txt")
+        self.entry.add_attachment(shared_binary, "shared.txt")
+        nested.add_attachment(group_binary, "nested.txt")
+        survivor.add_attachment(shared_binary, "shared.txt")
+        survivor.save_history()
+        survivor.attachments[0].delete()
+        self.fixture.tree.find("Meta/RecycleBinEnabled").text = "False"
+        self.fixture.save()
+
+        vault = self._open()
+        root_id = self.workspace.session(vault).worker.identity
+        with self.assertRaisesRegex(VaultError, "invalid"):
+            self.workspace.delete_group(vault, root_id)
+        self.assertEqual(self.workspace.delete_entry(vault, str(self.entry.uuid)), str(self.entry.uuid))
+        self.assertEqual(self.workspace.delete_group(vault, str(group.uuid)), str(group.uuid))
+        self.assertEqual({entry["id"] for entry in self.workspace.session(vault).entries}, {str(survivor.uuid)})
+
+        saved = PyKeePass(self.path, password=self.unlock, keyfile=str(self.key))
+        self.assertIsNone(saved.find_entries(uuid=self.entry.uuid, first=True))
+        self.assertIsNone(saved.find_entries(uuid=nested.uuid, first=True))
+        self.assertIsNone(saved.find_groups(uuid=group.uuid, first=True))
+        self.assertIsNone(saved.find_groups(uuid=subgroup.uuid, first=True))
+        self.assertIsNone(saved.recyclebin_group)
+        self.assertEqual(saved.binaries, [b"Shared attachment fixture"])
+        surviving = saved.find_entries(uuid=survivor.uuid, first=True)
+        historic, = saved.find_attachments(element=surviving.history[0], history=True)
+        self.assertEqual(historic.data, b"Shared attachment fixture")
+
     def test_external_update_blocks_edit_and_invalidates_only_stale_session(self):
         vault = self._open()
         unrelated = self.root / "unrelated.kdbx"

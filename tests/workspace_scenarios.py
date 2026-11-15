@@ -5,6 +5,7 @@ from base64 import b64encode
 from dataclasses import replace
 import json
 import os
+import re
 from pathlib import Path
 import shutil
 import subprocess
@@ -27,7 +28,7 @@ from keepassxc_agent_access.edit_request_view import OPERATION_LABELS
 from keepassxc_agent_access.workspace_app import (
     ENTRY_FOLDER_COLUMN, ENTRY_ID_COLUMN, Gdk, WorkspaceApplication,
 )
-from keepassxc_agent_access.workspace_editor import edit_entry, recycle_entry
+from keepassxc_agent_access.workspace_editor import edit_entry
 from keepassxc_agent_access.keyring import SystemKeyring
 from tls_fixture import AUTHORIZATION, PASSWORD, USERNAME, tls_service
 
@@ -210,7 +211,14 @@ def main(root):
                 event.set_device(tree.get_display().get_default_seat().get_pointer())
                 assert tree.emit("button-press-event", event)
             menu, = set(Gtk.Menu.get_for_attach_widget(tree) or ()) - previous
-            labels = [item.get_label() for item in menu.get_children() if not isinstance(item, Gtk.SeparatorMenuItem)]
+            options = [item for item in menu.get_children() if not isinstance(item, Gtk.SeparatorMenuItem)]
+            for item in options:
+                if item.get_label() == "Delete…":
+                    style = item.get_style_context()
+                    assert style.has_class("keeper-delete")
+                    found, color = style.lookup_color("keeper_failure")
+                    assert found and style.get_color(Gtk.StateFlags.NORMAL).equal(color)
+            labels = [item.get_label() for item in options]
             menu.popdown()
             menu.destroy()
             return labels
@@ -223,6 +231,7 @@ def main(root):
         def check_editors(vault):
             def fill_group(dialog, name):
                 field = next(child for child in descendants(dialog) if child.get_name() == "group-name")
+                assert not any(child.get_name() == "group-location" for child in descendants(dialog))
                 field.set_text(name)
                 dialog.response(Gtk.ResponseType.OK)
 
@@ -262,16 +271,38 @@ def main(root):
             actual = owner.find_entries(uuid=UUID(entry["id"]), first=True)
             assert actual and actual.title == "Edited entry" and actual.password == EDIT_PASSWORD
 
-            def accept(dialog):
-                dialog.response(Gtk.ResponseType.OK)
+            def decide(response):
+                def check(dialog):
+                    assert "permanently deleted" in dialog.get_property("secondary-text")
+                    button = dialog.get_widget_for_response(Gtk.ResponseType.OK)
+                    assert button.get_label() == "Delete"
+                    assert button.get_style_context().has_class("destructive-action")
+                    assert dialog.get_default_widget() == dialog.get_widget_for_response(Gtk.ResponseType.CANCEL)
+                    dialog.response(response)
+                return check
 
-            drive_dialog(lambda: recycle_entry(app, vault, group, edited), accept)
-            wait_for(lambda: not app.busy, "Recycling an entry timed out")
+            def confirm_entry_deletion(dialog):
+                button(dialog, "Delete…").clicked()
+                GLib.timeout_add(25, finish_entry_deletion)
+
+            def finish_entry_deletion():
+                if app.dialog and isinstance(app.dialog, Gtk.MessageDialog):
+                    decide(Gtk.ResponseType.OK)(app.dialog)
+                    return GLib.SOURCE_REMOVE
+                return GLib.SOURCE_CONTINUE
+
+            drive_dialog(app._delete_group, decide(Gtk.ResponseType.CANCEL))
+            assert app.selection == (vault, group)
+            assert entry["id"] in app.entry_rows
+            drive_dialog(lambda: open_entry(entry["id"]), confirm_entry_deletion)
+            wait_for(lambda: not app.busy, "Deleting an entry timed out")
             assert not app.entry_rows
-            drive_dialog(app._recycle_group, accept)
-            wait_for(lambda: not app.busy, "Recycling a group timed out")
+            drive_dialog(app._delete_group, decide(Gtk.ResponseType.OK))
+            wait_for(lambda: not app.busy, "Deleting a group timed out")
             assert app.selection == (vault, "")
-            assert all(row["id"] != group for row in app.workspace.owner_session(vault).groups)
+            saved = PyKeePass(target.database, password=UNLOCK, keyfile=str(target.key_file))
+            assert saved.find_entries(uuid=UUID(entry["id"]), first=True) is None
+            assert saved.find_groups(uuid=UUID(group), first=True) is None
 
         def check_agent_edits(first, second):
             def runner(profile, tool, arguments, *, error=False):
@@ -418,20 +449,26 @@ def main(root):
                 subprocess.run(["setfacl", "-m", f"u:{uid}:rw", endpoint], check=True)
                 verify_isolation(target)
                 assert "token is required" in invoke(None, "entries", "list", expected=1)
-                select_tree(first)
+                root_path = select_tree(first)
+                assert not app.tree.row_expanded(root_path)
                 locked_actions = context_menu(app.tree)
                 assert "Unlock" in locked_actions and "Relink vault…" in locked_actions
                 assert "Lock vault" not in locked_actions and "New entry…" not in locked_actions
                 app.vault_buttons["unlock"].clicked()
                 wait_for(lambda: not app.busy and app.workspace.session(first), "Migrated keyring did not unlock")
+                assert app.tree.row_expanded(root_path)
+                wait_for(lambda: app.new_item.get_allocated_height() > 1, "New button was not laid out")
+                assert app.new_item.get_allocated_height() == app.vault_buttons["lock"].get_allocated_height()
+                assert app.new_group_item.get_visible()
                 assert app.workspace.registrations[first].bindings[0].action == imported
                 assert {row[ENTRY_ID_COLUMN]: row[ENTRY_FOLDER_COLUMN] for row in app.entries.get_model()} == {
                     first_entry: "Root", direct_entry: "Harbor Lab", nested_entry: "Harbor Lab / Field Notes",
                 }
                 assert [column.get_title() for column in app.entries.get_columns() if column.get_visible()] == [
-                    "Folder", "Title", "Username", "URL", "Created", "Modified",
+                    "Created", "Modified", "Folder", "Title", "Username", "URL",
                 ]
-                assert all(row[3] != "—" and row[4] != "—" for row in app.entries.get_model())
+                timestamp = re.compile(r"\d{2}:\d{2} \d{2}/\d{2}/\d{2}")
+                assert all(timestamp.fullmatch(row[index]) for row in app.entries.get_model() for index in (3, 4))
                 app.entry_search.set_text("harbor lab / FIELD")
                 assert [row[ENTRY_ID_COLUMN] for row in app.entries.get_model()] == [nested_entry]
                 app.entry_search.set_text("")
@@ -442,7 +479,7 @@ def main(root):
                 nested_path = next(row.path for row in entry_table.get_model() if row[ENTRY_ID_COLUMN] == nested_entry)
                 entry_table.get_selection().select_path(first_path)
                 assert context_menu(entry_table, nested_path) == [
-                    "View entry details…", "Edit entry…", "Copy entry reference", "Move entry to recycle bin…",
+                    "View entry details…", "Edit entry…", "Copy entry reference", "Delete…",
                 ]
                 entry_model, selected = entry_table.get_selection().get_selected()
                 assert entry_model[selected][ENTRY_ID_COLUMN] == nested_entry
@@ -505,11 +542,14 @@ def main(root):
                 inner = next(row["id"] for row in first_groups if row["name"] == "Field Notes")
                 select_tree(first, outer)
                 assert context_menu(app.tree) == [
-                    "New entry…", "New group…", "Edit group…", "Copy group reference", "Move group to recycle bin…",
+                    "New entry…", "Edit group…", "Copy group reference", "Delete…",
                 ]
+                assert not app.new_group_item.get_visible()
+                app.new_group_item.activate()
+                assert not app.dialog and not app.busy
                 assert [row[ENTRY_ID_COLUMN] for row in app.entries.get_model()] == [direct_entry]
                 assert [column.get_title() for column in app.entries.get_columns() if column.get_visible()] == [
-                    "Title", "Username", "URL", "Created", "Modified",
+                    "Created", "Modified", "Title", "Username", "URL",
                 ]
                 selected_path = select_tree(first, inner)
                 assert [row[ENTRY_ID_COLUMN] for row in app.entries.get_model()] == [nested_entry]

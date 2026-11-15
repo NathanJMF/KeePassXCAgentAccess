@@ -3,6 +3,9 @@
 from gi.repository import Gdk, GLib, Gtk
 
 
+DELETE_LABEL = "Delete…"
+
+
 def attach_row_context(tree, actions):
     def show(path, event):
         model = tree.get_model()
@@ -23,6 +26,8 @@ def attach_row_context(tree, actions):
                 menu.append(Gtk.SeparatorMenuItem())
             for label, action in section:
                 item = Gtk.MenuItem(label=label)
+                if label == DELETE_LABEL:
+                    item.get_style_context().add_class("keeper-delete")
                 item.connect("activate", lambda _, callback=action: callback())
                 menu.append(item)
         menu.connect("selection-done", lambda widget: GLib.idle_add(widget.destroy))

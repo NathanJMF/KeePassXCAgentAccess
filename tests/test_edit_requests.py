@@ -126,6 +126,16 @@ class EditRequestsTests(unittest.TestCase):
         ])
         self.assertNotIn("Never persisted", self.activity.path.read_bytes().decode("utf8", errors="replace"))
 
+    def test_broker_rejects_permanent_delete_operations(self):
+        for operation, target in (("delete_entry", {"entry": self.entry_id}),
+                                  ("delete_group", {"group": self.group_id})):
+            with self.subTest(operation=operation):
+                with self.assertRaises(ListingError) as error:
+                    self._wire("request_edit", request=self._request(operation, **target))
+                self.assertEqual(error.exception.code, "invalid_request")
+        self.assertEqual(self.edits.rows(), [])
+        self.assertEqual(self._wire("list_entries")["entries"][0]["id"], self.entry_id)
+
     def test_operations_preview_exact_paths_values_subtrees_and_result(self):
         review, result = self._apply("create_group", parent=self.root_id, fields={"name": "New folder"})
         self.assertEqual(review.new, (("name", "New folder"),))

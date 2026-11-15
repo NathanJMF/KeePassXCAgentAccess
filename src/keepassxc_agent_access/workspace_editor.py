@@ -32,18 +32,18 @@ def _field(grid, row, label, widget):
     return widget
 
 
-def _locations(app, vault, current, moving_group=None):
+def _locations(app, vault, current):
     """Return the root and a chooser whose destinations stay inside this vault."""
     session = app.workspace.owner_session(vault)
     names = {group["id"]: group for group in session.groups}
     root, = (group["id"] for group in session.groups if group["parent"] is None)
     options = [(app.workspace.registrations[vault].name, root)]
     for identifier, group in names.items():
-        if identifier in (root, moving_group):
+        if identifier == root:
             continue
         path = [group["name"] or "(Untitled group)"]
         parent = group["parent"]
-        while parent in names and parent not in (root, moving_group):
+        while parent in names and parent != root:
             ancestor = names[parent]
             path.append(ancestor["name"] or "(Untitled group)")
             parent = ancestor["parent"]
@@ -101,7 +101,7 @@ def edit_entry(app, vault, group, entry=None):
     )
 
 
-def edit_group(app, vault, group, *, parent=None):
+def edit_group(app, vault, group):
     if app.busy or app.desktop.locked:
         return
     session = app.workspace.owner_session(vault)
@@ -114,36 +114,37 @@ def edit_group(app, vault, group, *, parent=None):
     name = Gtk.Entry(text=existing["name"] if existing else "", activates_default=True)
     name.set_name("group-name")
     _field(grid, 0, "_Name", name)
-    _, location = _locations(app, vault, existing["parent"] if existing else parent, moving_group=group)
-    _field(grid, 1, "_Parent", location)
+    parent = existing["parent"] if existing else next(row["id"] for row in session.groups if row["parent"] is None)
     _require_name(dialog, name)
     name.grab_focus()
     if app.run_dialog(dialog) != Gtk.ResponseType.OK:
         return
-    destination, title = location.get_active_id(), name.get_text()
-    app._background(lambda: app.workspace.put_group(vault, destination, name=title, group=group),
+    title = name.get_text()
+    app._background(lambda: app.workspace.put_group(vault, parent, name=title, group=group),
                     after=lambda identifier: app._show_group(vault, identifier))
 
 
-def recycle_entry(app, vault, group, entry):
-    if app.busy or not app.confirm("Move entry to the recycle bin?", entry["title"] or "(Untitled entry)"):
+def delete_entry(app, vault, group, entry):
+    title = entry["title"] or "(Untitled entry)"
+    if app.busy or not app.confirm("Delete entry?", f"“{title}” will be permanently deleted.", delete=True):
         return
-    app._background(lambda: app.workspace.remove_entry(vault, entry["id"]),
+    app._background(lambda: app.workspace.delete_entry(vault, entry["id"]),
                     after=lambda _: app._show_group(vault, group))
 
 
-def recycle_group(app, vault, group):
+def delete_group(app, vault, group):
     if app.busy:
         return
     session = app.workspace.owner_session(vault)
     if not session:
         return
     item = next((row for row in session.groups if row["id"] == group and row["parent"]), None)
-    if item is None or not app.confirm(
-        "Move group to the recycle bin?", "This moves the group and all its entries and subgroups.",
-    ):
+    if item is None:
+        return
+    name = item["name"] or "(Untitled group)"
+    if not app.confirm("Delete group?", f"“{name}” and all of its contents will be permanently deleted.", delete=True):
         return
     root, = (row["id"] for row in session.groups if row["parent"] is None)
     parent = item["parent"]
-    app._background(lambda: app.workspace.remove_group(vault, group),
+    app._background(lambda: app.workspace.delete_group(vault, group),
                     after=lambda _: app._show_group(vault, "" if root == parent else parent))

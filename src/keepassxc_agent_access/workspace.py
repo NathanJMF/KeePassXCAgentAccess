@@ -243,11 +243,17 @@ class Workspace:
     def remove_entry(self, identifier, entry):
         return self._edit(identifier, "remove_entry", entry=entry)
 
+    def delete_entry(self, identifier, entry):
+        return self._edit(identifier, "delete_entry", entry=entry)
+
     def put_group(self, identifier, parent, *, name, group=None):
         return self._edit(identifier, "put_group", parent=parent, name=name, group=group)
 
     def remove_group(self, identifier, group):
         return self._edit(identifier, "remove_group", group=group)
+
+    def delete_group(self, identifier, group):
+        return self._edit(identifier, "delete_group", group=group)
 
     def _edit(self, identifier, change, *, expected=None, may_commit=None, before_commit=None, **values):
         with self.mutex:

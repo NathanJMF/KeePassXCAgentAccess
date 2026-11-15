@@ -91,6 +91,11 @@ CSS = b"""
 #keeper-workspace button.keeper-primary:focus {
     outline-color: white;
 }
+menuitem.keeper-delete,
+menuitem.keeper-delete label,
+button.keeper-delete {
+    color: @keeper_failure;
+}
 #keeper-workspace .keeper-paused {
     background-color: mix(@keeper_surface, @keeper_warning, 0.12);
     border-color: alpha(@keeper_warning, 0.28);

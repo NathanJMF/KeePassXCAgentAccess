@@ -25,9 +25,9 @@ Existing installations retain their registered vault, keyring reference, broker 
 
 ## Edit entries and groups
 
-Open an unlocked vault and use **New** to create an entry or group. Double-click an entry to edit it, move it to another group, or send it to the recycle bin. Right-click a vault, folder or entry for its actions. With the row selected, you can also press **Shift+F10**. Click a table heading to cycle through ascending, descending and default order. The arrow marks the active sort. An entry edit keeps its current password until you select **Replace saved password**.
+Use **New** to create an entry in an unlocked vault or group. Create groups from the vault root. Double-click an entry to edit it or move it to another group. **Delete…** permanently deletes an entry or a group and its contents after confirmation. Right-click a vault, folder or entry for its actions. With the row selected, you can also press **Shift+F10**. Click a table heading to cycle through ascending, descending and default order. The arrow marks the active sort. An entry edit keeps its current password until you select **Replace saved password**.
 
-Keeper checks for external changes before replacing the encrypted file. If Keeper detects an external save, unlock that vault again to load the latest version before editing. Older KDBX formats and files you cannot write remain available for browsing. Recycling requires the vault's recycle bin to be enabled.
+Keeper checks for external changes before replacing the encrypted file. If Keeper detects an external save, unlock that vault again to load the latest version before editing. Older KDBX formats and files you cannot write remain available for browsing. Agent-requested recycling requires the vault's recycle bin to be enabled.
 
 ## Replace a plaintext unlock file
 

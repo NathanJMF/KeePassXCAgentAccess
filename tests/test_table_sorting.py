@@ -47,9 +47,9 @@ class TableSortingTests(TestCase):
 
     def test_epoch_zero_is_a_real_timestamp_in_one_or_both_formats(self):
         self.assertNotEqual(table_time(0), "—")
-        self.assertNotEqual(table_time(0, include_year=True), "—")
+        self.assertNotEqual(table_time(0, entry_date=True), "—")
         self.assertNotEqual(_time(0), "—")
-        self.assertEqual(table_time(None, include_year=True), "—")
+        self.assertEqual(table_time(None, entry_date=True), "—")
         self.assertEqual(_time(None), "—")
 
     def test_click_cycles_sort_arrows_and_restores_row_order(self):

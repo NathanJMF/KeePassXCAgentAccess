@@ -109,12 +109,27 @@ def _put_group(vault, request):
     return group.uuid
 
 
+def _delete(vault, item, delete):
+    attachments = {attachment.id for attachment in vault.find_attachments(element=item, history=True)}
+    identifier = item.uuid
+    delete(item)
+    if attachments:
+        retained = {attachment.id for attachment in vault.find_attachments(history=True)}
+        for binary in sorted(attachments - retained, reverse=True):
+            vault.delete_binary(binary)
+    return identifier
+
+
 def _apply(vault, request):
     change = request["change"]
     if change == "put_entry":
         return _put_entry(vault, request)
     if change == "put_group":
         return _put_group(vault, request)
+    if change == "delete_entry":
+        return _delete(vault, _entry(vault, request["entry"]), vault.delete_entry)
+    if change == "delete_group":
+        return _delete(vault, _group(vault, request["group"], allow_root=False), vault.delete_group)
     if change in ("remove_entry", "remove_group"):
         if vault.tree.findtext("Meta/RecycleBinEnabled") != "True":
             raise EditError("recycle_disabled")
