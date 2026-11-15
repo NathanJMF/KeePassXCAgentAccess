@@ -95,7 +95,17 @@ def main(root):
     os.environ["XDG_CONFIG_HOME"] = str(config)
     os.environ.pop("KEEPASSXC_AGENT_SOCKET", None)
     os.environ.pop("KEEPASSXC_AGENT_UID", None)
+    config.mkdir()
+    documents = root / "Custom Documents"
+    (config / "user-dirs.dirs").write_text(f'XDG_DOCUMENTS_DIR="{documents}"\n', encoding="utf-8")
     subprocess.run(["./install-launcher"], check=True, capture_output=True)
+    relative_skill = Path("keepassxc-agent-access") / "SKILL.md"
+    installed = documents / "Skills" / relative_skill
+    assert installed.read_bytes() == (Path("skills") / relative_skill).read_bytes()
+    edited = b"Locally edited Keeper skill\n"
+    installed.write_bytes(edited)
+    subprocess.run(["./install-launcher"], check=True, capture_output=True)
+    assert installed.read_bytes() == edited
     launcher = Gio.DesktopAppInfo.new(DESKTOP_ID)
     assert launcher is not None and "--show-window" in launcher.get_commandline()
     assert launcher.get_name() == "Keeper"
@@ -134,7 +144,7 @@ def main(root):
     finally:
         stop(second)
     assert not endpoint.exists()
-    print("Launcher scenario passed: GNOME registration, single instance and persisted settings", flush=True)
+    print("Launcher scenario passed: skill installation, GNOME registration, single instance and persisted settings", flush=True)
 
 
 if __name__ == "__main__":

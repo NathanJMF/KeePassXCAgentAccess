@@ -12,7 +12,7 @@ sudo apt install python3-gi python3-gi-cairo python3-pykeepass gir1.2-gtk-3.0 \
 ./run-tray
 ```
 
-Run `./install-launcher` from the owner-controlled checkout to add **Keeper** to the GNOME application menu. Rerun the installer to refresh an existing launcher or if the checkout moves. Closing the window leaves the app running when the tray icon is available.
+Run `./install-launcher` from the owner-controlled checkout to add **Keeper** to the GNOME application menu and install its bundled skill at `Skills/keepassxc-agent-access/SKILL.md` under your Documents directory. Rerun the installer to refresh an existing launcher or if the checkout moves. Existing skill copies are preserved. Closing the window leaves the app running when the tray icon is available.
 
 1. Select **Add vault…** and choose an existing KeePass file. The picker opens the Keeper folder in your Documents directory when that folder exists. Enter its password and select its key file if required.
 2. Select **Remember on this device** to save the password in the system keyring, then select **Verify and save**.

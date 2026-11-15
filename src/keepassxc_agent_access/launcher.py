@@ -1,14 +1,17 @@
-"""Install the per-user GNOME launcher from the current trusted checkout."""
+"""Install the per-user GNOME launcher and Keeper skill from the trusted checkout."""
 
 import os
 from pathlib import Path
 import sys
 import tempfile
 
+from gi.repository import GLib
+
 from . import APP_TITLE
 
 
 DESKTOP_ID = "io.github.keepassxcagentaccess.Tray.desktop"
+SKILL_PATH = Path("keepassxc-agent-access") / "SKILL.md"
 
 
 def _exec_argument(value):
@@ -16,6 +19,29 @@ def _exec_argument(value):
         raise ValueError("The installation path contains unsupported characters.")
     escaped = "".join("\\" + char if char in '\\"$`' else char for char in value)
     return '"' + escaped.replace("\\", "\\\\").replace("%", "%%") + '"'
+
+
+def _install_skill():
+    documents = GLib.get_user_special_dir(GLib.UserDirectory.DIRECTORY_DOCUMENTS)
+    documents = Path(documents) if documents else Path.home() / "Documents"
+    destination = documents / "Skills" / SKILL_PATH
+    if destination.exists() or destination.is_symlink():
+        return
+    source = Path(__file__).resolve().parents[2] / "skills" / SKILL_PATH
+    contents = source.read_bytes()
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile(dir=destination.parent, delete=False) as file:
+        temporary = Path(file.name)
+        try:
+            file.write(contents)
+            file.flush()
+            os.fchmod(file.fileno(), 0o644)
+            # Publish the complete file without replacing an existing skill.
+            os.link(temporary, destination)
+        except FileExistsError:
+            pass
+        finally:
+            temporary.unlink(missing_ok=True)
 
 
 def install(executable, data_directory):
@@ -45,6 +71,7 @@ def install(executable, data_directory):
             os.replace(temporary, path)
         finally:
             temporary.unlink(missing_ok=True)
+    _install_skill()
     return path
 
 
