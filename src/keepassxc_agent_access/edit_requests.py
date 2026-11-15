@@ -247,7 +247,7 @@ class EditRequests:
         return allowed
 
     def _automatic(self, token, request):
-        return (not self.workspace.review_usage and not self.workspace.paused
+        return (not self.workspace.requires_review(request.operation) and not self.workspace.paused
                 and request.password_source != "owner" and self._permitted(token, request))
 
     def submit(self, token, payload, context=None, *, live=lambda: True):

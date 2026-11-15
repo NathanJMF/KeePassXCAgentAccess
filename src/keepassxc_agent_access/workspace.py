@@ -77,7 +77,9 @@ class Workspace:
         self.editing = set()
         self.pending = ()
         self.paused = True
-        self.review_usage = self.legacy_access.read().review_usage
+        preferences = self.legacy_access.read()
+        self.review_usage = preferences.review_usage
+        self.review_actions = preferences.review_actions
         self.generation = 0
         self._load()
 
@@ -369,13 +371,23 @@ class Workspace:
         if session:
             session.worker.close()
 
+    def requires_review(self, operation):
+        return self.review_usage or operation in self.review_actions
+
     def set_review_usage(self, reviewed):
         with self.mutex:
-            if self.review_usage == reviewed:
-                return
-            self.legacy_access.write(replace(self.legacy_access.read(), review_usage=reviewed))
-            self.review_usage = reviewed
-            self.generation += 1
+            if self.review_usage != reviewed:
+                self.legacy_access.write(replace(self.legacy_access.read(), review_usage=reviewed))
+                self.review_usage = reviewed
+                self.generation += 1
+
+    def set_review_action(self, operation, reviewed):
+        with self.mutex:
+            actions = self.review_actions | {operation} if reviewed else self.review_actions - {operation}
+            if self.review_actions != actions:
+                self.legacy_access.write(replace(self.legacy_access.read(), review_actions=actions))
+                self.review_actions = actions
+                self.generation += 1
 
     def pause(self, paused=True):
         with self.mutex:

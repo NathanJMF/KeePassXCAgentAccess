@@ -86,7 +86,7 @@ class ScopedBroker:
                     raise ListingError("ineligible")
                 return encode(self.edits.status(token, payload["id"]))
             generation = self.workspace.generation
-            review_usage = self.workspace.review_usage
+            review_usage = self.workspace.requires_review(operation)
             name = {"list_vaults": "List vaults", "list_entries": "List entries",
                     "use_password": "Use password"}[operation]
             registered = self._catalog(token)

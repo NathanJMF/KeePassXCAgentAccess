@@ -122,7 +122,8 @@ class EditRequestsTests(unittest.TestCase):
         self.assertEqual(submit("replace_password", entry=self.entry_id, password_source="generate")["status"], "applied")
         self.assertEqual(submit("update_entry", entry=self.unscoped,
                                 fields={"title": "Needs separate approval"})["status"], "pending")
-        self.workspace.set_review_usage(True)
+        self.workspace.set_review_action("update_entry", True)
+        self.assertFalse(self.workspace.review_usage)
         self.assertEqual(submit("update_entry", entry=self.entry_id,
                                 fields={"title": "Review this update"})["status"], "pending")
         saved = PyKeePass(self.path, password=self.unlock)

@@ -19,12 +19,16 @@ PROTOCOLS = ("2025-06-18", "2025-03-26", "2024-11-05")
 
 
 def tool(name, description, properties=None, *, required=(), read_only=True):
+    properties = dict(properties or {})
+    if name not in ("access_status", "edit_status"):
+        properties["note"] = {"type": "string", "minLength": 1, "maxLength": 180,
+                              "description": "Short audit reason. Keep credentials and private values out of notes."}
     return {
         "name": name,
         "description": description,
         "inputSchema": {
             "type": "object",
-            "properties": properties or {},
+            "properties": properties,
             "required": list(required),
             "additionalProperties": False,
         },
@@ -114,6 +118,10 @@ def invocation(name, arguments):
     schema = definition["inputSchema"]
     if not set(schema["required"]) <= arguments.keys() <= schema["properties"].keys():
         raise ValueError
+    if "note" in arguments:
+        note = arguments["note"]
+        if not isinstance(note, str) or not note.strip() or len(note) > 180 or not note.isprintable():
+            raise ValueError
     command = [CLI, *tokens, "--json"]
     for key in ("vault", "entry"):
         if key in arguments:
@@ -184,12 +192,16 @@ class AgentRunner:
 
     def call_tool(self, params):
         try:
-            command, data = invocation(params.get("name"), params.get("arguments", {}))
+            arguments = params.get("arguments", {})
+            command, data = invocation(params.get("name"), arguments)
         except (TypeError, ValueError, RecursionError):
             return tool_result("Invalid Keeper tool or arguments.", True)
         try:
+            environment = self.environment
+            if "note" in arguments:
+                environment = {**environment, "KEEPASSXC_AGENT_NOTE": arguments["note"]}
             result = subprocess.run(command, input=data, capture_output=True, cwd="/",
-                                    env=self.environment, pass_fds=self.pass_fds,
+                                    env=environment, pass_fds=self.pass_fds,
                                     timeout=CLIENT_TIMEOUT + 2, check=False)
         except (OSError, subprocess.TimeoutExpired):
             return tool_result("Could not run the Keeper CLI.", True)

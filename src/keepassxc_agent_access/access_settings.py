@@ -18,6 +18,22 @@ class AccessMode(str, Enum):
     SMART = "Smart access"
 
 
+REVIEW_ACTIONS = {
+    "list_vaults": "List vaults",
+    "list_entries": "List entries and read approved fields",
+    "use_password": "Run password actions",
+    "create_entry": "Create entries",
+    "update_entry": "Update entries",
+    "move_entry": "Move entries",
+    "recycle_entry": "Move entries to the recycle bin",
+    "replace_password": "Replace passwords",
+    "create_group": "Create groups",
+    "rename_group": "Rename groups",
+    "move_group": "Move groups",
+    "recycle_group": "Move groups to the recycle bin",
+}
+
+
 class ActionType(str, Enum):
     BASIC = "https_basic_get"
     BEARER = "https_bearer_get"
@@ -123,6 +139,8 @@ class AccessSettings:
     retention_days: int = 30
     vaults: tuple[tuple[str, VaultPolicy], ...] = ()
     review_usage: bool = False
+    review_actions: frozenset[str] = frozenset()
+    start_unlocked: bool = True
 
     def for_vault(self, identity):
         return dict(self.vaults).get(identity, VaultPolicy())
@@ -149,7 +167,11 @@ class AccessStore:
                 raise ValueError
             retention = data["retention_days"]
             review_usage = data.get("review_usage", False)
-            if type(retention) is not int or not 1 <= retention <= 365 or type(review_usage) is not bool:
+            review_actions = data.get("review_actions", [])
+            start_unlocked = data.get("start_unlocked", True)
+            if (type(retention) is not int or not 1 <= retention <= 365 or type(review_usage) is not bool
+                    or type(start_unlocked) is not bool or not isinstance(review_actions, list)
+                    or any(not isinstance(action, str) or action not in REVIEW_ACTIONS for action in review_actions)):
                 raise ValueError
             vaults = tuple(
                 (uuid_text(identity), VaultPolicy(
@@ -158,7 +180,8 @@ class AccessStore:
                 ))
                 for identity, policy in data["vaults"].items()
             )
-            return AccessSettings(AccessMode(data["mode"]), endpoint, uid, retention, vaults, review_usage)
+            return AccessSettings(AccessMode(data["mode"]), endpoint, uid, retention, vaults, review_usage,
+                                  frozenset(review_actions), start_unlocked)
         except FileNotFoundError:
             return AccessSettings()
         except (OSError, AttributeError, ValueError, TypeError, KeyError):
@@ -168,11 +191,15 @@ class AccessStore:
         config = settings.broker_config()
         if config:
             config.validate()
+        if not settings.review_actions <= REVIEW_ACTIONS.keys():
+            raise ValueError("Choose a supported action to review.")
         if not 1 <= settings.retention_days <= 365:
             raise ValueError("Choose a retention period between 1 and 365 days.")
         write_private_json(self.path, {
             "mode": settings.mode.value,
             "review_usage": settings.review_usage,
+            "review_actions": sorted(settings.review_actions),
+            "start_unlocked": settings.start_unlocked,
             "endpoint": settings.endpoint,
             "uid": settings.uid,
             "retention_days": settings.retention_days,

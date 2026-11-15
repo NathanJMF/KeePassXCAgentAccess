@@ -984,6 +984,8 @@ def activity_dialog(app, row):
     scroll.set_max_content_height(480)
     body.pack_start(scroll, True, True, 0)
 
+    if row.get("note"):
+        add_activity_section(details, "Audit note", (("Agent note", row["note"]),))
     add_activity_section(details, "Resource", activity_location(row, app.workspace))
     context = [(caption, reported(row[key])) for key, caption in
                (("project", "Project"), ("model", "Model"), ("chat", "Chat")) if row.get(key)]
@@ -1138,14 +1140,7 @@ class ActivityView(Gtk.Box):
                 icon, timestamp, key, children)
 
     def _details(self, table, path, _column):
-        model = table.get_model()
-        if model.iter_has_child(model.get_iter(path)):
-            if table.row_expanded(path):
-                table.collapse_row(path)
-            else:
-                table.expand_row(path, False)
-            return
-        self.open_record(model[path][self.RECORD_ID])
+        self.open_record(table.get_model()[path][self.RECORD_ID])
 
     def open_record(self, identifier):
         row = self.rows.get(identifier)

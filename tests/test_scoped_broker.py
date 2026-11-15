@@ -150,6 +150,10 @@ class ScopedBrokerTests(unittest.TestCase):
             self.assertEqual(error.exception.code, "revoked")
 
         self.assertFalse(Workspace(self.workspace.directory, None).review_usage)
+        self.workspace.set_review_action("list_entries", True)
+        reopened = Workspace(self.workspace.directory, None)
+        self.assertTrue(reopened.requires_review("list_entries"))
+        self.assertFalse(reopened.requires_review("list_vaults"))
         self.assertEqual(len(self.invoke("list_vaults")["vaults"]), 1)
         self.assertEqual(self.enroll([item], 1), {"status": "pending"})
         self.assertEqual(self.activity.rows(action="List entries")[0]["decision"], "Approved once")

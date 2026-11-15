@@ -129,12 +129,24 @@ def main(root):
         enrollment_model, enrollment_chat = "Synthetic enrollment model", "Synthetic enrollment chat"
         action_model, action_chat = "Synthetic test model", "Synthetic test chat"
 
-        def popup_setting():
-            settings, = [child for child in descendants(app.window.get_titlebar())
-                         if isinstance(child, Gtk.MenuButton) and child.get_tooltip_text() == "Keeper settings"]
-            toggle, = [item for item in settings.get_popup().get_children()
-                       if isinstance(item, Gtk.CheckMenuItem) and item.get_label() == "Request pop-ups"]
-            return toggle
+        def settings_switch(page, name, enabled=None):
+            active = []
+
+            def change(dialog):
+                assert dialog.get_title() == "Keeper settings"
+                pages = next(widget for widget in descendants(dialog) if widget.get_name() == "keeper-settings-pages")
+                assert [pages.child_get_property(child, "title") for child in pages.get_children()] == [
+                    "Broker settings", "Notifications", "Reviewals", "Vaults",
+                ]
+                pages.set_visible_child_name(page)
+                toggle = next(widget for widget in descendants(pages.get_visible_child()) if widget.get_name() == name)
+                if enabled is not None:
+                    toggle.set_active(enabled)
+                active.append(toggle.get_active())
+                dialog.response(Gtk.ResponseType.CLOSE)
+
+            drive_dialog(app.settings_button.clicked, change)
+            return active[0]
 
         def click_decision(widget):
             event = Gdk.Event.new(Gdk.EventType.BUTTON_RELEASE)
@@ -164,9 +176,11 @@ def main(root):
             finally:
                 dialog.disconnect(listener)
 
-        def invoke(profile, *command, request=None, expected=0, model=action_model, chat=action_chat):
+        def invoke(profile, *command, request=None, expected=0, model=action_model, chat=action_chat, note=None):
             env = [f"KEEPASSXC_AGENT_SOCKET={endpoint}", f"KEEPASSXC_AGENT_MODEL={model}",
                    f"KEEPASSXC_AGENT_CHAT={chat}", "KEEPASSXC_AGENT_CHAT_ID=test-chat"]
+            if note:
+                env.append(f"KEEPASSXC_AGENT_NOTE={note}")
             if profile:
                 env.append(f"KEEPASSXC_AGENT_TOKEN_FILE={profiles / profile / 'token'}")
             args = [*NAMESPACE, "/usr/bin/env", "-i", f"PATH={root / 'cli'}:/usr/bin:/bin",
@@ -183,7 +197,7 @@ def main(root):
             existing = set(app.grants.records)
             request = {"identity": identity or f"Agent {profile}", "project": "Disposable project", "items": items}
             result = invoke(profile, "access", "request", expected=expected, model=enrollment_model,
-                            chat=enrollment_chat, request=request)
+                            chat=enrollment_chat, request=request, note="Check approved services")
             created = app.grants.records.keys() - existing
             if created:
                 token_ids[profile], = created
@@ -945,6 +959,15 @@ def main(root):
                 subprocess.run(["setfacl", "-m", f"u:{uid}:rw", endpoint], check=True)
                 verify_isolation(target)
                 assert "token is required" in invoke(None, "entries", "list", expected=1)
+                wait_for(lambda: not app.busy and app.workspace.session(first), "Saved vault did not unlock at startup")
+                assert app.vault_lock_button.get_label() == "Lock all vaults"
+                assert settings_switch("vaults", "start-unlocked")
+                assert not settings_switch("vaults", "start-unlocked", False)
+                assert not old_access.read().start_unlocked
+                assert settings_switch("vaults", "start-unlocked", True)
+                app.vault_lock_button.clicked()
+                assert not app.workspace.session(first)
+                assert app.vault_lock_button.get_label() == "Unlock all vaults"
                 root_path = select_tree(first)
                 assert not app.tree.row_expanded(root_path)
                 locked_actions = context_menu(app.tree)
@@ -952,8 +975,8 @@ def main(root):
                 assert "Lock vault" not in locked_actions and "New entry…" not in locked_actions
                 assert "Enter password…" not in locked_actions
                 assert [button.get_label() for button in app.vault_buttons.values() if button.get_visible()] == ["Unlock"]
-                app.vault_buttons["unlock"].clicked()
-                wait_for(lambda: not app.busy and app.workspace.session(first), "Migrated keyring did not unlock")
+                app.vault_lock_button.clicked()
+                wait_for(lambda: not app.busy and app.workspace.session(first), "Unlock all did not use the saved password")
 
                 app.vault_buttons["lock"].clicked()
                 keyring.remember(original_item, "synthetic-stale-vault-password")
@@ -1109,8 +1132,7 @@ def main(root):
                             {"vault": second, "entry": nested_entry, "metadata": True}]
                 assert app.workspace.paused
                 app.set_agent_paused(False)
-                toggle = popup_setting()
-                assert toggle.get_active()
+                assert settings_switch("notifications", "request-popups")
                 app.window.hide()
                 assert enroll("alpha", alpha) == enroll("alpha", alpha) == {"status": "pending"}
                 approve("alpha", popup=True)
@@ -1118,8 +1140,7 @@ def main(root):
                 assert enroll("review-paused", alpha) == {"status": "pending"}
                 deny("review-paused", popup=True)
                 assert app.workspace.paused
-                toggle.set_active(False)
-                assert not toggle.get_active()
+                assert not settings_switch("notifications", "request-popups", False)
                 config = private / "desktop-notifications.json"
                 assert json.loads(config.read_text()) == {"desktop_notifications": False}
                 assert enroll("beta", beta) == {"status": "pending"}
@@ -1156,12 +1177,11 @@ def main(root):
                 assert all(timestamp.fullmatch(row[0]) and row[1] == "—" for row in access_table.get_model())
                 assert token_context_menu("beta") == ["Review request…"]
                 assert token_context_menu("alpha") == ["View permissions…", "Disable token", "Remove token…"]
-                assert toggle.get_active() is False
+                assert not app.review_popups.enabled
                 deny("review")
                 assert app.workspace.paused
                 assert "unavailable for this token" in invoke("review", "vaults", "list", expected=1)
-                toggle.set_active(True)
-                assert toggle.get_active()
+                assert settings_switch("notifications", "request-popups", True)
                 assert json.loads(config.read_text()) == {"desktop_notifications": True}
                 assert "paused" in invoke("alpha", "vaults", "list", expected=1)
                 approve("beta", second, popup=True, resume=True)
@@ -1425,8 +1445,14 @@ def main(root):
                 assert token_summary[activity_identity] == expected_identity("alpha")
                 assert all(row[activity_identity] == expected_identity("alpha") for row in token_summary.iterchildren())
                 assert not table.row_expanded(token_summary.path)
-                table.row_activated(token_summary.path, table.get_column(0))
-                assert table.row_expanded(token_summary.path)
+                def read_parent(dialog):
+                    labels = {label.get_text() for label in descendants(dialog) if isinstance(label, Gtk.Label)}
+                    assert {"Remove token", "Audit note", "Check approved services"} <= labels
+                    dialog.response(Gtk.ResponseType.CLOSE)
+
+                drive_dialog(lambda: table.row_activated(token_summary.path, table.get_column(0)), read_parent)
+                assert not table.row_expanded(token_summary.path)
+                assert table.expand_row(token_summary.path, False)
                 pending = activity_leaf(token_events[-1]["id"])
                 check_child_indentation(table, token_summary, pending)
                 action_column = table.get_column(view.ACTION)
@@ -1443,7 +1469,7 @@ def main(root):
                 required = sum(cell.get_preferred_width(table)[1]
                                for cell in (outcome_indent, outcome_icon, outcome_text))
                 assert outcome_column.get_width() >= required, (outcome_column.get_width(), required)
-                table.row_activated(token_summary.path, table.get_column(0))
+                assert table.collapse_row(token_summary.path)
                 assert not table.row_expanded(token_summary.path)
 
                 row = activity_leaf(access["id"])
@@ -1468,10 +1494,10 @@ def main(root):
 
                 drive_dialog(lambda: table.row_activated(path, table.get_column(0)), read_activity)
                 check_agent_edits(first, second)
-                assert app.usage_button.get_label() == "Allow agent usage"
+                assert app.usage_button.get_label() == "Allow usage"
                 assert app.usage_button.get_style_context().has_class("keeper-usage-allow")
-                app.usage_button.set_active(True)
-                assert app.usage_button.get_label() == "Review agent usage"
+                assert settings_switch("reviews", "review-usage", True)
+                assert app.usage_button.get_label() == "Review usage"
                 assert app.usage_button.get_style_context().has_class("keeper-usage-review")
                 assert old_access.read().review_usage
 
@@ -1487,13 +1513,15 @@ def main(root):
                     assert {"Agent beta", "List entries", "Approval applies to this operation only."} <= labels
                     click_decision(dialog.get_widget_for_response(Gtk.ResponseType.ACCEPT))
 
+                assert settings_switch("reviews", "list_entries", True)
+                app.usage_button.set_active(False)
+                assert not old_access.read().review_usage
+                assert old_access.read().review_actions == {"list_entries"}
                 with ThreadPoolExecutor() as pool:
                     reviewed = pool.submit(invoke, "beta", "entries", "list")
                     drive_dialog(app._refresh, review_usage, opens_async=True)
                     assert reviewed.result(timeout=4)["entries"] == fixture[2:]
-
-                app.usage_button.set_active(False)
-                assert not old_access.read().review_usage
+                assert not settings_switch("reviews", "list_entries", False)
                 assert invoke("beta", "entries", "list")["entries"] == fixture[2:]
                 app.tray_items["pause"].activate()
                 assert app.workspace.paused and app.workspace.session(second)

@@ -20,12 +20,13 @@ class Attribution:
     model: str | None = None
     chat: str | None = None
     chat_id: str | None = None
+    note: str | None = None
 
     @classmethod
     def parse(cls, payload):
-        if not isinstance(payload, dict) or set(payload) - {"model", "chat", "chat_id"}:
+        if not isinstance(payload, dict) or set(payload) - {"model", "chat", "chat_id", "note"}:
             raise ValueError
-        return cls(**{key: label(value) for key, value in payload.items()})
+        return cls(**{key: label(value, limit=180 if key == "note" else 160) for key, value in payload.items()})
 
 
 def folder_label(parts):
@@ -69,6 +70,7 @@ CREATE TABLE IF NOT EXISTS activity (
     folder TEXT,
     entry_title TEXT,
     destination TEXT,
+    note TEXT,
     decision TEXT,
     outcome TEXT NOT NULL,
     status INTEGER
@@ -105,7 +107,7 @@ class ActivityStore:
             db.executescript(SCHEMA)
             columns = {column["name"] for column in db.execute("PRAGMA table_info(activity)")}
             for name in ("entry", "vault", "vault_id", "token", "agent", "project", "scope", "folder", "entry_title",
-                         "group_id", "edit_request_id"):
+                         "group_id", "edit_request_id", "note"):
                 if name not in columns:
                     db.execute(f"ALTER TABLE activity ADD COLUMN {name} TEXT")
             db.execute(
@@ -134,10 +136,11 @@ class ActivityStore:
             cursor = db.execute(
                 """INSERT INTO activity(session, requested, model, chat, action, destination, entry,
                                          vault, vault_id, token, agent, project, scope, folder, entry_title,
-                                         group_id, edit_request_id, outcome)
-                VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'Pending')""",
+                                         group_id, edit_request_id, note, outcome)
+                VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'Pending')""",
                 (session, time(), context.model, context.chat, action, destination, entry,
-                 vault, vault_id, token, agent, project, scope, folder, entry_title, group_id, edit_request_id),
+                 vault, vault_id, token, agent, project, scope, folder, entry_title, group_id, edit_request_id,
+                 context.note),
             )
             return cursor.lastrowid
 

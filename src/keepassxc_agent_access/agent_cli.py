@@ -217,9 +217,9 @@ def main(argv=None):
     if getattr(options, "field", None):
         payload["fields"] = list(dict.fromkeys(options.field))
     context = {}
-    for key in ("model", "chat", "chat_id"):
+    for key in ("model", "chat", "chat_id", "note"):
         raw = os.environ.get(f"KEEPASSXC_AGENT_{key.upper()}", "")
-        value = "".join(char for char in raw[:640] if char.isprintable()).strip()[:160]
+        value = "".join(char for char in raw[:640] if char.isprintable()).strip()[:180 if key == "note" else 160]
         if value:
             context[key] = value
     if context:

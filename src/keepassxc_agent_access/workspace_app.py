@@ -13,6 +13,7 @@ gi.require_version("Gtk", "3.0")
 gi.require_version("Gdk", "3.0")
 from gi.repository import Gdk, Gio, GLib, Gtk, Pango
 
+from .access_settings import REVIEW_ACTIONS
 from .activity import ActivityError, ActivityStore
 from .approvals import ApprovalQueue
 from .broker import BrokerConfig, ListingBroker
@@ -54,6 +55,7 @@ class WorkspaceApplication(Gtk.Application):
         self.workspace = None
         self.grants = None
         self.edit_requests = None
+        self.start_unlocked = True
         self.usage_approvals = ApprovalQueue()
         self.broker = None
         self.window = None
@@ -82,6 +84,7 @@ class WorkspaceApplication(Gtk.Application):
         try:
             self.workspace = Workspace(self.directory, self.keyring)
             previous = self.workspace.legacy_access.read()
+            self.start_unlocked = previous.start_unlocked
             self.activity.recover(previous.retention_days)
             self.grants = Grants(self.workspace, self.activity)
             self.edit_requests = EditRequests(self.workspace, self.grants, self.activity)
@@ -92,8 +95,11 @@ class WorkspaceApplication(Gtk.Application):
                 self.broker.start()
         except OWNER_ERRORS as error:
             self.message = str(error) or "Could not initialize the workspace."
-        if self.workspace and self.workspace.pending:
-            self._background(self.workspace.cleanup)
+        if self.workspace and not self.desktop.locked:
+            if self.start_unlocked:
+                self._unlock_all(cleanup=True)
+            elif self.workspace.pending:
+                self._background(self.workspace.cleanup)
         self.poll = GLib.timeout_add(500, self._refresh)
         self.prune = GLib.timeout_add_seconds(3600, self._prune)
         for signum in (signal.SIGINT, signal.SIGTERM):
@@ -175,21 +181,17 @@ class WorkspaceApplication(Gtk.Application):
         add.set_image(Gtk.Image.new_from_icon_name("list-add-symbolic", Gtk.IconSize.BUTTON))
         add.connect("clicked", lambda *_: self._configure())
         header.pack_start(add)
-        settings = styled(Gtk.MenuButton(), "keeper-control", "keeper-quiet")
-        settings.set_tooltip_text("Keeper settings")
-        settings.get_accessible().set_name("Keeper settings")
-        settings.set_image(Gtk.Image.new_from_icon_name("open-menu-symbolic", Gtk.IconSize.BUTTON))
-        settings_menu = Gtk.Menu()
-        popups = Gtk.CheckMenuItem(label="Request pop-ups", active=self.review_popups.enabled)
-        popups.connect("toggled", self._set_request_popups)
-        settings_menu.append(popups)
-        for label, action in (("Broker settings…", self._broker_settings), ("Lock all vaults", self._lock_all)):
-            item = Gtk.MenuItem(label=label)
-            item.connect("activate", action)
-            settings_menu.append(item)
-        settings_menu.show_all()
-        settings.set_popup(settings_menu)
-        header.pack_end(settings)
+        self.vault_lock_button = styled(Gtk.Button(always_show_image=True), "keeper-control")
+        self.vault_lock_icon = Gtk.Image()
+        self.vault_lock_button.set_image(self.vault_lock_icon)
+        self.vault_lock_button.connect("clicked", self._toggle_all_vaults)
+        header.pack_start(self.vault_lock_button)
+        self.settings_button = styled(Gtk.Button(), "keeper-control", "keeper-quiet")
+        self.settings_button.set_tooltip_text("Keeper settings")
+        self.settings_button.get_accessible().set_name("Keeper settings")
+        self.settings_button.set_image(Gtk.Image.new_from_icon_name("open-menu-symbolic", Gtk.IconSize.BUTTON))
+        self.settings_button.connect("clicked", self._show_settings)
+        header.pack_end(self.settings_button)
         self.pause_button = styled(Gtk.Button(label="Resume agent access", always_show_image=True),
                                    "keeper-control", "keeper-paused")
         self.pause_icon = Gtk.Image.new_from_icon_name("changes-prevent-symbolic", Gtk.IconSize.BUTTON)
@@ -373,6 +375,7 @@ class WorkspaceApplication(Gtk.Application):
         if self.window and not self.exiting:
             if self.workspace:
                 self._refresh_tree()
+            self._refresh_vault_lock()
             self._browse()
             self.notice.set_text(self.message)
             self.notice.set_visible(bool(self.message))
@@ -414,7 +417,8 @@ class WorkspaceApplication(Gtk.Application):
 
     def _style_usage_policy(self):
         review = bool(self.workspace and self.workspace.review_usage)
-        self.usage_button.set_label("Review agent usage" if review else "Allow agent usage")
+        self.usage_button.set_active(review)
+        self.usage_button.set_label("Review usage" if review else "Allow usage")
         self.usage_button.set_tooltip_text(
             "Ask for a decision on each agent operation" if review else "Run operations within each approved token’s scope"
         )
@@ -865,6 +869,65 @@ class WorkspaceApplication(Gtk.Application):
         if record:
             self.owner_operation(lambda: self.workspace.lock(record.id))
 
+    def _any_vault_unlocked(self):
+        return any(self.workspace.owner_session(identifier) for identifier in self.workspace.registrations) if self.workspace else False
+
+    def _refresh_vault_lock(self):
+        unlocked = self._any_vault_unlocked()
+        label = "Lock all vaults" if unlocked else "Unlock all vaults"
+        if self.vault_lock_button.get_label() != label:
+            self.vault_lock_button.set_label(label)
+            icon = "changes-prevent-symbolic" if unlocked else "changes-allow-symbolic"
+            self.vault_lock_icon.set_from_icon_name(icon, Gtk.IconSize.BUTTON)
+        self.vault_lock_button.set_sensitive(bool(self.workspace and self.workspace.registrations
+                                                  and not self.desktop.locked and (unlocked or not self.busy)))
+
+    def _toggle_all_vaults(self, *_):
+        if self._any_vault_unlocked():
+            self._lock_all()
+        else:
+            self._unlock_all(prompt=True)
+
+    def _unlock_all(self, *, prompt=False, cleanup=False):
+        workspace = self.workspace
+        if workspace is None or not workspace.registrations and not (cleanup and workspace.pending):
+            return
+        cycle = workspace.owner_generation
+        records = tuple(record for record in workspace.registrations.values() if not workspace.owner_session(record.id))
+
+        def unlock_saved():
+            if cleanup and workspace.pending:
+                workspace.cleanup()
+            pending = []
+            for record in records:
+                if workspace.owner_generation != cycle:
+                    raise UnlockCancelled
+                if record.item:
+                    try:
+                        workspace.unlock(record.id, cycle=cycle)
+                        continue
+                    except OWNER_ERRORS:
+                        pass
+                pending.append(record)
+            return pending
+
+        def finish(pending):
+            if workspace.owner_generation != cycle:
+                return
+            if prompt:
+                unlock_next(iter(pending))
+            elif pending:
+                self.message = "Some vaults need a password before they can be unlocked."
+
+        def unlock_next(pending):
+            if workspace.owner_generation != cycle or self.desktop.locked or self.exiting:
+                return
+            for record in pending:
+                if self.unlock_record(record, finished=lambda *_: unlock_next(pending)):
+                    return
+
+        self._background(unlock_saved, after=finish)
+
     def _lock_all(self, *_):
         if self.workspace:
             self.workspace.lock_all()
@@ -901,40 +964,130 @@ class WorkspaceApplication(Gtk.Application):
             self.workspace.pause(paused)
             self._refresh()
 
-    def _broker_settings(self, *_):
-        if not self.broker or self.desktop.locked:
-            return
-        settings = self.workspace.legacy_access.read()
-        config = self.broker.config
-        dialog, body = _dialog(self, "Broker settings", 540, 260)
+    def _show_settings(self, *_):
+        if self.workspace and not self.desktop.locked:
+            self.run_dialog(self._settings_dialog())
+
+    def _settings_dialog(self):
+        dialog, body = _dialog(self, "Keeper settings", 690, 500)
         dialog.set_modal(True)
-        dialog.add_buttons("Cancel", Gtk.ResponseType.CANCEL, "Save", Gtk.ResponseType.OK)
+        dialog.add_button("Close", Gtk.ResponseType.CLOSE)
+        panel = Gtk.Box(spacing=14)
+        stack = Gtk.Stack(hexpand=True, vexpand=True)
+        stack.set_name("keeper-settings-pages")
+        sidebar = Gtk.StackSidebar(stack=stack)
+        sidebar.set_size_request(155, -1)
+        panel.pack_start(sidebar, False, False, 0)
+        panel.pack_start(stack, True, True, 0)
+        body.pack_start(panel, True, True, 0)
+
+        def page(name, title):
+            rows = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10, margin=8)
+            scroll = Gtk.ScrolledWindow()
+            scroll.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+            scroll.add(rows)
+            stack.add_titled(scroll, name, title)
+            return rows
+
+        broker = page("broker", "Broker settings")
+        self._broker_settings_page(broker)
+        notifications = page("notifications", "Notifications")
+        self._settings_switch(notifications, "Request pop-ups", self.review_popups.enabled,
+                              self._set_request_popups, "request-popups")
+        review = page("reviews", "Reviewals")
+        self._settings_switch(review, "Review usage", self.workspace.review_usage,
+                              self._set_usage_policy, "review-usage")
+        review.pack_start(Gtk.Separator(), False, False, 1)
+        add_label(review, "Always require approval for")
+        for operation, caption in REVIEW_ACTIONS.items():
+            self._settings_switch(review, caption, operation in self.workspace.review_actions,
+                                  lambda control, operation=operation: self._set_review_action(control, operation),
+                                  operation)
+        vaults = page("vaults", "Vaults")
+        self._settings_switch(vaults, "Start unlocked", self.start_unlocked, self._set_start_unlocked, "start-unlocked")
+        description = styled(_label("Use saved keyring passwords to unlock vaults when Keeper starts."), "keeper-muted")
+        vaults.pack_start(description, False, False, 0)
+        stack.set_visible_child_name("broker")
+        return dialog
+
+    @staticmethod
+    def _settings_switch(page, caption, enabled, changed, name):
+        row = Gtk.Box(spacing=8)
+        label = _label(caption)
+        toggle = Gtk.Switch(active=enabled, valign=Gtk.Align.CENTER)
+        toggle.set_name(name)
+        toggle.get_accessible().set_name(caption)
+        toggle.connect("notify::active", lambda control, _: changed(control))
+        row.pack_start(label, True, True, 0)
+        row.pack_end(toggle, False, False, 0)
+        page.pack_start(row, False, False, 0)
+
+    def _set_review_action(self, control, operation):
+        previous = operation in self.workspace.review_actions
+        if control.get_active() == previous:
+            return
+        try:
+            self.workspace.set_review_action(operation, control.get_active())
+            self.message = ""
+        except OWNER_ERRORS as error:
+            self.message = str(error) or "Could not save the action’s review setting."
+            control.set_active(previous)
+        self._refresh()
+
+    def _set_start_unlocked(self, control):
+        enabled = control.get_active()
+        if enabled == self.start_unlocked:
+            return
+        try:
+            store = self.workspace.legacy_access
+            store.write(replace(store.read(), start_unlocked=enabled))
+            self.start_unlocked = enabled
+            self.message = ""
+        except OWNER_ERRORS as error:
+            self.message = str(error) or "Could not save the vault startup setting."
+            control.set_active(self.start_unlocked)
+        self._refresh()
+
+    def _broker_settings_page(self, body):
+        if not self.broker:
+            add_label(body, "The broker is unavailable.")
+            return
+        config = self.broker.config
         endpoint = Gtk.Entry(text=str(config.path) if config else "")
         uid = Gtk.Entry(text=str(config.agent_uid) if config else "")
         retention = Gtk.SpinButton.new_with_range(1, 365, 1)
-        retention.set_value(settings.retention_days)
+        retention.set_value(self.workspace.legacy_access.read().retention_days)
         for label, widget in (("Absolute broker socket path", endpoint), ("Isolated runner account or UID", uid),
                               ("Activity retention (days)", retention)):
             add_label(body, label)
             body.pack_start(widget, False, False, 0)
+        status = _label("")
+        body.pack_start(status, False, False, 0)
 
-        def save():
-            path, account = endpoint.get_text().strip(), uid.get_text().strip()
-            if bool(path) != bool(account):
-                raise ValueError("Provide both the socket path and runner account, or clear both.")
+        def save(*_):
             try:
-                peer = (int(account) if account.isdecimal() else pwd.getpwnam(account).pw_uid) if account else None
-            except KeyError:
-                raise ValueError("The runner account could not be found.") from None
-            updated = replace(settings, endpoint=path or None, uid=peer, retention_days=retention.get_value_as_int())
-            config = updated.broker_config()
-            self.workspace.pause()
-            self.broker.update(lambda: self.workspace.legacy_access.write(updated), config)
-            if config:
-                self.broker.start()
+                path, account = endpoint.get_text().strip(), uid.get_text().strip()
+                if bool(path) != bool(account):
+                    raise ValueError("Provide both the socket path and runner account, or clear both.")
+                try:
+                    peer = (int(account) if account.isdecimal() else pwd.getpwnam(account).pw_uid) if account else None
+                except KeyError:
+                    raise ValueError("The runner account could not be found.") from None
+                store = self.workspace.legacy_access
+                updated = replace(store.read(), endpoint=path or None, uid=peer, retention_days=retention.get_value_as_int())
+                config = updated.broker_config()
+                self.workspace.pause()
+                self.broker.update(lambda: store.write(updated), config)
+                if config:
+                    self.broker.start()
+                status.set_text("Broker settings saved.")
+            except OWNER_ERRORS as error:
+                status.set_text(str(error) or "Could not save the broker settings.")
+            self._refresh()
 
-        if self.run_dialog(dialog) == Gtk.ResponseType.OK:
-            self.owner_operation(save)
+        save_button = Gtk.Button(label="Save broker settings", halign=Gtk.Align.START)
+        save_button.connect("clicked", save)
+        body.pack_start(save_button, False, False, 0)
 
     def _desktop_lock(self, *_):
         dialog = self.dialog

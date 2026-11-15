@@ -22,6 +22,9 @@ class AccessStorageTests(TestCase):
         store = AccessStore(self.root / "access.json")
         default = store.read()
         self.assertEqual(default.mode, AccessMode.REVIEW)
+        self.assertTrue(default.start_unlocked)
+        self.assertFalse(default.review_usage)
+        self.assertFalse(default.review_actions)
         fallback = BrokerConfig(self.root / "existing.sock", os.geteuid() + 1)
         self.assertEqual(default.broker_config(fallback), fallback)
         vault, other, stable_id = (str(uuid4()) for _ in range(3))
@@ -29,7 +32,8 @@ class AccessStorageTests(TestCase):
             Action("verify", "Verify service", stable_id, "https://example.invalid/check"),
         ))
         saved = replace(default, mode=AccessMode.SMART, endpoint=str(self.root / "broker.sock"),
-                        uid=os.geteuid() + 1, vaults=((vault, policy),))
+                        uid=os.geteuid() + 1, vaults=((vault, policy),), start_unlocked=False,
+                        review_actions=frozenset({"list_entries", "update_entry"}))
         store.write(saved)
         reopened = AccessStore(store.path).read()
         self.assertEqual(reopened, saved)
