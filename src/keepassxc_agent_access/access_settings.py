@@ -141,6 +141,8 @@ class AccessSettings:
     review_usage: bool = False
     review_actions: frozenset[str] = frozenset()
     start_unlocked: bool = True
+    auto_approve_tokens: bool = False
+    auto_approve_token_changes: bool = False
 
     def for_vault(self, identity):
         return dict(self.vaults).get(identity, VaultPolicy())
@@ -169,8 +171,11 @@ class AccessStore:
             review_usage = data.get("review_usage", False)
             review_actions = data.get("review_actions", [])
             start_unlocked = data.get("start_unlocked", True)
+            auto_approve_tokens = data.get("auto_approve_tokens", False)
+            auto_approve_token_changes = data.get("auto_approve_token_changes", False)
             if (type(retention) is not int or not 1 <= retention <= 365 or type(review_usage) is not bool
-                    or type(start_unlocked) is not bool or not isinstance(review_actions, list)
+                    or type(start_unlocked) is not bool or type(auto_approve_tokens) is not bool
+                    or type(auto_approve_token_changes) is not bool or not isinstance(review_actions, list)
                     or any(not isinstance(action, str) or action not in REVIEW_ACTIONS for action in review_actions)):
                 raise ValueError
             vaults = tuple(
@@ -181,7 +186,8 @@ class AccessStore:
                 for identity, policy in data["vaults"].items()
             )
             return AccessSettings(AccessMode(data["mode"]), endpoint, uid, retention, vaults, review_usage,
-                                  frozenset(review_actions), start_unlocked)
+                                  frozenset(review_actions), start_unlocked,
+                                  auto_approve_tokens, auto_approve_token_changes)
         except FileNotFoundError:
             return AccessSettings()
         except (OSError, AttributeError, ValueError, TypeError, KeyError):
@@ -200,6 +206,8 @@ class AccessStore:
             "review_usage": settings.review_usage,
             "review_actions": sorted(settings.review_actions),
             "start_unlocked": settings.start_unlocked,
+            "auto_approve_tokens": settings.auto_approve_tokens,
+            "auto_approve_token_changes": settings.auto_approve_token_changes,
             "endpoint": settings.endpoint,
             "uid": settings.uid,
             "retention_days": settings.retention_days,

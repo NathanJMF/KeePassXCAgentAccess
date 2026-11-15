@@ -92,7 +92,8 @@ def main(root):
     profiles = root / "profiles"
     profiles.mkdir()
     profiles.chmod(0o1777)
-    names = ("alpha", "beta", "review", "review-live", "review-paused", "expanded", "bearer", "scoped-editor")
+    names = ("alpha", "beta", "review", "review-live", "review-paused", "expanded", "bearer", "scoped-editor",
+             "auto-token")
     directories = [str(profiles / name) for name in names]
     atexit.register(subprocess.run, [*NAMESPACE, "rm", "-rf", "--", *directories], check=True)
     subprocess.run([*NAMESPACE, "mkdir", "-m", "700", *directories], check=True)
@@ -172,7 +173,7 @@ def main(root):
             with patch("keepassxc_agent_access.owner_views.Gtk.get_current_event", return_value=event):
                 widget.clicked()
 
-        def assert_keypress_ignored(dialog, profile):
+        def assert_keypress_ignored(dialog, profile, *, permission_change=False):
             responses = []
             listener = dialog.connect("response", lambda _, response: responses.append(response))
             try:
@@ -187,7 +188,8 @@ def main(root):
                     assert not widget.get_can_focus()
                     widget.clicked()
                 assert not responses
-                assert app.grants.records[token_ids[profile]].status == "pending"
+                grant = app.grants.records[token_ids[profile]]
+                assert (grant.pending_change.status if permission_change else grant.status) == "pending"
             finally:
                 dialog.disconnect(listener)
 
@@ -1572,6 +1574,48 @@ def main(root):
                 activity_group(same_scope, "Paused")
                 app.tray_items["pause"].activate()
                 assert app.indicator.get_icon() == "keeper-agent-access-active"
+                assert not settings_switch("reviews", "auto_approve_token_changes")
+                assert settings_switch("reviews", "auto_approve_tokens", True)
+                assert old_access.read().auto_approve_tokens
+                initial_item = {"vault": first, "entry": first_entry, "metadata": True}
+                assert enroll("auto-token", [initial_item]) == {"status": "active"}
+                token = token_ids["auto-token"]
+                assert ("grant", token) not in app._review_requests()
+                approved = old_activity.rows(action="Approve token", agent="Agent auto-token")
+                assert len(approved) == 1 and approved[0]["decision"] == "Auto approved"
+                assert invoke("auto-token", "entries", "list", "--vault", first)["entries"][0]["id"] == first_entry
+
+                change = {"identity": "Agent auto-token", "project": "Disposable project",
+                          "items": [{**initial_item, "vault": second, "entry": nested_entry}],
+                          "change_id": str(uuid4())}
+                assert invoke("auto-token", "access", "request", request=change) == {"status": "pending"}
+                request_id = f"{token}/{change['change_id']}"
+                assert ("grant-change", request_id) in app._review_requests()
+                app.access_button.clicked()
+                view = app.access_view
+                row, = [row for row in view.table.get_model() if row[view.RECORD_ID] == request_id]
+                assert row[view.STATUS] == "Permission change pending"
+                assert row.iterchildren() is not None
+                assert invoke("auto-token", "entries", "list", "--vault", first)["entries"][0]["id"] == first_entry
+
+                def approve_permission_change(dialog):
+                    assert dialog.get_title() == "Review token permission change"
+                    assert_keypress_ignored(dialog, "auto-token", permission_change=True)
+                    click_decision(dialog.get_widget_for_response(Gtk.ResponseType.ACCEPT))
+
+                drive_dialog(app._refresh, approve_permission_change, opens_async=True)
+                assert invoke("auto-token", "access", "request", request=change) == {"status": "active"}
+                assert invoke("auto-token", "entries", "list", "--vault", second)["entries"][0]["id"] == nested_entry
+                assert settings_switch("reviews", "auto_approve_token_changes", True)
+                assert not settings_switch("reviews", "auto_approve_tokens", False)
+                assert old_access.read().auto_approve_token_changes
+                change = {**change, "items": [initial_item], "change_id": str(uuid4())}
+                assert invoke("auto-token", "access", "request", request=change) == {"status": "active"}
+                assert ("grant-change", f"{token}/{change['change_id']}") not in app._review_requests()
+                decisions = old_activity.rows(action="Approve token permissions", agent="Agent auto-token")
+                assert [row["decision"] for row in decisions] == ["Auto approved", "Approved in Access"]
+                assert invoke("auto-token", "entries", "list", "--vault", first)["entries"][0]["id"] == first_entry
+
                 set_screen_active(True)
                 wait_for(lambda: app.desktop.locked and not app.workspace.sessions, "Desktop lock did not close both workers")
                 assert app.workspace.paused and "paused" in invoke("beta", "vaults", "list", expected=1)

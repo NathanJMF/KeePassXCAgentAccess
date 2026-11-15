@@ -170,7 +170,7 @@ def main(argv=None):
     topics = parser.add_subparsers(required=True)
     access = topics.add_parser("access", help="Request and check a scoped token")
     commands = access.add_subparsers(required=True)
-    enrollment = commands.add_parser("request", help="Read a scope request as JSON from stdin")
+    enrollment = commands.add_parser("request", help="Read a new token or permission-change request from stdin")
     enrollment.add_argument("--json", action="store_true", required=True, help="Emit JSON")
     enrollment.set_defaults(operation="request_access")
     status = commands.add_parser("status", help="Check this profile's token")
@@ -239,7 +239,9 @@ def main(argv=None):
         if token_file or options.operation in (
             "request_access", "access_status", "list_vaults", "request_edit", "edit_status",
         ):
-            payload["credential"] = credential(token_file, create=options.operation == "request_access")
+            scope = payload.get("request")
+            create = options.operation == "request_access" and isinstance(scope, dict) and "change_id" not in scope
+            payload["credential"] = credential(token_file, create=create)
         if len(encode(payload)) > REQUEST_LIMIT:
             raise ListingError("too_large")
         result = request(os.environ.get("KEEPASSXC_AGENT_SOCKET"), payload)

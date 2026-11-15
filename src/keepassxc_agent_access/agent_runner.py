@@ -44,6 +44,7 @@ ENROLLMENT = {
     "properties": {
         "identity": {"type": "string"},
         "project": {"type": "string"},
+        "change_id": {**REFERENCE, "description": "A new UUID to replace this active token’s scope. Reuse it to check the change."},
         "items": {"type": "array", "minItems": 1, "items": {
             "type": "object",
             "properties": {
@@ -86,7 +87,7 @@ EDIT_REQUEST = {
 OPERATIONS = {
     "access_status": (("access", "status"), tool("access_status", "Check this token profile's status.")),
     "request_access": (("access", "request"), tool(
-        "request_access", "Request a token for exact entries and permissions. Supply the scope as request.",
+        "request_access", "Request a scoped token or replace this token’s scope using a change_id.",
         {"request": ENROLLMENT}, required=("request",), read_only=False,
     )),
     "request_edit": (("edits", "request"), tool(

@@ -103,6 +103,88 @@ class ScopedBrokerTests(unittest.TestCase):
         self.assert_code("paused", "list_entries", vault=self.vaults[0])
         self.assertEqual(len(self.activity.rows(action="Request token")), 1)
 
+    def test_auto_enrollment_keeps_usage_paused_and_enforces_resolved_scope(self):
+        self.workspace.set_token_auto_approval("auto_approve_tokens", True)
+        self.workspace.pause()
+        vault, other = self.vaults
+        item = {"metadata": True, "entry": self.entry, "vault": vault}
+        self.assertEqual(self.enroll([item]), {"status": "active"})
+        self.assertEqual(self.enroll([item]), {"status": "active"})
+        self.assertTrue(self.workspace.paused)
+        self.assert_code("paused", "list_entries", vault=vault)
+        self.workspace.pause(False)
+        self.assertEqual(len(self.invoke("list_entries", vault=vault)["entries"]), 1)
+        self.assert_code("ineligible", "list_entries", vault=other)
+        approved, = self.activity.rows(action="Approve token")
+        self.assertEqual((approved["decision"], approved["outcome"]), ("Auto approved", "Approved"))
+
+    def test_auto_approval_preserves_manual_review_for_unresolved_requests(self):
+        self.workspace.set_token_auto_approval("auto_approve_tokens", True)
+        label = {"metadata": True, "label": "Example entry"}
+        self.assertEqual(self.enroll([label]), {"status": "pending"})
+        _, other = self.vaults
+        self.workspace.sessions.pop(other)
+        self.assertEqual(self.enroll([label], 1), {"status": "pending"})
+        self.assertEqual(self.enroll([{**label, "vault": other}], 2), {"status": "pending"})
+        self.assertEqual(self.activity.rows(action="Approve token"), [])
+
+    def test_token_scope_replacement_preserves_current_access_until_decided(self):
+        self.workspace.set_token_auto_approval("auto_approve_tokens", True)
+        vault, other = self.vaults
+        initial = {"metadata": True, "entry": self.entry, "vault": vault}
+        self.assertEqual(self.enroll([initial]), {"status": "active"})
+        identifier = self.grants.authenticate(self.secrets[0], 1500).id
+        first_change = {"change_id": str(uuid4()), "identity": "Fixture agent 0", "project": "Fixture",
+                        "items": [{**initial, "vault": other, "url": True}]}
+        replacement = {**first_change, "change_id": str(uuid4())}
+        self.assert_code("ineligible", "request_access", 1, request=first_change)
+        self.assert_code("ineligible", "request_access", uid=1501, request=first_change)
+        self.assertEqual(self.invoke("request_access", request=first_change), {"status": "pending"})
+        self.assert_code("token_change_pending", "request_access", request=replacement)
+        self.assertEqual(self.invoke("access_status"), {"status": "active"})
+        self.assertEqual(len(self.invoke("list_entries", vault=vault)["entries"]), 1)
+        self.assert_code("ineligible", "list_entries", vault=other)
+
+        self.grants = self.engine.grants = Grants(self.workspace, self.activity)
+        self.grants.decide(identifier, None, change_id=first_change["change_id"])
+        self.assertEqual(self.invoke("request_access", request=first_change), {"status": "denied"})
+        self.assertEqual(self.invoke("request_access", request=replacement), {"status": "pending"})
+        change = self.grants.records[identifier].pending_change
+        choice, = self.grants.choices(change.items[0])
+        self.grants.decide(identifier, [choice], change_id=change.id)
+        self.assertEqual(self.invoke("request_access", request=replacement), {"status": "active"})
+        self.assertEqual(self.enroll([initial]), {"status": "active"})
+        self.assert_code("revoked", "request_access", request=first_change)
+        self.assert_code("ineligible", "list_entries", vault=vault)
+        self.assertEqual(self.invoke("list_entries", vault=other, fields=["url"])["entries"][0]["url"],
+                         "https://fixture-1.example.test")
+        approved, = self.activity.rows(action="Approve token permissions")
+        self.assertEqual(approved["decision"], "Approved in Access")
+
+    def test_auto_scope_replacement_invalidates_results_from_previous_scope(self):
+        vault, other = self.vaults
+        initial = {"metadata": True, "entry": self.entry, "vault": vault}
+        identifier = self.approve([initial])
+        self.workspace.set_token_auto_approval("auto_approve_token_changes", True)
+        saved = Workspace(self.workspace.directory, None)
+        self.assertTrue(saved.auto_approve_token_changes)
+        self.assertFalse(saved.auto_approve_tokens)
+        self.assertEqual(self.enroll([initial], 1), {"status": "pending"})
+        change = {"change_id": str(uuid4()), "identity": "Fixture agent 0", "project": "Fixture",
+                  "items": [{**initial, "vault": other}]}
+
+        def replace_scope():
+            self.assertEqual(self.invoke("request_access", request=change, context={"note": "New task"}),
+                             {"status": "active"})
+
+        self.assert_code("revoked", "list_entries", vault=vault, before=replace_scope)
+        self.assertEqual(self.invoke("request_access", request=change), {"status": "active"})
+        approved, = self.activity.rows(action="Approve token permissions")
+        self.assertEqual((approved["decision"], approved["note"]), ("Auto approved", "New task"))
+        self.assertIsNone(self.grants.records[identifier].pending_change)
+        self.grants.transition(identifier, "disabled")
+        self.assert_code("ineligible", "request_access", request={**change, "change_id": str(uuid4())})
+
     def test_review_applies_once_per_scoped_use_and_never_approves_tokens(self):
         vault = self.vaults[0]
         item = {"vault": vault, "entry": self.entry, "metadata": True, "action": "check"}

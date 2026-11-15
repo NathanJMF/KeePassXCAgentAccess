@@ -138,6 +138,15 @@ class Choice:
 
 
 @dataclass(frozen=True)
+class PermissionChange:
+    id: str
+    requested: float
+    context: Attribution
+    items: tuple[Item, ...]
+    status: str = "pending"
+
+
+@dataclass(frozen=True)
 class Grant:
     id: str
     verifier: str
@@ -151,6 +160,12 @@ class Grant:
     scope: tuple[Scope, ...] = ()
     last_used: float | None = None
     generation: int = 0
+    change: PermissionChange | None = None
+    superseded_changes: tuple[str, ...] = ()
+
+    @property
+    def pending_change(self):
+        return self.change if self.change and self.change.status == "pending" else None
 
 
 class Grants:
@@ -165,9 +180,14 @@ class Grants:
             if saved["version"] != 1:
                 raise ValueError
             for row in saved["grants"]:
+                change = row.get("change")
+                if change is not None:
+                    change = PermissionChange(**dict(change, context=Attribution(**change["context"]),
+                                                     items=tuple(Item(**item) for item in change["items"])))
                 record = Grant(**dict(row, context=Attribution(**row["context"]),
                                       items=tuple(Item(**item) for item in row["items"]),
-                                      scope=tuple(Scope(**scope) for scope in row["scope"])))
+                                      scope=tuple(Scope(**scope) for scope in row["scope"]), change=change,
+                                      superseded_changes=tuple(row.get("superseded_changes", ()))))
                 if record.id in self.records or record.verifier in self.credentials:
                     raise ValueError
                 self.records[record.id] = record
@@ -192,8 +212,10 @@ class Grants:
 
     def enroll(self, credential, uid, payload, attribution):
         try:
-            if not isinstance(payload, dict) or set(payload) != {"identity", "project", "items"}:
+            required = {"identity", "project", "items"}
+            if not isinstance(payload, dict) or not required <= payload.keys() <= required | {"change_id"}:
                 raise ValueError
+            change_id = uuid_text(payload["change_id"]) if "change_id" in payload else None
             identity, project = label(payload["identity"]).strip(), label(payload["project"])
             if not identity:
                 raise ValueError
@@ -211,17 +233,65 @@ class Grants:
             identifier = self.credentials.get(digest)
             if identifier:
                 record = self.records[identifier]
-                if (record.uid, record.identity.strip(), record.project, record.items) != (uid, identity, project, items):
+                if (record.uid, record.identity.strip(), record.project) != (uid, identity, project):
+                    raise ListingError("ineligible")
+                if change_id:
+                    return self._request_change(record, change_id, items, attribution)
+                if record.items != items:
                     raise ListingError("ineligible")
                 return record.status
+            if change_id:
+                raise ListingError("ineligible")
             if any(row.status in LIVE_GRANT_STATES and row.identity.strip().casefold() == identity_key
                    for row in self.records.values()):
                 raise ListingError("identity_in_use")
-            if sum(row.status == "pending" for row in self.records.values()) >= MAX_PENDING:
-                raise ListingError("busy")
+            self._check_request_capacity()
             record = Grant(new_id(), digest, uid, time(), identity, project, attribution, items)
             self._change(record, "Request token", "Pending approval")
+            choices = self._automatic_choices(items) if self.workspace.auto_approve_tokens else None
+            if choices:
+                self._decide(record, choices, automatic=True)
+                return "active"
             return record.status
+
+    def _request_change(self, record, change_id, items, attribution):
+        if record.status != "active":
+            raise ListingError("ineligible")
+        previous = record.change
+        if previous and change_id == previous.id:
+            if previous.items != items:
+                raise ListingError("invalid_request")
+            return previous.status
+        if change_id in record.superseded_changes:
+            raise ListingError("revoked")
+        if record.pending_change:
+            raise ListingError("token_change_pending")
+        self._check_request_capacity()
+        change = PermissionChange(change_id, time(), attribution, items)
+        superseded = (*record.superseded_changes, previous.id) if previous else record.superseded_changes
+        row = replace(record, change=change, superseded_changes=superseded)
+        choices = self._automatic_choices(items) if self.workspace.auto_approve_token_changes else None
+        self._change(row, "Request token permissions", "Pending approval", context=attribution,
+                     target_scope=tuple(choice.scope for choice in choices) if choices else ())
+        if choices:
+            self._decide(row, choices, change_id=change_id, automatic=True)
+            return "active"
+        return change.status
+
+    def _check_request_capacity(self):
+        pending = sum(row.status == "pending" or bool(row.pending_change)
+                      for row in self.records.values())
+        if pending >= MAX_PENDING:
+            raise ListingError("busy")
+
+    def _automatic_choices(self, items):
+        # A locked vault can hide another match for an unqualified label.
+        for item in items:
+            if item.vault is None and any(self.workspace.session(vault) is None
+                                          for vault in self.workspace.registrations):
+                return None
+        matches = [self.choices(item) for item in items]
+        return [choices[0] for choices in matches] if all(len(choices) == 1 for choices in matches) else None
 
     def rows(self):
         with self.workspace.mutex:
@@ -259,20 +329,38 @@ class Grants:
                                          url=entry.get("url") if item.url else None))
             return tuple(result)
 
-    def decide(self, identifier, choices):
+    def decide(self, identifier, choices, *, change_id=None):
         with self.workspace.mutex:
-            record = self.records[identifier]
+            self._decide(self.records[identifier], choices, change_id=change_id)
+
+    def _decide(self, record, choices, *, change_id=None, automatic=False):
+        if change_id:
+            change = record.change
+            if record.status != "active" or change is None or (change.id, change.status) != (change_id, "pending"):
+                raise ListingError("revoked")
+            items, context = change.items, change.context
+        else:
             if record.status != "pending":
                 raise ListingError("revoked")
-            if choices is None:
+            items, context = record.items, record.context
+        if choices is None:
+            if change_id:
+                self._change(replace(record, change=replace(change, status="denied")),
+                             "Deny token permissions", "Denied", context=context, target_scope=())
+            else:
                 self._change(replace(record, status="denied", items=()), "Deny token", "Denied")
-                return
-            if len(choices) != len(record.items) or any(
-                selected not in self.choices(item) for item, selected in zip(record.items, choices)
-            ):
-                raise ValueError("The requested scope changed. Reopen the request and review it again.")
-            scope = tuple(choice.scope for choice in choices)
-            self._change(replace(record, status="active", scope=scope), "Approve token", "Approved")
+            return
+        if len(choices) != len(items) or any(
+            selected not in self.choices(item) for item, selected in zip(items, choices)
+        ):
+            raise ValueError("The requested scope changed. Reopen the request and review it again.")
+        scope = tuple(choice.scope for choice in choices)
+        action = "Approve token permissions" if change_id else "Approve token"
+        row = replace(record, status="active", scope=scope)
+        if change_id:
+            row = replace(row, change=replace(change, status="active"), generation=record.generation + 1)
+        decision = "Auto approved" if automatic else "Approved in Access"
+        self._change(row, action, "Approved", context=context, decision=decision)
 
     def transition(self, identifier, status):
         with self.workspace.mutex:
@@ -287,8 +375,10 @@ class Grants:
             if action is None:
                 raise ListingError("revoked")
             row = replace(record, status=status, generation=record.generation + 1)
+            if row.pending_change:
+                row = replace(row, change=replace(row.change, status="denied"))
             if status == "removed":
-                row = replace(row, scope=(), items=())
+                row = replace(row, scope=(), items=(), change=None, superseded_changes=())
             self._change(row, action, status.capitalize(), target_scope=record.scope)
 
     def _target(self, scope):
@@ -313,13 +403,14 @@ class Grants:
             target.update(entry=entry_id, folder=folder, entry_title=title)
         return target
 
-    def _change(self, record, action, outcome, *, target_scope=None):
-        scope = ", ".join(item.audit_summary() for item in record.scope)
-        target = self._target(record.scope if target_scope is None else target_scope)
-        event = self.activity.begin(record.uid, record.context, action, None, token=record.id,
+    def _change(self, record, action, outcome, *, target_scope=None, context=None, decision=None):
+        scope_items = record.scope if target_scope is None else target_scope
+        scope = ", ".join(item.audit_summary() for item in scope_items)
+        target = self._target(scope_items)
+        event = self.activity.begin(record.uid, context or record.context, action, None, token=record.id,
                                     agent=record.identity, project=record.project, scope=scope or None, **target)
-        if action == "Approve token":
-            self.activity.authorize(event, "Approved in Access")
+        if decision:
+            self.activity.authorize(event, decision)
         self._put(record)
         self.activity.finish(event, outcome)
 

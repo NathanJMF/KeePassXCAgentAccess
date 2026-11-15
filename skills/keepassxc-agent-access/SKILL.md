@@ -26,9 +26,11 @@ If the status is uninitialized, submit one JSON object on stdin. Ask for the spe
     }
     JSON
 
-If the owner supplied exact references, replace a label with both vault and entry UUIDs. To request edit permissions, use an `edits` array of exact operation names. Entry permissions use an entry UUID or label. Group permissions use a vault UUID and a group UUID. An item can request discovery metadata, an action ID, or both. To request additional fields, set metadata to true and set username, url, or both to true explicitly. A label needs an exact entry title, which the owner resolves in the desktop Access pane. Supply the owner-provided action ID for credential use. An unchanged retry is safe. A wider or revised request, denied token, or removed token needs a fresh profile from the trusted runner. New and revised tokens always require owner approval.
+If the owner supplied exact references, replace a label with both vault and entry UUIDs. To request edit permissions, use an `edits` array of exact operation names. Entry permissions use an entry UUID or label. Group permissions use a vault UUID and a group UUID. An item can request discovery metadata, an action ID, or both. To request additional fields, set metadata to true and set username, url, or both to true explicitly. A label needs an exact entry title. Exact vault and entry UUIDs avoid ambiguous matches. Supply the owner-provided action ID for credential use. An unchanged retry is safe. A denied or removed token needs a fresh profile from the trusted runner.
 
-Tell the user if the request is pending and check status after they have reviewed it. Only active tokens can run scoped operations. Ask the owner about disabled tokens, locked vaults, or globally paused agent access.
+To change an active token’s permissions, use the same profile, identity, and project. Add a new UUID as `change_id` to the access request and send the complete replacement `items` list, including any permissions you still need. Resubmit the same request and UUID to check the permission change. A pending or denied change leaves current permissions in effect.
+
+Keeper can auto approve new tokens and permission changes independently. If a request is pending, tell the user and check again after they review it. Only active tokens can run scoped operations. Ask the owner about disabled tokens, locked vaults, or globally paused agent access.
 
 ## Discover and list
 

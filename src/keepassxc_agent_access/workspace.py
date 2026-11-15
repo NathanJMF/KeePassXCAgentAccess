@@ -80,6 +80,8 @@ class Workspace:
         preferences = self.legacy_access.read()
         self.review_usage = preferences.review_usage
         self.review_actions = preferences.review_actions
+        self.auto_approve_tokens = preferences.auto_approve_tokens
+        self.auto_approve_token_changes = preferences.auto_approve_token_changes
         self.generation = 0
         self._load()
 
@@ -388,6 +390,11 @@ class Workspace:
                 self.legacy_access.write(replace(self.legacy_access.read(), review_actions=actions))
                 self.review_actions = actions
                 self.generation += 1
+
+    def set_token_auto_approval(self, setting, enabled):
+        with self.mutex:
+            self.legacy_access.write(replace(self.legacy_access.read(), **{setting: enabled}))
+            setattr(self, setting, enabled)
 
     def pause(self, paused=True):
         with self.mutex:

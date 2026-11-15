@@ -439,9 +439,12 @@ class WorkspaceApplication(Gtk.Application):
 
     def _review_requests(self):
         grants = self.grants.rows() if self.grants else ()
-        return tuple(("grant", grant.id) for grant in grants if grant.status == "pending") + tuple(
-            ("edit", f"{edit.token_id}/{edit.id}") for edit in self.pending_edits() if edit.status == "pending"
-        ) + tuple(("usage", str(ticket.id)) for ticket in self.usage_approvals.pending())
+        return (
+            *(("grant", grant.id) for grant in grants if grant.status == "pending"),
+            *(("grant-change", f"{grant.id}/{grant.change.id}") for grant in grants if grant.pending_change),
+            *(("edit", f"{edit.token_id}/{edit.id}") for edit in self.pending_edits() if edit.status == "pending"),
+            *(("usage", str(ticket.id)) for ticket in self.usage_approvals.pending()),
+        )
 
     def _style_usage_policy(self):
         review = bool(self.workspace and self.workspace.review_usage)
@@ -1042,6 +1045,18 @@ class WorkspaceApplication(Gtk.Application):
         self._settings_switch(self._settings_card(review), "Review usage", self.workspace.review_usage,
                               self._set_usage_policy, "review-usage",
                               "Ask for approval each time an agent runs an operation.")
+        tokens = self._settings_card(review)
+        tokens.pack_start(styled(_label("Auto approve"), "keeper-settings-caption"), False, False, 0)
+        tokens.pack_start(styled(_label("Grant requests without a prompt when Keeper can identify every resource."),
+                                 "keeper-settings-description"), False, False, 0)
+        for setting, caption in (
+            ("auto_approve_tokens", "New access tokens"),
+            ("auto_approve_token_changes", "Token permission changes"),
+        ):
+            tokens.pack_start(Gtk.Separator(), False, False, 0)
+            self._settings_switch(tokens, caption, getattr(self.workspace, setting),
+                                  lambda control, setting=setting: self._set_token_auto_approval(control, setting),
+                                  setting)
         actions = self._settings_card(review)
         actions.pack_start(styled(_label("Always require approval for"), "keeper-settings-caption"), False, False, 0)
         actions.pack_start(styled(_label("These switches also apply in Allow usage mode."), "keeper-settings-description"),
@@ -1092,6 +1107,19 @@ class WorkspaceApplication(Gtk.Application):
             self.message = ""
         except OWNER_ERRORS as error:
             self.message = str(error) or "Could not save the action’s review setting."
+            control.set_active(previous)
+        self._refresh()
+
+    def _set_token_auto_approval(self, control, setting):
+        previous = getattr(self.workspace, setting)
+        enabled = control.get_active()
+        if enabled == previous:
+            return
+        try:
+            self.workspace.set_token_auto_approval(setting, enabled)
+            self.message = ""
+        except OWNER_ERRORS as error:
+            self.message = str(error) or "Could not save the token auto approval setting."
             control.set_active(previous)
         self._refresh()
 

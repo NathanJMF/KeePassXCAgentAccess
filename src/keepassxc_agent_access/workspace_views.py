@@ -220,6 +220,7 @@ def _table_text_color(_column, cell, model, row, context):
 
 ACCESS_STATES = {
     "Pending": ("appointment-soon-symbolic", "keeper_warning"),
+    "Permission change pending": ("appointment-soon-symbolic", "keeper_warning"),
     "Edit pending": ("appointment-soon-symbolic", "keeper_warning"),
     "Applying edit": ("content-loading-symbolic", "keeper_accent"),
     "Usage pending": ("appointment-soon-symbolic", "keeper_warning"),
@@ -247,6 +248,9 @@ ACTIVITY_ACTION_ICONS = {
     "Request token": "dialog-question-symbolic",
     "Approve token": "changes-allow-symbolic",
     "Deny token": "changes-prevent-symbolic",
+    "Request token permissions": "dialog-question-symbolic",
+    "Approve token permissions": "changes-allow-symbolic",
+    "Deny token permissions": "changes-prevent-symbolic",
     "Disable token": "changes-prevent-symbolic",
     "Re-enable token": "changes-allow-symbolic",
     "Remove token": "user-trash-symbolic",
@@ -405,7 +409,7 @@ class AccessView(Gtk.Box):
             self.TITLES, (138, 138, 122, 106, 109, 106, 119),
             status=(self.STATUS, ACCESS_STATES), muted_columns=(0, 1), expand_columns=(2, 3, 4, 5),
             time_columns={0: self.REQUESTED_TIME, 1: self.LAST_USED_TIME},
-            text_renderers={self.IDENTITY: AccessIdentityRenderer}, indent_rows=True,
+            text_renderers={self.IDENTITY: AccessIdentityRenderer}, full_text_columns=(self.STATUS,), indent_rows=True,
             sort_group=self.REVIEW_GROUP, replace_rows=replace_tree_rows,
         )
         self.table.set_enable_tree_lines(True)
@@ -426,13 +430,18 @@ class AccessView(Gtk.Box):
         rows = []
         snapshots = {}
         for grant in grants:
-            other = grant.status != "pending"
-            scope = self._scope_rows(grant, snapshots) if other else ()
-            rows.append((other, -grant.requested,
-                         (table_time(grant.requested), table_time(grant.last_used),
-                          reported(grant.identity), reported(grant.context.model), reported(grant.project),
-                          reported(grant.context.chat), grant.status.capitalize(), grant.id, "grant",
-                          grant.requested, grant.last_used, other, ("grant", grant.id), (), scope)))
+            change = grant.pending_change
+            other = grant.status != "pending" and not change
+            scope = self._scope_rows(grant, snapshots) if grant.status == "active" or other else ()
+            requested = change.requested if change else grant.requested
+            context = change.context if change else grant.context
+            state = "Permission change pending" if change else grant.status.capitalize()
+            identifier, kind = (f"{grant.id}/{change.id}", "grant-change") if change else (grant.id, "grant")
+            rows.append((bool(other), -requested,
+                         (table_time(requested), table_time(grant.last_used),
+                          reported(grant.identity), reported(context.model), reported(grant.project),
+                          reported(context.chat), state, identifier, kind,
+                          requested, grant.last_used, bool(other), ("grant", grant.id), (), scope)))
         for edit in edits:
             state = "Edit pending" if edit.status == "pending" else "Applying edit"
             rows.append((False, -edit.requested,
@@ -550,6 +559,15 @@ class AccessView(Gtk.Box):
 
         if kind == "edit":
             return [[("Review edit…", open_selected)]]
+        if kind == "grant-change":
+            grant_id, _, _ = identifier.partition("/")
+            def current_permissions():
+                self.open_record(grant_id, "grant")
+            return [
+                [("Review permission change…", open_selected), ("View current permissions…", current_permissions)],
+                [("Disable token", lambda: self._update_token(grant_id, "disabled")),
+                 (self.REMOVE, lambda: self._update_token(grant_id, "removed"))],
+            ]
         if state in ("Pending", "Usage pending"):
             return [[("Review request…", open_selected)]]
         change = "disabled" if state == "Active" else "active"
@@ -577,7 +595,13 @@ class AccessView(Gtk.Box):
                 self.app.review_popups.mark_reviewed(kind, identifier)
                 review_edit(self.app, record)
             return
-        grant = self.app.grants.records.get(identifier) if self.app.grants else None
+        grant_id, _, change_id = identifier.partition("/")
+        grant = self.app.grants.records.get(grant_id) if self.app.grants else None
+        if kind == "grant-change":
+            if grant and grant.pending_change and grant.pending_change.id == change_id:
+                self.app.review_popups.mark_reviewed(kind, identifier)
+                self._review(grant, grant.pending_change)
+            return
         if grant:
             if grant.status == "pending":
                 self.app.review_popups.mark_reviewed(kind, identifier)
@@ -625,8 +649,10 @@ class AccessView(Gtk.Box):
             queue.resolve(ticket.id, response == Gtk.ResponseType.ACCEPT)
             self.app._refresh()
 
-    def _review(self, grant):
-        dialog, body = _dialog(self.app, "Review access request", 620, -1)
+    def _review(self, grant, change=None):
+        request = change or grant
+        title = "Review token permission change" if change else "Review access request"
+        dialog, body = _dialog(self.app, title, 620, -1)
         dialog.set_name("keeper-access-review")
         dialog.set_position(Gtk.WindowPosition.CENTER_ON_PARENT)
         dialog.set_modal(True)
@@ -654,10 +680,12 @@ class AccessView(Gtk.Box):
         identity.pack_start(project, False, False, 0)
         body.pack_start(requester, False, False, 0)
 
-        count = len(grant.items)
+        if change:
+            add_label(body, "Approving replaces this token’s current permissions with the scope below.")
+        count = len(request.items)
         review = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
         if count > 1:
-            caption = "Requested resources" if any(item.group for item in grant.items) else "Requested entries"
+            caption = "Requested resources" if any(item.group for item in request.items) else "Requested entries"
             heading = styled(_label(f"{caption} ({count})"), "keeper-access-caption")
             review.pack_start(heading, False, False, 0)
         scroll = Gtk.ScrolledWindow()
@@ -680,17 +708,17 @@ class AccessView(Gtk.Box):
         technical = Gtk.Expander(label="Technical details")
         details = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10, margin_top=8)
         details.pack_start(activity_facts((
-            ("Requested", table_time(grant.requested)),
+            ("Requested", table_time(request.requested)),
             ("Agent account", f"UID {grant.uid} (verified)"),
             ("Project", reported(grant.project)),
-            ("Model", reported(grant.context.model)),
-            ("Chat", reported(grant.context.chat)),
+            ("Model", reported(request.context.model)),
+            ("Chat", reported(request.context.chat)),
             ("Token record", grant.id),
         )), False, False, 0)
         technical.add(details)
         styled(technical, "keeper-access-technical")
 
-        controls = [self._review_entry(review, details, item) for item in grant.items]
+        controls = [self._review_entry(review, details, item) for item in request.items]
 
         def changed(*_):
             paused = self.app.workspace.paused
@@ -711,8 +739,9 @@ class AccessView(Gtk.Box):
             response = self.app.run_dialog(dialog)
         finally:
             GLib.source_remove(watch)
+        change_id = change.id if change else None
         if response == Gtk.ResponseType.REJECT:
-            self.app.owner_operation(lambda: self.app.grants.decide(grant.id, None))
+            self.app.owner_operation(lambda: self.app.grants.decide(grant.id, None, change_id=change_id))
         elif response == Gtk.ResponseType.ACCEPT:
             choices = [options[combo.get_active()] for combo, options in controls]
             resume = approve.get_label() == resume_label
@@ -723,7 +752,7 @@ class AccessView(Gtk.Box):
                 with self.app.workspace.mutex:
                     if self.app.workspace.paused and not resume:
                         raise ValueError("Agent access was paused. Reopen the request to review your options.")
-                    self.app.grants.decide(grant.id, choices)
+                    self.app.grants.decide(grant.id, choices, change_id=change_id)
                     if resume:
                         self.app.workspace.pause(False)
 

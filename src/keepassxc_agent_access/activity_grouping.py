@@ -5,7 +5,10 @@ from .activity import entry_label, folder_label
 
 
 EDIT_STAGES = frozenset(("Request edit", "Apply edit", "Deny edit", "Cancel edit"))
-TOKEN_EVENTS = frozenset(("Request token", "Approve token", "Deny token", "Disable token", "Re-enable token", "Remove token"))
+TOKEN_EVENTS = frozenset((
+    "Request token", "Approve token", "Deny token", "Disable token", "Re-enable token", "Remove token",
+    "Request token permissions", "Approve token permissions", "Deny token permissions",
+))
 
 
 def edit_reference(row, prefix):

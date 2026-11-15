@@ -118,6 +118,15 @@ class RunnerTests(TestCase):
         self.assertTrue(all(row["result"]["isError"] for row in replies))
         self.assertEqual(list(self.profile.iterdir()), [])
 
+    def test_permission_change_requires_an_initialized_profile(self):
+        request = {"identity": "Fixture", "project": "Fixture",
+                   "items": [{"label": "Fixture", "metadata": True}],
+                   "change_id": "229b7a79-bcb0-450c-a320-bfccdd672f75"}
+        result, replies = self.run_server(call_tool("request_access", {"request": request}))
+        self.assertEqual(result.returncode, 0)
+        self.assertTrue(replies[0]["result"]["isError"])
+        self.assertEqual(list(self.profile.iterdir()), [])
+
     def test_enrollment_retains_the_same_credential_across_runner_restarts(self):
         with socket.socket(socket.AF_UNIX) as listener:
             listener.bind(str(self.endpoint))
