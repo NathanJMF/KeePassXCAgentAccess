@@ -19,7 +19,7 @@ Run `./install-launcher` from the owner-controlled checkout to add **Keeper** to
 3. Select a vault in the sidebar to see all its entries and their folder paths. Expand it and select a folder to browse the entries directly inside. The entry table includes its Created and Modified dates. Double-click an entry for details and credential actions.
 4. Use **Lock Vault** to close the selected vault independently. To check saved unlock, lock that vault and select **Unlock**.
 
-Use **Enter password…** to unlock manually or update a remembered password after rotating it in KeePassXC. **Forget password** deletes the app's saved credential. **Relink** checks the last verified contents of a moved vault before retaining its local identity and token scopes. **Remove…** removes the registration and its saved credential while keeping the database file.
+Use **Unlock** to open a vault. Keeper tries the saved keyring password and prompts when it needs a password. **Forget Saved Password…** deletes the app's saved credential. **Relink Vault…** checks the last verified contents of a moved vault before retaining its local identity and token scopes. **Remove from Keeper…** removes the registration and its saved credential while keeping the database file.
 
 Existing installations retain their registered vault, keyring reference, broker admission settings, and Activity. Unlock the migrated vault to see its existing action bindings in entry details. Startup pauses agent access, and agent use requires an approved token. With **Vaults → Start Unlocked** on, Keeper unlocks vaults that have a working saved keyring password. The toolbar button locks every vault when one is open and offers to unlock them when they are all locked.
 
@@ -32,7 +32,7 @@ Keeper checks for external changes before replacing the encrypted file. If Keepe
 ## Replace a plaintext unlock file
 
 1. Confirm you have an owner-controlled recovery path, then rotate the master password in KeePassXC.
-2. In the workspace, lock the vault, select **Enter password…**, and remember the new password.
+2. In the workspace, lock the vault and select **Unlock**. Enter the new password when prompted and select **Remember in the OS Keyring**.
 3. Quit and restart the tray app. Select the vault, click **Unlock**, and check that its groups and entries appear. Keeper tries the saved keyring password first and prompts you if it needs a new one.
 4. Retire the old plaintext file after verifying the keyring unlock. Review any backups separately because older database copies can still use the previous password.
 
@@ -90,4 +90,4 @@ tests/run-linux-integration
 TRAY_TEST_ISOLATION=1 tests/run-linux-integration
 ```
 
-The integration runner uses a private GNOME Wayland compositor, D-Bus session, and disposable OS keyring. The isolation option requires Linux subordinate UID/GID mappings and `setfacl` from the `acl` package. It verifies legacy setup and recovery, the GNOME launcher, and the scoped workspace with two disposable vaults that share KeePass IDs. The workspace scenario checks CLI enrollment, metadata-only and use-only grants, destination binding, per-token revocation, desktop lock, and Activity without using personal vaults.
+The integration runner uses a private GNOME Wayland compositor, D-Bus session, and disposable OS keyring. The isolation option requires Linux subordinate UID/GID mappings and `setfacl` from the `acl` package. It verifies legacy setup and recovery, the GNOME launcher, and the scoped workspace with two disposable vaults that share KeePass IDs. The workspace scenario checks CLI enrollment, metadata-only and use-only grants, destination binding, per-token revocation, desktop lock, and Activity without using personal vaults. The runner scenario exercises all seven stdio tools with a disposable vault and local HTTPS service.
