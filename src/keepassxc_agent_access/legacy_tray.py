@@ -157,6 +157,14 @@ def main():
             x = (window.get_width() - width) // 2
             y = (window.get_height() - height) // 2
             apply_shape(xid, region, x, y, window.get_scale_factor())
+            # Some panels paint the opaque XEmbed socket behind our plug.
+            # It is dedicated to this tray icon and has the same dimensions.
+            socket = tray.get_socket_window() if isinstance(tray, Gtk.Plug) else None
+            if socket is not None and socket.get_visual().get_depth() == 24:
+                plug_x, plug_y, plug_width, plug_height = window.get_geometry()
+                _, _, socket_width, socket_height = socket.get_geometry()
+                if (plug_x, plug_y, plug_width, plug_height) == (0, 0, socket_width, socket_height):
+                    apply_shape(socket.get_xid(), region, x, y, socket.get_scale_factor())
         return GLib.SOURCE_REMOVE
 
     def size_changed(*_):
@@ -172,6 +180,7 @@ def main():
     def embedded(*_):
         if icon.is_embedded():
             GLib.idle_add(shape_icon)
+            GLib.timeout_add(100, shape_icon)
             send(b"C")
         else:
             Gtk.main_quit()
