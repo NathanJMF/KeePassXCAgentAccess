@@ -62,17 +62,13 @@ The exported tray menu SHALL allow opening the Keeper window only. Access policy
 - **WHEN** the caller invokes the exported tray menu item
 - **THEN** Keeper opens its window and preserves the current access state, settings, and approvals
 
-### Requirement: Verify isolation across the whole agent deployment
+### Requirement: Review Keeper's owner boundary across surfaces
 
-All agent-controlled execution, tools and escalation paths SHALL be confined outside the owner account and desktop session. The owner SHALL control policies, approvals, protected settings, installation and update sources. An offline host SHALL share only its scoped broker socket and bounded private resources. Deployment verification SHALL cover each enabled tool backend and run again when a capability or policy changes.
+Changes to Keeper's agent-facing tools, desktop and tray interfaces, installation, and update paths SHALL be reviewed together for exposure of owner controls. Verify the supported boundaries with synthetic state and include each affected interface in the regression checks.
 
-#### Scenario: A complete offline agent host starts
-- **WHEN** the owner starts an offline tool host from a trusted frontend
-- **THEN** its tools can reach the scoped broker through the separate OS identity and have no access to the owner files, desktop or other services
-
-#### Scenario: An agent deployment adds another tool backend
-- **WHEN** an agent gains a shell, application bridge, browser, automation, or escalation capability
-- **THEN** keep access paused until that backend passes the same owner-boundary checks
+#### Scenario: Keeper adds an entry point
+- **WHEN** Keeper adds or changes an agent-facing or desktop entry point
+- **THEN** verify the intended caller and permissions across that entry point and related Keeper interfaces before release
 
 ### Requirement: Recheck token scope before every protected delivery
 

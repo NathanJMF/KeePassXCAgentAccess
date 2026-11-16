@@ -27,7 +27,7 @@ APP = DESKTOP_ID.removesuffix(".desktop")
 SERVICE = "keeper-agent.service"
 LEGACY_SERVICE = "keepassxc-agent-access.service"
 CHECKOUT = Path(__file__).resolve().parents[2]
-PROGRAMS = ("run-tray", "keepassxc-agent", "keeper-agent-runner", "keeper-run-agent", "keeper-run-isolated", "keeper-open", "uninstall")
+PROGRAMS = ("run-tray", "keepassxc-agent", "keeper-agent-runner", "keeper-run-agent", "keeper-open", "uninstall")
 
 
 def digest(data):
