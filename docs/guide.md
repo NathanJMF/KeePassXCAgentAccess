@@ -14,7 +14,7 @@ From this checkout, run:
 
 Keeper installs the missing Ubuntu packages, adds **Keeper** to the application menu, and opens it. The bundled skill is installed at `Documents/Skills/Keeper/SKILL.md`. On upgrade, Keeper removes the old copy if it matches the bundled skill or the previous installation record. Keeper keeps locally edited copies. The installed app runs from a per-user copy, so you can move the checkout. To update, open **Keeper Settings → Updates**, select **Check for Updates**, then **Apply Update**. Keeper records the trusted checkout’s upstream URL and branch at install time. It checks and applies fast-forward updates in its private installation directory. For a private upstream, use SSH authentication in your desktop account. You can also install manually from a trusted, up-to-date checkout.
 
-Minimize the window to keep Keeper running in the tray. On Ubuntu GNOME, middle-click the tray icon to open Keeper directly or select **Open Keeper** from the tray menu. **X** and **Ctrl+Q** both quit Keeper.
+Minimize the window to keep Keeper running in the tray. On Ubuntu GNOME with legacy tray icons enabled, left-click the tray icon to reopen Keeper. Right-click for **Open Keeper**. When only AppIndicator is available, select **Open Keeper** from its menu or middle-click the icon. **X** and **Ctrl+Q** both quit Keeper.
 
 To set up the isolated agent runner and start Keeper’s broker at sign-in, run:
 

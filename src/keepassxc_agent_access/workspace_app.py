@@ -2,6 +2,7 @@
 
 from dataclasses import replace
 import json
+import os
 from pathlib import Path
 import pwd
 import signal
@@ -24,6 +25,8 @@ from .edit_requests import EditRequests
 from .grants import Grants
 from .installation import Installation
 from .keyring import KeyringError, SystemKeyring
+from .legacy_tray import ACTIVE_ICON as TRAY_ACTIVE_ICON, ICON_DIRECTORY as TRAY_ICON_DIRECTORY
+from .legacy_tray import PAUSED_ICON as TRAY_PAUSED_ICON, LegacyTray
 from .owner_views import _dialog, _label, _scroll, table_time
 from .protocol import ListingError
 from .review_popups import ReviewPopups
@@ -44,9 +47,6 @@ from .workspace_views import (
 OWNER_ERRORS = (ActivityError, KeyringError, ListingError, OSError, SettingsError, ValueError, VaultError)
 ENTRY_FOLDER_COLUMN = 5
 ENTRY_ID_COLUMN = 6
-TRAY_ICON_DIRECTORY = Path(__file__).resolve().with_name("icons")
-TRAY_PAUSED_ICON = "keeper-agent-access-paused"
-TRAY_ACTIVE_ICON = "keeper-agent-access-active"
 
 
 class WorkspaceApplication(Gtk.Application):
@@ -65,6 +65,7 @@ class WorkspaceApplication(Gtk.Application):
         self.window = None
         self.dialog = None
         self.indicator = None
+        self.legacy_tray = None
         self.tray_connected = False
         self.message = ""
         self.exiting = False
@@ -122,6 +123,8 @@ class WorkspaceApplication(Gtk.Application):
             GLib.timeout_add(650, self._fallback)
 
     def _fallback(self):
+        if self.legacy_tray and not self.tray_connected:
+            return GLib.SOURCE_CONTINUE
         if not self.tray_connected:
             self._present()
         return GLib.SOURCE_REMOVE
@@ -356,6 +359,26 @@ class WorkspaceApplication(Gtk.Application):
         return False
 
     def _build_tray(self):
+        if os.environ.get("DISPLAY"):
+            try:
+                self.legacy_tray = LegacyTray(
+                    self._present, lambda: self._tray_status(None, True), self._on_legacy_tray_exit,
+                )
+                return
+            except GLib.Error:
+                pass
+        self._build_appindicator()
+
+    def _on_legacy_tray_exit(self):
+        was_connected = self.tray_connected
+        self.legacy_tray = None
+        self.tray_connected = False
+        if not self.exiting:
+            self._build_appindicator()
+            if was_connected:
+                self._present()
+
+    def _build_appindicator(self):
         try:
             gi.require_version("AyatanaAppIndicator3", "0.1")
             from gi.repository import AyatanaAppIndicator3
@@ -435,6 +458,8 @@ class WorkspaceApplication(Gtk.Application):
                     TRAY_PAUSED_ICON if paused else TRAY_ACTIVE_ICON,
                     "Agent access paused" if paused else "Agent access active",
                 )
+            if self.legacy_tray:
+                self.legacy_tray.set_paused(paused)
             if self.stack.get_visible_child_name() == "access":
                 self.access_view.refresh()
             elif self.stack.get_visible_child_name() == "activity":
@@ -1325,6 +1350,8 @@ class WorkspaceApplication(Gtk.Application):
         return GLib.SOURCE_REMOVE
 
     def do_shutdown(self):
+        if self.legacy_tray:
+            self.legacy_tray.close()
         if self.popup_source is not None:
             GLib.source_remove(self.popup_source)
             self.popup_source = None
