@@ -2,12 +2,14 @@
 
 from collections import Counter
 from dataclasses import dataclass
+from shlex import join, split
 
 from gi.repository import GLib, Gtk, Pango
 
 from .access_settings import Action, ActionType
 from .activity import ActivityError
 from .activity_grouping import EDIT_STAGES, ActivityResources, activity_groups, activity_matches, event_time
+from .command_action import executable_digest
 from .edit_request_view import review_edit
 from .grants import EDIT_PERMISSIONS, group_location
 from .owner_views import _dialog, _label, _scroll, _table, _time, require_mouse_decisions, table_time
@@ -840,7 +842,7 @@ class AccessView(Gtk.Box):
                 binding = vault.binding(entry_id, item.action) if choice else None
                 action = binding.action if binding else None
                 name = f"Run {action.name}" if action else f"Run credential action {item.action}"
-                destination = f"{action.kind.label} · {action.url}" if action else None
+                destination = f"{action.kind.label} · {action.destination}" if action else None
                 access_permission(permissions, name, destination)
             facts = activity_facts((
                 ("Vault ID", vault_id),
@@ -1206,7 +1208,7 @@ def entry_details(app, vault, entry):
         for binding in record.bindings:
             action = binding.action
             if action.entry == entry["id"]:
-                store.append((action.id, action.name, action.kind.label, action.url,
+                store.append((action.id, action.name, action.kind.label, action.destination,
                               "Enabled" if action.enabled else "Disabled"))
         table = _table(store, ("ID", "Name", "Type", "Destination", "Status"))
         body.pack_start(_scroll(table), True, True, 0)
@@ -1249,22 +1251,41 @@ def edit_binding(app, vault, entry, previous):
     kind.set_active_id(previous.action.kind.value if previous else ActionType.BASIC.value)
     body.pack_start(kind, False, False, 0)
     fields = []
-    for title, default in (("Action ID", "health-check"), ("Name", "Health check"), ("Destination", "")):
+    for title, default in (("Action ID", "health-check"), ("Name", "Health check")):
         add_label(body, title)
         field = Gtk.Entry(text=default)
         body.pack_start(field, False, False, 0)
         fields.append(field)
+    target_label = _label("")
+    target = Gtk.Entry()
+    body.pack_start(target_label, False, False, 0)
+    body.pack_start(target, False, False, 0)
+    fields.append(target)
+
+    def update_target(*_):
+        local = kind.get_active_id() == ActionType.STDIN
+        target_label.set_text("Executable and Arguments" if local else "Destination")
+        target.set_placeholder_text("/usr/bin/example --read-stdin" if local else "https://example.com/status")
+
+    kind.connect("changed", update_target)
+    update_target()
     enabled = Gtk.CheckButton(label="Enabled", active=True)
     body.pack_start(enabled, False, False, 0)
     if previous:
         action = previous.action
-        for field, value in zip(fields, (action.id, action.name, action.url)):
+        for field, value in zip(fields, (action.id, action.name, join(action.command) if action.command else action.url)):
             field.set_text(value)
         enabled.set_active(action.enabled)
     response = app.run_dialog(dialog)
     if response == Gtk.ResponseType.OK:
         def save():
             identifier, name, url = (field.get_text() for field in fields)
-            action = Action(identifier, name, entry, url, enabled.get_active(), kind=kind.get_active_id())
+            chosen_kind = ActionType(kind.get_active_id())
+            if chosen_kind == ActionType.STDIN:
+                command = tuple(split(url))
+                action = Action(identifier, name, entry, "", enabled.get_active(), kind=chosen_kind,
+                                command=command, executable_sha256=executable_digest(command))
+            else:
+                action = Action(identifier, name, entry, url, enabled.get_active(), kind=chosen_kind)
             app.workspace.save_binding(vault, action, previous.action.id if previous else None)
         app.owner_operation(save)

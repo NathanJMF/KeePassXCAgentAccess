@@ -10,7 +10,7 @@ from uuid import UUID
 from .runner_token import UninitializedProfile, credential
 from .protocol import (
     CLIENT_TIMEOUT, ERRORS, LIST_REQUEST, ListingError, REQUEST_LIMIT, REQUEST_TIMEOUT, RESPONSE_LIMIT,
-    decode, encode, receive, remaining,
+    decode, encode, receive, remaining, validate_command,
 )
 
 
@@ -106,6 +106,10 @@ def _validate(reply, payload):
                 raise ListingError("invalid_response")
         return reply
     if operation == "use_password":
+        if "command" in payload:
+            if set(reply) != {"outcome"} or reply["outcome"] not in ("succeeded", "failed"):
+                raise ListingError("invalid_response")
+            return reply
         status = reply.get("http_status")
         if (
             "outcome" not in reply or set(reply) - {"outcome", "http_status"}
@@ -204,10 +208,25 @@ def main(argv=None):
     use.add_argument("--action", required=True, help="Owner-configured action ID")
     use.add_argument("--json", action="store_true", required=True, help="Emit JSON")
     use.set_defaults(operation="use_password")
+    run = topics.add_parser("run", help="Supply a Keeper credential over stdin to an approved isolated command")
+    run.add_argument("--vault", help="Scoped vault ID")
+    run.add_argument("--entry", required=True, help="Entry UUID")
+    run.add_argument("--action", required=True, help="Approved command action ID")
+    run.add_argument("--json", action="store_true", required=True, help="Emit JSON")
+    run.add_argument("command", nargs=argparse.REMAINDER, help="The exact approved executable and arguments")
+    run.set_defaults(operation="use_password")
     options = parser.parse_args(argv)
+    if hasattr(options, "command"):
+        try:
+            args = options.command[1:] if options.command[:1] == ["--"] else options.command
+            options.command = validate_command(args)
+        except ValueError as error:
+            parser.error(str(error))
     payload = {"version": 1, "operation": options.operation}
     if options.operation == "use_password":
         payload.update(entry=options.entry, action=options.action)
+        if hasattr(options, "command"):
+            payload["command"] = options.command
     elif getattr(options, "include_reviewed", False):
         payload["include_reviewed"] = True
     if options.operation == "edit_status":

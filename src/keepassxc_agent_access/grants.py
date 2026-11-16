@@ -323,7 +323,7 @@ class Grants:
                     scope = Scope(identifier, entry["id"], item.metadata, item.action,
                                   binding.revision if binding else None, username=item.username, url=item.url, edits=item.edits)
                     result.append(Choice(scope, record.name, (*entry["group_path"], entry["title"]),
-                                         binding.action.url if binding else None,
+                                         binding.action.destination if binding else None,
                                          kind=binding.action.kind if binding else None,
                                          username=entry.get("username") if item.username else None,
                                          url=entry.get("url") if item.url else None))

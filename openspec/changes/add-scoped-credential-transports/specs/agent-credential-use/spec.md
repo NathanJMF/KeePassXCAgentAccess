@@ -2,52 +2,34 @@
 
 ## ADDED Requirements
 
-### Requirement: Owner approves a reusable operation scope
+### Requirement: Owner approves a reusable delivery policy
 
-Keeper SHALL bind authorization to an agent token, entry, transport, destination, operation, and binding revision. Existing per-use review and revocation settings SHALL apply to each use. The installed runner SHALL be available independently of the agent's working directory.
+Keeper SHALL bind an agent's authorization to an entry and the revision of an approved delivery policy. Changing the consumer or permitted arguments SHALL require renewed authorization. The runner SHALL accept an opaque credential reference independently of the caller's working directory.
 
-#### Scenario: Agent reuses an approved grant
-- **WHEN** the agent requests the same enabled operation from another checkout and per-use review is off
-- **THEN** Keeper performs the operation within the grant without asking the owner to enter a credential or approve again
+#### Scenario: Agent reuses an approved local command
+- **WHEN** an entitled agent requests the exact approved command and per-use review is off
+- **THEN** Keeper delivers the credential through the approved channel without further owner input
 
-#### Scenario: Operation binding changes
-- **WHEN** the owner changes the destination, operation, or other authorization-relevant parameters
-- **THEN** the prior grant cannot authorize use of the changed binding
+#### Scenario: Agent supplies a different command
+- **WHEN** the supplied executable or arguments differ from the grant
+- **THEN** Keeper refuses before releasing the credential
 
-### Requirement: Git push uses an approved repository and branch
+### Requirement: Local command delivery keeps credentials inside its sandbox
 
-Keeper SHALL execute a Git HTTPS push from a fresh private bare repository using one validated commit and one owner-bound branch. The repository SHALL have its own object store and SHALL NOT import bundle-provided refs. The broker SHALL accept bounded bundle bytes rather than opening a path supplied by an agent. The authenticated process SHALL use fixed trusted configuration and a private credential exchange.
+Keeper SHALL start the approved system executable in a restricted process environment with read-only system files, private temporary storage, resource and lifetime limits, and no network or host workspace access. Keeper SHALL recheck authorization after sandbox readiness and SHALL send the secret only on the command's private stdin. Keeper SHALL return a bounded, structured outcome.
 
-#### Scenario: Agent submits a valid push
-- **WHEN** a granted agent supplies a valid bundle and commit ID
-- **THEN** Keeper can push the commit to the bound branch without force and returns a bounded result
+#### Scenario: Sandbox cannot start
+- **WHEN** Keeper cannot establish the required isolation
+- **THEN** the command receives no credential and the agent sees a safe failure
 
-#### Scenario: Request exceeds the approved scope
-- **WHEN** the request tries to alter the remote or branch, use Git options supplied by the agent, or cross a resource limit
-- **THEN** Keeper rejects it before releasing a credential
+#### Scenario: Command echoes its input
+- **WHEN** the command writes the received secret to stdout or stderr
+- **THEN** the broker returns only its structured outcome and records no output or secret
 
-### Requirement: API and browser results protect credentials and sessions
+### Requirement: Activity records credential use
 
-An API transport SHALL enforce a bound method, endpoint, input schema, and result schema. A browser transport SHALL keep authenticated browser state in a private context and enforce bound origins and typed operations.
+Keeper SHALL record the requesting agent, entry, configured action, destination or exact command binding, authorization decision, and outcome of a credential-use attempt. It SHALL exclude the secret and raw tool output.
 
-#### Scenario: A destination returns sensitive data
-- **WHEN** a remote operation echoes its authorization header or creates a new secret or session
-- **THEN** the agent receives only the permitted structured result and no credential or session data
-
-### Requirement: Activity records every credential use
-
-Keeper SHALL record the requesting agent, entry, action, destination, authorization decision, and outcome for each use. The broker SHALL persist admission and dispatch state and bind retry identifiers to the token, binding revision, and input digest. It SHALL make ambiguous remote outcomes visible and SHALL NOT automatically retry an authenticated mutation.
-
-#### Scenario: Authorization changes while work is pending
-- **WHEN** the token is revoked or the vault locks before credential delivery
-- **THEN** Keeper stops the operation and records the denial or revocation
-
-#### Scenario: The connection ends after dispatch
-- **WHEN** Keeper cannot establish whether the destination accepted a dispatched mutation
-- **THEN** Activity records the outcome as uncertain and the broker does not automatically repeat it
-
-#### Scenario: Agent repeats an earlier request ID
-- **WHEN** an agent repeats a request ID with the same binding revision and input
-- **THEN** Keeper reports the existing outcome without delivering a credential again
-- **AND WHEN** the same ID is used with different input or a different binding revision
-- **THEN** Keeper rejects the request
+#### Scenario: Authorization is revoked while preparing work
+- **WHEN** the owner pauses or the token changes before private stdin delivery
+- **THEN** Keeper blocks delivery and records the revocation

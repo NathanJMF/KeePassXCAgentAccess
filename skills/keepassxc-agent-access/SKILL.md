@@ -47,6 +47,12 @@ The vault catalog shows the token's vault UUIDs and display names. Each entry ro
 
 Use the exact approved reference, including owner-provided entry IDs for use-only permissions. The broker applies the password inside the fixed action and returns the outcome and, when available, the HTTP status. Report that result. If a vault entry or action is unavailable, ask the owner to check the grant and action. Use the execution tool's normal approval flow if it needs permission to reach the socket.
 
+For an approved isolated command, use the entry and action as the credential reference. Leave stdin free for Keeper. Supply the exact executable and argument vector approved by the owner.
+
+    keepassxc-agent run --vault VAULT_UUID --entry ENTRY_UUID --action ACTION_ID --json -- /usr/bin/example --read-stdin
+
+With stdio, call use_password with entry, action, optional vault, and command as an array of literal strings. The command receives the secret on its private stdin followed by EOF. It runs without network or host workspace access. The tool returns success or failure. Networked Git, API, and browser commands require other enabled delivery policies.
+
 ## Request a vault edit
 
 Use an active token to submit one exact change and its vault and target references. Keeper sends edits outside the token’s approved edit scope for owner review. For a one-off reviewed edit, submit the edit request directly using the active token. Ask the owner for group UUIDs when needed. Generate a request UUID once and reuse it for an unchanged retry or when checking status.

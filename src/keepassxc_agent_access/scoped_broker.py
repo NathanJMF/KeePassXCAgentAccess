@@ -1,13 +1,15 @@
 """Authorize scoped requests and recheck their state before releasing data."""
 
 from collections import Counter, deque
+from contextlib import contextmanager
+from threading import BoundedSemaphore
 from time import monotonic, time
 
 from .approvals import Approval, ApprovalQueue
-from .access_settings import action_id, uuid_text
+from .access_settings import ActionType, action_id, uuid_text
 from .activity import ActivityError, Attribution, entry_label, entry_target_labels
 from .grants import OPTIONAL_METADATA_FIELDS, verifier
-from .protocol import RESPONSE_LIMIT, ListingError, encode
+from .protocol import RESPONSE_LIMIT, ListingError, encode, validate_command
 from .settings import SettingsError
 
 
@@ -27,6 +29,16 @@ class ScopedBroker:
         self.request_counts = Counter()
         self.request_classes = Counter()
         self.next_limit_notice = 0
+        self.command_slots = BoundedSemaphore(2)
+
+    @contextmanager
+    def _command_slot(self):
+        if not self.command_slots.acquire(blocking=False):
+            raise ListingError("busy")
+        try:
+            yield
+        finally:
+            self.command_slots.release()
 
     def _charge_request(self, credential_key, uid, *, active):
         # Called under the workspace mutex before the request can write audit data.
@@ -64,6 +76,7 @@ class ScopedBroker:
             context = Attribution.parse(payload.get("context", {}))
             entry, binding_id, vault = None, None, None
             fields = ()
+            command = None
             if operation in ("request_access", "request_edit") and keys == {"request"}:
                 pass
             elif operation == "edit_status" and keys == {"id"}:
@@ -77,10 +90,12 @@ class ScopedBroker:
                         or any(field not in OPTIONAL_METADATA_FIELDS for field in fields)
                         or len(set(fields)) != len(fields)):
                     raise ValueError
-            elif operation == "use_password" and keys in ({"entry", "action"}, {"entry", "action", "vault"}):
+            elif operation == "use_password" and {"entry", "action"} <= keys <= {"entry", "action", "vault", "command"}:
                 entry = uuid_text(payload["entry"])
                 binding_id = action_id(payload["action"])
                 vault = uuid_text(payload["vault"]) if "vault" in keys else None
+                if "command" in keys:
+                    command = validate_command(payload["command"])
             else:
                 raise ValueError
         except (ValueError, TypeError, KeyError, AttributeError):
@@ -138,7 +153,7 @@ class ScopedBroker:
             folder, title = entry_target_labels(session.entries, entry) if permitted and session else (None, None)
             event = self.activity.begin(
                 uid, context, name + (f" · {binding.action.name}" if permitted else ""),
-                binding.action.url if permitted else None, entry if permitted else None,
+                binding.action.destination if permitted else None, entry if permitted else None,
                 vault=registration.name if registration else None, vault_id=chosen if registration else None,
                 token=token.id, agent=token.identity, project=token.project, folder=folder, entry_title=title,
                 scope=f"Requested entry fields · {', '.join(fields)}" if fields else None,
@@ -177,8 +192,12 @@ class ScopedBroker:
                     raise ListingError("select_vault")
                 if session is None or (operation == "use_password" and not permitted):
                     raise ListingError("ineligible")
-            if operation == "use_password" and session.worker.entry(entry) is None:
-                raise ListingError("ineligible")
+            if operation == "use_password":
+                expected = binding.action.command if binding.action.kind == ActionType.STDIN else None
+                if command != expected:
+                    raise ListingError("ineligible")
+                if session.worker.entry(entry) is None:
+                    raise ListingError("ineligible")
             if not guard(live):
                 raise ListingError("revoked")
             if review_usage:
@@ -197,7 +216,7 @@ class ScopedBroker:
                 else:
                     scope = (" › ".join(part for part in (registration.name, folder, title) if part),)
                 ticket = Approval(event, uid, context, name + (f" · {binding.action.name}" if binding else ""),
-                                  scope, binding.action.url if binding else None, monotonic() + self.approvals.timeout,
+                                  scope, binding.action.destination if binding else None, monotonic() + self.approvals.timeout,
                                   identity=token.identity, project=token.project, requested=time())
                 result = self.approvals.wait(ticket, lambda: guard(live))
                 if result != "approved":
@@ -218,7 +237,11 @@ class ScopedBroker:
                         send()
                     return guard(lambda: dispatch(audit_and_send))
 
-                result = session.worker.use(binding.action, gate)
+                if binding.action.kind == ActionType.STDIN:
+                    with self._command_slot():
+                        result = session.worker.use(binding.action, gate)
+                else:
+                    result = session.worker.use(binding.action, gate)
             succeeded = result.get("outcome") != "failed"
             frame = encode(result)
             if len(frame) > RESPONSE_LIMIT:

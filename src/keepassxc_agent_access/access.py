@@ -3,7 +3,7 @@
 from dataclasses import dataclass
 from time import monotonic
 
-from .access_settings import AccessMode, action_id, uuid_text
+from .access_settings import AccessMode, ActionType, action_id, uuid_text
 from .activity import ActivityError, Attribution
 from .approvals import Approval
 from .protocol import ListingError, decode, encode
@@ -59,7 +59,7 @@ class AccessEngine:
             if request.entry is None:
                 name = "List entries"
                 destination = None
-            elif not action or not action.enabled or action.entry != request.entry:
+            elif not action or not action.enabled or action.entry != request.entry or action.kind == ActionType.STDIN:
                 event = self.activity.begin(uid, request.attribution, "Use password · unavailable action", None)
                 raise ListingError("ineligible")
             else:

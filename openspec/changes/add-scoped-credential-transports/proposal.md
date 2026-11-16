@@ -2,21 +2,21 @@
 
 ## Why
 
-Keeper grants agents scoped access and records credential use, but its existing HTTPS GET actions cannot authenticate a Git push, call a typed API operation, or establish a browser session. The owner wants to approve a scope once and see every use in Activity.
+An agent needs a reusable way to use a saved credential with tools without learning its value. The owner needs to approve a scope once and see each use in Activity. Keeper currently has two fixed HTTPS GET actions.
 
 ## What Changes
 
-- Introduce credential transports for approved CLI, API, and browser operations. Each transport defines where the credential goes, which inputs the agent can supply, and which results it can see.
-- Start with a Git HTTPS action for a fast-forward push to an owner-selected repository and branch. An agent can submit a Git bundle from any checkout using the installed runner.
-- Preserve existing entry grants, review settings, and HTTPS GET actions. The owner can reuse an approved transport grant when its scope and configuration remain valid.
-- Record requested operation, entry, destination, safe target details, decision, and outcome in Activity.
+- Add a reusable interface that pairs an opaque credential reference with an owner-approved delivery policy.
+- Start with private stdin for local CLI programs. The owner configures the executable and literal arguments. The agent supplies the same argument vector and the approved credential reference.
+- Extend the same interface with separately reviewed network, API, and browser delivery policies. Git is an end-to-end use case for a future network-enabled profile, using a reusable credential delivery method.
+- Record each operation, credential entry, approved destination or command, decision, and outcome in Activity.
 
 ## Capabilities
 
 ### Modified Capabilities
 
-- **`agent-credential-use`** adds operation-specific transports, reusable approval scopes, and audit requirements.
+- **`agent-credential-use`** covers reusable credential delivery, approved operation scopes, and audit requirements.
 
 ## Impact
 
-Extends the local broker, trusted runtime, desktop action editor, agent CLI, and Activity view. API writes and browser adapters ship as separately reviewed operations. Plaintext credentials stay with the trusted transport and approved destination.
+Extends desktop credential actions, the agent CLI and stdio runner, the broker, and the trusted vault worker. The first profile uses Linux sandboxing and returns status only. Existing HTTPS actions retain their behaviour.

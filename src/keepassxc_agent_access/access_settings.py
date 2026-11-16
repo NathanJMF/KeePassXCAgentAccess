@@ -6,9 +6,11 @@ import ipaddress
 import json
 from pathlib import Path
 import re
+from shlex import join
 from urllib.parse import urlsplit
 from uuid import UUID
 
+from .protocol import validate_command
 from .settings import SettingsError, write_private_json
 
 
@@ -37,12 +39,14 @@ REVIEW_ACTIONS = {
 class ActionType(str, Enum):
     BASIC = "https_basic_get"
     BEARER = "https_bearer_get"
+    STDIN = "local_command_stdin"
 
     @property
     def label(self):
         return {
             self.BASIC: "HTTPS Basic-auth GET",
             self.BEARER: "HTTPS Bearer token GET",
+            self.STDIN: "Isolated command stdin",
         }[self]
 
 
@@ -106,6 +110,16 @@ class Action:
     url: str
     enabled: bool = True
     kind: ActionType = ActionType.BASIC
+    command: tuple[str, ...] = ()
+    executable_sha256: str = ""
+
+    @property
+    def destination(self):
+        return f"Local stdin · {join(self.command)}" if self.kind == ActionType.STDIN else self.url
+
+    @property
+    def scope(self):
+        return self.kind, self.url, self.id, self.command, self.executable_sha256
 
     def __post_init__(self):
         action_id(self.id)
@@ -117,7 +131,15 @@ class Action:
         except ValueError:
             raise ValueError("Choose a supported credential action.") from None
         object.__setattr__(self, "entry", uuid_text(self.entry))
-        object.__setattr__(self, "url", Destination.parse(self.url).url)
+        if kind == ActionType.STDIN:
+            if self.url != "" or not re.fullmatch(r"[a-f0-9]{64}", self.executable_sha256):
+                raise ValueError("Choose a pinned local command without a network destination.")
+            object.__setattr__(self, "command", validate_command(self.command))
+        else:
+            if self.command or self.executable_sha256:
+                raise ValueError("HTTPS actions do not accept local command settings.")
+            object.__setattr__(self, "command", ())
+            object.__setattr__(self, "url", Destination.parse(self.url).url)
         object.__setattr__(self, "kind", kind)
 
 

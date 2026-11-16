@@ -27,7 +27,7 @@ Expand a token to see which vaults, groups, and entries it covers. Open its deta
 
 ## Activity
 
-See which agent acted, which resource it used, and what happened. Expand related events for their history or double-click an event for details and its audit note. Approved credential actions can authenticate to configured HTTPS destinations without returning passwords to the agent.
+See which agent acted, which resource it used, and what happened. Expand related events for their history or double-click an event for details and its audit note. Approved credential actions can authenticate to configured HTTPS destinations or supply a password over stdin to an isolated local command. Both return a bounded outcome. See the [local command setup](docs/guide.md#use-a-credential-with-a-local-command).
 
 ![Keeper's Activity view showing grouped audit events, affected resources, and outcomes](docs/screenshots/activity-view.png)
 

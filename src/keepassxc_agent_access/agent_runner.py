@@ -9,7 +9,7 @@ import sys
 from uuid import UUID
 
 from .agent_cli import EDIT_OPERATIONS, ENTRY_FIELDS, edit_request, edit_uuid
-from .protocol import CLIENT_TIMEOUT, ERRORS, ListingError, REQUEST_LIMIT, decode, encode
+from .protocol import CLIENT_TIMEOUT, ERRORS, ListingError, REQUEST_LIMIT, decode, encode, validate_command
 from .runner_token import UninitializedProfile, open_profile
 
 
@@ -105,7 +105,9 @@ OPERATIONS = {
     )),
     "use_password": (("use",), tool(
         "use_password", "Use a credential through an owner-configured action. Return the action result.",
-        {"vault": REFERENCE, "entry": REFERENCE, "action": {"type": "string"}},
+        {"vault": REFERENCE, "entry": REFERENCE, "action": {"type": "string"},
+         "command": {"type": "array", "items": {"type": "string"}, "minItems": 1, "maxItems": 9,
+                     "description": "The exact approved executable and arguments for an isolated stdin action."}},
         required=("entry", "action"), read_only=False,
     )),
 }
@@ -123,7 +125,8 @@ def invocation(name, arguments):
         note = arguments["note"]
         if not isinstance(note, str) or not note.strip() or len(note) > 180 or not note.isprintable():
             raise ValueError
-    command = [CLI, *tokens, "--json"]
+    local_command = validate_command(arguments["command"]) if "command" in arguments else None
+    command = [CLI, "run" if local_command is not None else tokens[0], *tokens[1:], "--json"]
     for key in ("vault", "entry"):
         if key in arguments:
             value = arguments[key]
@@ -148,6 +151,8 @@ def invocation(name, arguments):
         raise ValueError
     if name == "request_edit":
         request = edit_request(request)
+    if local_command is not None:
+        command.extend(("--", *local_command))
     data = encode(request) if request is not None else b""
     if len(data) >= REQUEST_LIMIT:
         raise ValueError

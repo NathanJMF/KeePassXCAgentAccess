@@ -1,6 +1,7 @@
 """The one-request JSON protocol used by the entry-listing CLI."""
 
 import json
+import re
 from time import monotonic
 
 
@@ -10,6 +11,8 @@ REQUEST_TIMEOUT = 5
 WORKER_TIMEOUT = 3
 APPROVAL_TIMEOUT = 60
 CLIENT_TIMEOUT = APPROVAL_TIMEOUT + 20
+_MAX_ARGS = 8
+_MAX_ARG_BYTES = 128
 LIST_REQUEST = {"version": 1, "operation": "list_entries"}
 ERRORS = {
     "unavailable": "Agent access is unavailable. Ask the vault owner to check broker access.",
@@ -35,6 +38,16 @@ class ListingError(Exception):
     def __init__(self, code="unavailable"):
         self.code = code
         super().__init__(ERRORS[code])
+
+
+def validate_command(command):
+    if (not isinstance(command, (tuple, list)) or not 1 <= len(command) <= _MAX_ARGS + 1
+            or any(not isinstance(arg, str) or "\0" in arg or len(arg.encode("utf-8")) > _MAX_ARG_BYTES
+                   or arg and not arg.isprintable() for arg in command)
+            or not re.fullmatch(r"/usr/bin/[A-Za-z0-9._+-]+", command[0])
+            or command[0].endswith(("/.", "/.."))):
+        raise ValueError("Choose an executable in /usr/bin and a short list of literal arguments.")
+    return tuple(command)
 
 
 def encode(message):

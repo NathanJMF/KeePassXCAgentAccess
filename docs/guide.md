@@ -86,6 +86,14 @@ The **Auto Approve: On / Off** button sits beside **Pause Agent Access**. Keeper
 
 Credential use requires an enabled action on the selected entry. **HTTPS Basic-auth GET** uses the entry's username and password. **HTTPS Bearer token GET** uses the password field as the bearer token. Both use fixed HTTPS destinations. Changing the type or destination requires fresh approval. **Activity** shows Time, Action, Identity, Vault, Group, Key, and Outcome for the latest 1,000 events. The broker rate-limits bursts of agent requests and records when it starts throttling. Filter by identity or resource, then double-click any row to see its details and audit note. Use the chevron to expand or collapse related actions. `KEEPASSXC_AGENT_MODEL`, `KEEPASSXC_AGENT_CHAT`, and `KEEPASSXC_AGENT_CHAT_ID` supply optional agent-reported attribution. Send a short audit reason as the tool’s `note` argument or set `KEEPASSXC_AGENT_NOTE` for a direct CLI call.
 
+## Use a credential with a local command
+
+Open the entry and add an **Isolated command stdin** action. Enter the executable in `/usr/bin` and its literal arguments. Shell quoting groups arguments in the editor. Keeper pins the executable's digest and shows the exact invocation when you review access. Approve the agent's grant for that action. Saving a changed command or executable digest requires a fresh grant.
+
+The CLI uses the same vault, entry and action references as HTTPS actions. Use `keepassxc-agent run --vault VAULT_UUID --entry ENTRY_UUID --action ACTION_ID --json -- /usr/bin/example --read-stdin`. The MCP client can pass the arguments as a `command` array on `use_password`. Keeper writes the entry's password to stdin as UTF-8 bytes and closes the pipe. Activity records the command binding and outcome. Keep private values out of the configured argument list.
+
+This profile requires Bubblewrap, libseccomp, and the systemd user manager. Keeper gives the command a private filesystem and process environment with networking disabled and returns success or failure. Use a trusted system executable that accepts stdin. Networked CLI operations, including Git push, and browser sessions need separate delivery policies.
+
 ## Review agent edit requests
 
 An active runner token can submit one edit request with a new UUID and exact vault, entry or group references. In **Access**, open the pending edit to see its target, destination, and changed fields. Choose **Approve and Apply** or **Deny**. If agent access is paused, you can explicitly resume it from the review first. Keeper requires a fresh request if the reviewed vault state changes.

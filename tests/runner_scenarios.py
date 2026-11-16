@@ -1,6 +1,8 @@
 """Exercise the production runner against a synthetic vault under a separate OS UID."""
 
 from base64 import b64encode
+from contextlib import nullcontext
+from hashlib import sha256
 import json
 import os
 from pathlib import Path
@@ -13,9 +15,10 @@ from uuid import UUID, uuid4
 from pykeepass import PyKeePass
 
 from broker_scenarios import NAMESPACE, PASSWORD, REPO, prepare
-from keepassxc_agent_access.access_settings import Action
+from keepassxc_agent_access.access_settings import Action, ActionType
 from keepassxc_agent_access.activity import ActivityStore
 from keepassxc_agent_access.broker import BrokerConfig, ListingBroker
+from keepassxc_agent_access.command_action import executable_digest
 from keepassxc_agent_access.edit_requests import EditRequests
 from keepassxc_agent_access.grants import Grants
 from keepassxc_agent_access.isolated_runner import alter_acl, namespace, subordinate_ids
@@ -27,6 +30,7 @@ from tls_fixture import tls_service
 
 def check(root):
     target, _, private, expected = prepare(root)
+    owner_runtime = os.environ.get("XDG_RUNTIME_DIR")
     runtime = root / "runtime"
     runtime.mkdir(mode=0o700)
     with patch.dict(os.environ, XDG_RUNTIME_DIR=str(runtime), XDG_STATE_HOME=str(root / "state")):
@@ -37,10 +41,10 @@ def check(root):
         header = "Basic " + b64encode(b"synthetic user:synthetic credential").decode("ascii")
         with tls_service(private, authorization=header) as (certificate, url, calls):
             with patch.dict(os.environ, SSL_CERT_FILE=str(certificate)):
-                check_tools(runner, anchor, target, endpoint, private, expected, url, calls, header)
+                check_tools(runner, anchor, target, endpoint, private, expected, url, calls, header, owner_runtime)
 
 
-def check_tools(runner, anchor, target, endpoint, private, expected, url, calls, header):
+def check_tools(runner, anchor, target, endpoint, private, expected, url, calls, header, owner_runtime):
     workspace = Workspace(private, None)
     activity = ActivityStore(private / "activity.sqlite")
     activity.recover(30)
@@ -64,19 +68,33 @@ def check_tools(runner, anchor, target, endpoint, private, expected, url, calls,
         return content if error else json.loads(content)
 
     try:
-        vault = workspace.add(target, PASSWORD, False, name="Runner fixture")
+        test_command = os.environ.get("KEEPER_TEST_LOCAL_SANDBOX") == "1"
+        # The runner uses a disposable socket directory. The owner worker
+        # connects to the desktop's systemd user manager for command scopes.
+        environment = patch.dict(os.environ, XDG_RUNTIME_DIR=owner_runtime) if test_command else nullcontext()
+        with environment:
+            vault = workspace.add(target, PASSWORD, False, name="Runner fixture")
         row, unapproved = expected[:2]
         workspace.save_binding(vault, Action("health", "Runner Status Check", row["id"], url + "/health"))
+        command = None
+        if test_command:
+            check = "import hashlib,sys;sys.exit(hashlib.sha256(sys.stdin.buffer.read()).hexdigest()!=sys.argv[1])"
+            command = ("/usr/bin/python3", "-I", "-c", check, sha256(b"synthetic credential").hexdigest())
+            workspace.save_binding(vault, Action("local", "Runner Local Check", row["id"], "", kind=ActionType.STDIN,
+                                                 command=command, executable_sha256=executable_digest(command)))
         broker.start()
         subprocess.run([*NAMESPACE, "test", "!", "-r", str(target.database)], check=True)
         assert invoke("access_status") == {"status": "uninitialized"}
         request = {"identity": "Runner fixture", "project": "Synthetic",
                    "items": [{"metadata": True, "vault": vault, "entry": row["id"], "action": "health"}]}
+        if command is not None:
+            request["items"].append({"vault": vault, "entry": row["id"], "action": "local"})
         assert invoke("request_access", {"request": request}) == {"status": "pending"}
         record, = grants.rows()
         assert record.uid == uid
-        match, = grants.choices(record.items[0])
-        grants.decide(record.id, [match])
+        choices = [grants.choices(item) for item in record.items]
+        assert all(len(matches) == 1 for matches in choices)
+        grants.decide(record.id, [matches[0] for matches in choices])
         assert invoke("access_status") == {"status": "active"}
         assert "paused" in invoke("list_entries", {"vault": vault}, error=True)
         workspace.pause(False)
@@ -95,6 +113,13 @@ def check_tools(runner, anchor, target, endpoint, private, expected, url, calls,
         assert not calls
         assert invoke("use_password", action) == {"outcome": "succeeded", "http_status": 200}
         assert calls == [("/health", header)]
+        if command is not None:
+            local = {**action, "action": "local", "command": command}
+            invoke("use_password", {**local, "command": (*command, "--different")}, error=True)
+            assert invoke("use_password", local) == {"outcome": "succeeded"}
+            event, = activity.rows(action="Runner Local Check", outcome="Succeeded")
+            assert event["destination"].startswith("Local stdin · /usr/bin/python3")
+            assert "synthetic credential" not in repr(event)
 
         edit = {"id": str(uuid4()), "operation": "update_entry", "vault": vault,
                 "entry": row["id"], "fields": {"title": "Reviewed Runner Entry"}}

@@ -10,6 +10,7 @@ import sys
 from threading import Thread
 
 from .access_settings import ActionType
+from .command_action import deliver_credential, prepare_command
 from .entry_projection import active_entry, entry_listing, owner_snapshot
 from .https_action import authenticate, failure, prepare_https
 from .protocol import RESPONSE_LIMIT, encode
@@ -77,7 +78,10 @@ def load_vault():
         elif data["operation"] == "owner_entry_notes":
             reply(entry_notes_frame(entry))
         elif data["operation"] == "use_password":
-            use(entry, data["url"], ActionType(data["kind"]))
+            if data["kind"] == ActionType.STDIN:
+                use_command(entry, data["command"], data["executable_sha256"])
+            else:
+                use(entry, data["url"], ActionType(data["kind"]))
         else:
             return
 
@@ -109,6 +113,22 @@ def use(entry, url, kind):
             result = authenticate(connection, path, entry, kind) if decision == b"dispatch\n" else failure()
             reply(encode(result))
     except (OSError, HTTPException, ValueError):
+        reply(encode(failure()))
+
+
+def use_command(entry, command, digest):
+    if entry is None:
+        reply(encode(failure()))
+        return
+    try:
+        with prepare_command(command, digest) as process:
+            reply(encode({"ready": True}))
+            if sys.stdin.buffer.readline(16) == b"dispatch\n":
+                succeeded = deliver_credential(process, entry.password)
+                reply(encode({"outcome": "succeeded" if succeeded else "failed"}))
+            else:
+                reply(encode(failure()))
+    except (OSError, ValueError):
         reply(encode(failure()))
 
 

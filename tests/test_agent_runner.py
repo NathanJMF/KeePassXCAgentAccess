@@ -126,6 +126,15 @@ class RunnerTests(TestCase):
         self.assertTrue(all(row["result"]["isError"] for row in replies))
         self.assertEqual(list(self.profile.iterdir()), [])
 
+    def test_command_tool_uses_literal_argument_vector(self):
+        entry = "229b7a79-bcb0-450c-a320-fbccdd672f75"
+        args, data = invocation("use_password", {
+            "entry": entry, "action": "local-check", "command": ["/usr/bin/cat", "literal argument"],
+        })
+        self.assertEqual(args[1:], ["run", "--json", f"--entry={entry}", "--action=local-check",
+                                     "--", "/usr/bin/cat", "literal argument"])
+        self.assertEqual(data, b"")
+
     def test_permission_change_requires_an_initialized_profile(self):
         request = {"identity": "Fixture", "project": "Fixture",
                    "items": [{"label": "Fixture", "metadata": True}],

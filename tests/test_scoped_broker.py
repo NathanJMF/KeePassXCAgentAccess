@@ -7,7 +7,7 @@ import unittest
 from unittest.mock import patch
 from uuid import uuid4
 
-from keepassxc_agent_access.access_settings import Action
+from keepassxc_agent_access.access_settings import Action, ActionType
 from keepassxc_agent_access.activity import ActivityStore, Attribution
 from keepassxc_agent_access.grants import Grants
 from keepassxc_agent_access.protocol import ListingError, decode
@@ -313,6 +313,30 @@ class ScopedBrokerTests(unittest.TestCase):
         self.assertTrue(self.grants.records[other].last_used)
         self.assertNotIn(self.secrets[0].encode(), self.grants.path.read_bytes())
         self.assertEqual(Grants(self.workspace, self.activity).records[pending.id].status, "removed")
+
+    def test_local_command_scope_rejects_modified_arguments_before_dispatch(self):
+        vault = self.vaults[0]
+        command = ("/usr/bin/cat",)
+        action = Action("local", "Local check", self.entry, "", kind=ActionType.STDIN, command=command,
+                        executable_sha256="a" * 64)
+        self.workspace.save_binding(vault, action)
+        self.approve([{"vault": vault, "entry": self.entry, "action": action.id}])
+        worker = self.workspace.session(vault).worker
+        with patch.object(worker, "use", return_value={"outcome": "succeeded"}) as use:
+            self.assert_code("ineligible", "use_password", vault=vault, entry=self.entry, action=action.id)
+            self.assert_code("ineligible", "use_password", vault=vault, entry=self.entry, action=action.id,
+                             command=[*command, "--help"])
+            use.assert_not_called()
+            self.assertEqual(self.invoke("use_password", vault=vault, entry=self.entry, action=action.id,
+                                         command=command), {"outcome": "succeeded"})
+            use.assert_called_once()
+
+        event, = self.activity.rows(action="Use password", outcome="Succeeded")
+        self.assertEqual(event["destination"], "Local stdin · /usr/bin/cat")
+        self.workspace.save_binding(vault, Action("local", "Local check", self.entry, "", kind=ActionType.STDIN,
+                                                   command=command, executable_sha256="b" * 64), original="local")
+        self.assert_code("ineligible", "use_password", vault=vault, entry=self.entry, action=action.id,
+                         command=command)
 
     def test_cross_vault_scope_and_stale_action(self):
         one, two = self.vaults
