@@ -150,6 +150,17 @@ class AccessPolicyTests(TestCase):
         self.assertEqual(error.exception.code, "revoked")
         self.assertEqual(self.activity.rows()[0]["outcome"], "Revoked")
 
+    def test_legacy_engine_rejects_non_get_actions(self):
+        self.settings_for(AccessMode.ALLOW)
+        settings = self.settings.read()
+        _, original = settings.for_vault(self.session.identity).actions
+        action = replace(original, method="POST", request_json='{"event":"test"}')
+        self.settings.write(replace(settings, vaults=((self.session.identity, VaultPolicy(actions=(action,))),)))
+        with self.assertRaises(ListingError) as error:
+            self.request(self.use(1))
+        self.assertEqual(error.exception.code, "ineligible")
+        self.assertEqual(self.session.dispatched, 0)
+
     def test_route_override_and_ambiguous_type_are_rejected(self):
         for payload in ({**self.use(0), "url": "https://override.invalid/"},
                         {**LIST_REQUEST, "include_reviewed": "true"},

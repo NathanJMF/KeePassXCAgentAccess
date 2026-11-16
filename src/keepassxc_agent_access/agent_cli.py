@@ -114,9 +114,10 @@ def _validate(reply, payload):
         status = reply.get("http_status")
         if (
             "outcome" not in reply or set(reply) - {"outcome", "http_status"}
-            or reply["outcome"] not in ("succeeded", "failed")
+            or reply["outcome"] not in ("succeeded", "failed", "uncertain")
             or ("http_status" in reply and (type(status) is not int or not 100 <= status <= 599))
             or (reply["outcome"] == "succeeded" and (status is None or not 200 <= status < 300))
+            or (reply["outcome"] == "uncertain" and status is not None)
         ):
             raise ListingError("invalid_response")
         return reply

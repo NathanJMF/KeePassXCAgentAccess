@@ -40,6 +40,16 @@ def tls_service(root, *, authorization=AUTHORIZATION, extra_authorization=()):
         def do_GET(self):
             header = self.headers.get("Authorization", "")
             calls.append((self.path, header))
+            self.respond(header)
+
+        def do_POST(self):
+            header = self.headers.get("Authorization", "")
+            body = self.rfile.read(int(self.headers.get("Content-Length", "0")))
+            calls.append((self.command, self.path, header, self.headers.get("Content-Type"), body))
+            if self.path != "/disconnect":
+                self.respond(header)
+
+        def respond(self, header):
             if self.path == "/slow":
                 sleep(5)
             accepted = header in (authorization, *extra_authorization)

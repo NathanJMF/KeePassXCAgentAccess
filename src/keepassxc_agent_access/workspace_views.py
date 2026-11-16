@@ -6,7 +6,7 @@ from shlex import join, split
 
 from gi.repository import GLib, Gtk, Pango
 
-from .access_settings import Action, ActionType
+from .access_settings import Action, ActionType, HTTPS_METHODS, HTTPS_WRITE_METHODS
 from .activity import ActivityError
 from .activity_grouping import EDIT_STAGES, ActivityResources, activity_groups, activity_matches, event_time
 from .command_action import executable_digest
@@ -285,7 +285,7 @@ def token_permissions(record, scopes):
         if scope.action:
             binding = record.binding(scope.entry, scope.action) if record else None
             if binding and binding.revision == scope.revision and binding.action.enabled:
-                labels.append(f"{binding.action.name} ({binding.action.kind.label})")
+                labels.append(f"{binding.action.name} ({binding.action.type_label})")
             else:
                 labels.append(f"{scope.action} (action unavailable)")
     return ", ".join(dict.fromkeys(labels))
@@ -842,7 +842,9 @@ class AccessView(Gtk.Box):
                 binding = vault.binding(entry_id, item.action) if choice else None
                 action = binding.action if binding else None
                 name = f"Run {action.name}" if action else f"Run credential action {item.action}"
-                destination = f"{action.kind.label} · {action.destination}" if action else None
+                destination = f"{action.type_label} · {action.destination}" if action else None
+                if action and action.request_json:
+                    destination += "\nFixed JSON body · " + action.request_json
                 access_permission(permissions, name, destination)
             facts = activity_facts((
                 ("Vault ID", vault_id),
@@ -921,7 +923,9 @@ def access_permission(container, title, detail=None):
     text = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
     text.pack_start(styled(_label(title), "keeper-access-permission-name"), False, False, 0)
     if detail is not None:
-        text.pack_start(styled(_label(detail), "keeper-event-caption"), False, False, 0)
+        description = _label(detail)
+        description.set_line_wrap_mode(Pango.WrapMode.WORD_CHAR)
+        text.pack_start(styled(description, "keeper-event-caption"), False, False, 0)
     row.pack_start(text, True, True, 0)
     container.pack_start(row, False, False, 0)
 
@@ -1208,7 +1212,7 @@ def entry_details(app, vault, entry):
         for binding in record.bindings:
             action = binding.action
             if action.entry == entry["id"]:
-                store.append((action.id, action.name, action.kind.label, action.destination,
+                store.append((action.id, action.name, action.type_label, action.destination,
                               "Enabled" if action.enabled else "Disabled"))
         table = _table(store, ("ID", "Name", "Type", "Destination", "Status"))
         body.pack_start(_scroll(table), True, True, 0)
@@ -1275,10 +1279,34 @@ def edit_binding(app, vault, entry, previous):
     network.pack_start(accepts_input, False, False, 0)
     body.pack_start(network, False, False, 0)
 
+    https = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=7)
+    https.set_no_show_all(True)
+    add_label(https, "HTTP Method")
+    method = Gtk.ComboBoxText()
+    method.set_name("action-method")
+    for verb in HTTPS_METHODS:
+        method.append(verb, verb)
+    method.set_active_id(previous.action.method if previous else "GET")
+    https.pack_start(method, False, False, 0)
+    add_label(https, "Fixed JSON Body")
+    request_json = Gtk.Entry(placeholder_text="Optional JSON object. Keep secrets out of this field.")
+    request_json.set_name("action-request-json")
+    if previous:
+        request_json.set_text(previous.action.request_json)
+    https.pack_start(request_json, False, False, 0)
+    body.pack_start(https, False, False, 0)
+
     def update_target(*_):
         selected = ActionType(kind.get_active_id())
         command = selected in (ActionType.STDIN, ActionType.NETWORK_PROMPT)
-        target_label.set_text("Executable and Arguments" if command else "Destination")
+        target_label.set_text("Executable and Arguments" if command else "HTTPS Endpoint")
+        if command:
+            https.hide()
+        else:
+            for child in https.get_children():
+                child.show_all()
+            https.show()
+        request_json.set_sensitive(method.get_active_id() in HTTPS_WRITE_METHODS)
         target.set_placeholder_text("/usr/bin/example" if command else "https://example.com/status")
         if selected == ActionType.NETWORK_PROMPT:
             for child in network.get_children():
@@ -1288,6 +1316,7 @@ def edit_binding(app, vault, entry, previous):
             network.hide()
 
     kind.connect("changed", update_target)
+    method.connect("changed", update_target)
     update_target()
     enabled = Gtk.CheckButton(label="Enabled", active=True)
     body.pack_start(enabled, False, False, 0)
@@ -1313,6 +1342,8 @@ def edit_binding(app, vault, entry, previous):
                                 prompt_variable=prompt.get_text() if routed else "",
                                 accepts_input=routed and accepts_input.get_active())
             else:
-                action = Action(identifier, name, entry, url, enabled.get_active(), kind=chosen_kind)
+                verb = method.get_active_id()
+                action = Action(identifier, name, entry, url, enabled.get_active(), kind=chosen_kind, method=verb,
+                                request_json=request_json.get_text() if verb in HTTPS_WRITE_METHODS else "")
             app.workspace.save_binding(vault, action, previous.action.id if previous else None)
         app.owner_operation(save)

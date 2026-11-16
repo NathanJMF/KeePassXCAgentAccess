@@ -50,3 +50,24 @@ Keeper SHALL bind a networked command to a trusted executable and exact argv, a 
 #### Scenario: A networked command fails after sending traffic
 - **WHEN** Keeper cannot establish whether the remote accepted a dispatched operation
 - **THEN** it records an uncertain result and does not retry
+
+
+### Requirement: HTTPS API delivery uses a fixed owner-approved request
+
+Keeper SHALL use a saved entry through an exact HTTPS method, endpoint, authentication scheme, and optional owner-configured JSON body. An agent SHALL supply only the approved action reference and optional audit context. A changed method, endpoint, authentication scheme, or body SHALL invalidate the prior grant. Keeper SHALL exclude the Authorization header and raw response from agent output and Activity.
+
+#### Scenario: An agent triggers a configured API request
+- **WHEN** an entitled agent invokes an approved API action
+- **THEN** Keeper sends one request over verified TLS and records the outcome in Activity
+
+#### Scenario: A server does not confirm a dispatched write
+- **WHEN** Keeper cannot confirm the result of a dispatched write
+- **THEN** it reports an uncertain outcome and does not retry
+
+### Requirement: Credential review settings are independent by transport
+
+Keeper SHALL allow independent per-use review settings for HTTPS requests, local commands, and networked commands. A saved password-use review setting SHALL supply the initial setting for all three.
+
+#### Scenario: A legacy combined review setting is enabled
+- **WHEN** Keeper reads the saved combined password-use review setting
+- **THEN** each credential transport requires review regardless of the agent's approved grant

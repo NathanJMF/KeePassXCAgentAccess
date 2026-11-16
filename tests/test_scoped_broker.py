@@ -1,4 +1,5 @@
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import replace
 import json
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -343,6 +344,30 @@ class ScopedBrokerTests(unittest.TestCase):
                         self.assertEqual(result["outcome"], "succeeded")
                     self.assertEqual(reviewed, [f"Use password · {selected.name}"])
                     self.workspace.set_review_action(operation, False)
+
+    def test_fixed_api_review_displays_exact_request_and_audits_uncertainty(self):
+        vault = self.vaults[0]
+        action = replace(self.action, method="PATCH", request_json='{"event":"check"}')
+        self.workspace.save_binding(vault, action, original=action.id)
+        self.approve([{"vault": vault, "entry": self.entry, "action": action.id}])
+        self.workspace.set_review_action("use_https", True)
+        with patch.object(self.engine.approvals, "wait", return_value="approved") as review:
+            worker = self.workspace.session(vault).worker
+
+            def interrupted(_action, gate):
+                self.assertTrue(gate(lambda: None))
+                return {"outcome": "uncertain"}
+
+            with patch.object(worker, "use", side_effect=interrupted):
+                result = self.invoke("use_password", entry=self.entry, action=action.id)
+        self.assertEqual(result, {"outcome": "uncertain"})
+        ticket = review.call_args.args[0]
+        self.assertEqual(ticket.destination, f"PATCH {action.url}")
+        self.assertIn(f"Fixed JSON body · {action.request_json}", ticket.scope)
+        event, = self.activity.rows(action="Use password")
+        self.assertEqual(event["outcome"], "Interrupted · outcome unknown")
+        self.assertEqual(event["scope"], action.request_summary)
+        self.assertNotIn(action.request_json, repr(event))
 
     def test_local_command_scope_rejects_modified_arguments_before_dispatch(self):
         vault = self.vaults[0]

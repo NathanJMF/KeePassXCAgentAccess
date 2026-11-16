@@ -160,6 +160,8 @@ class ScopedBroker:
             )
             folder, title = entry_target_labels(session.entries, entry) if permitted and session else (None, None)
             scope_summary = f"Requested entry fields · {', '.join(fields)}" if fields else None
+            if permitted and binding.action.request_summary:
+                scope_summary = binding.action.request_summary
             if input_info is not None:
                 scope_summary = f"Input file · {input_info['size']} bytes · SHA-256 {input_info['sha256']}"
             event = self.activity.begin(
@@ -226,7 +228,9 @@ class ScopedBroker:
                              "Visible fields: " + ", ".join(columns))
                 else:
                     scope = (" › ".join(part for part in (registration.name, folder, title) if part),)
-                    if input_info is not None:
+                    if binding.action.request_json:
+                        scope += ("Fixed JSON body · " + binding.action.request_json,)
+                    elif scope_summary:
                         scope += (scope_summary,)
                 ticket = Approval(event, uid, context, name + (f" · {binding.action.name}" if binding else ""),
                                   scope, binding.action.destination if binding else None, monotonic() + self.approvals.timeout,

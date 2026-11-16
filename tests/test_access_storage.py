@@ -77,11 +77,33 @@ class AccessStorageTests(TestCase):
         persisted = json.loads(store.path.read_text())
         actions = persisted["vaults"][vault]["actions"]
         self.assertEqual(actions[1]["kind"], "https_bearer_get")
-        del actions[0]["kind"]
+        for field in ("kind", "method", "request_json"):
+            del actions[0][field]
         store.path.write_text(json.dumps(persisted))
         self.assertEqual(store.read().for_vault(vault), policy)
         with self.assertRaisesRegex(ValueError, "supported credential action"):
             replace(bearer, kind="unknown")
+
+    def test_https_profile_validates_and_canonicalizes_fixed_json(self):
+        store = AccessStore(self.root / "actions.json")
+        vault, entry = str(uuid4()), str(uuid4())
+        action = Action("api", "Trigger API", entry, "https://example.invalid/api", kind=ActionType.BEARER,
+                        method="POST", request_json='{ "priority": 2, "name": "café" }')
+        self.assertEqual(action.request_json, '{"name":"café","priority":2}')
+        self.assertEqual(action.scope, replace(action, request_json='{"priority":2,"name":"café"}').scope)
+        self.assertNotEqual(action.scope, replace(action, method="PATCH").scope)
+        self.assertNotEqual(action.scope, replace(action, request_json='{"priority":3}').scope)
+        policy = VaultPolicy(actions=(action,))
+        store.write(replace(store.read(), vaults=((vault, policy),)))
+        self.assertEqual(AccessStore(store.path).read().for_vault(vault), policy)
+        for body in ('["value"]', '{"a":1,"a":2}', '{"x":NaN}', '{"x":1e999}',
+                     '{"x":"\\ud800"}', '{"x":"' + 'é' * 1024 + '"}',
+                     '{"x":' + '[' * 1000 + '0' + ']' * 1000 + '}'):
+            with self.subTest(body=body[:30]), self.assertRaises(ValueError):
+                replace(action, request_json=body)
+        for method in ("GET", "HEAD", "CONNECT", "POST\r\n"):
+            with self.subTest(method=method), self.assertRaises(ValueError):
+                replace(action, method=method)
 
     def test_activity_sessions_per_request_labels_and_recovery(self):
         store = ActivityStore(self.root / "activity.sqlite")

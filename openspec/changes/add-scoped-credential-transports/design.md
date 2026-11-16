@@ -20,6 +20,13 @@ The private prompt helper answers one bounded password prompt with a newline-ter
 
 Prompt delivery begins after the final authorization check. A dispatched operation can complete after token revocation. If a networked process fails after bytes were relayed, Keeper records an uncertain outcome without retrying.
 
-## Additional profiles
+## HTTPS API requests
 
-Future API delivery needs owner-approved methods, destinations, and input and result schemas. Future browser delivery needs private session state protected from all agent-controlled tools and connectors. It needs bound origins and verified navigation and form destinations. Raw remote output can contain credentials supplied by the request or new credentials created in the response.
+The HTTPS action adds an owner-selected method and optional fixed JSON object to the existing Basic and Bearer profiles. Agents reference the existing action ID. The method, canonical JSON, destination, and authentication scheme participate in the binding revision. The desktop shows the method, destination, and configured body during approval. The worker sends the credential in the Authorization header over verified TLS and returns status only. A write without a confirmed response is uncertain. Activity records the method, destination, body digest when present, and decision and outcome.
+
+Legacy HTTPS profiles retain their bodyless GET behavior. The former password-use review switch migrates to the same value for HTTPS requests, local commands, and networked commands.
+
+
+## Protected browser delivery
+
+Future browser delivery needs private session state protected from agent-controlled tools and connectors, along with bound origins and verified navigation and form destinations. Raw remote output can contain credentials supplied by the request or created in the response.

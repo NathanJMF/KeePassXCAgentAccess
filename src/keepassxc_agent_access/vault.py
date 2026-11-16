@@ -184,6 +184,7 @@ class VaultSession:
     def use(self, action, gate, *, input_path=None):
         request = encode({"operation": "use_password", "entry": action.entry,
                           "url": action.url, "kind": action.kind, "command": action.command,
+                          "method": action.method, "request_json": action.request_json,
                           "executable_sha256": action.executable_sha256, "prompt_variable": action.prompt_variable,
                           "input_path": str(input_path) if input_path is not None else None})
         timeout = 25 if action.prompt_variable else 12

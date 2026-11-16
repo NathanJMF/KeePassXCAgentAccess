@@ -2,6 +2,7 @@
 
 from base64 import b64encode
 from contextlib import nullcontext
+from dataclasses import replace
 from hashlib import sha256
 import json
 import os
@@ -31,6 +32,11 @@ from tls_fixture import tls_service
 def check(root):
     target, _, private, expected = prepare(root)
     owner_runtime = os.environ.get("XDG_RUNTIME_DIR")
+    api_token = "synthetic_runner_api_token"
+    database = PyKeePass(target.database, password=PASSWORD, keyfile=target.key_file)
+    api_entry = database.add_entry(database.root_group, "Synthetic Runner API", "", api_token)
+    database.save()
+    api_header = f"Bearer {api_token}"
     runtime = root / "runtime"
     runtime.mkdir(mode=0o700)
     with patch.dict(os.environ, XDG_RUNTIME_DIR=str(runtime), XDG_STATE_HOME=str(root / "state")):
@@ -39,12 +45,14 @@ def check(root):
         endpoint = runtime / "keeper-scoped-runner" / "broker.sock"
         anchor = root / "state/keeper-scoped-runner/fixture"
         header = "Basic " + b64encode(b"synthetic user:synthetic credential").decode("ascii")
-        with tls_service(private, authorization=header) as (certificate, url, calls):
+        with tls_service(private, authorization=header, extra_authorization=(api_header,)) as (certificate, url, calls):
             with patch.dict(os.environ, SSL_CERT_FILE=str(certificate)):
-                check_tools(runner, anchor, target, endpoint, private, expected, url, calls, header, owner_runtime)
+                check_tools(runner, anchor, target, endpoint, private, expected, url, calls, header, owner_runtime,
+                            str(api_entry.uuid), api_token)
 
 
-def check_tools(runner, anchor, target, endpoint, private, expected, url, calls, header, owner_runtime):
+def check_tools(runner, anchor, target, endpoint, private, expected, url, calls, header, owner_runtime,
+                api_entry, api_token):
     workspace = Workspace(private, None)
     activity = ActivityStore(private / "activity.sqlite")
     activity.recover(30)
@@ -60,7 +68,7 @@ def check_tools(runner, anchor, target, endpoint, private, expected, url, calls,
             cwd="/tmp", input=json.dumps(call_tool(tool, arguments)) + "\n", text=True,
             capture_output=True, check=True, timeout=12,
         )
-        assert not any(secret in process.stdout for secret in (PASSWORD, header, "synthetic credential"))
+        assert not any(secret in process.stdout for secret in (PASSWORD, header, "synthetic credential", api_token))
         reply = json.loads(process.stdout)["result"]
         assert process.stderr == ""
         assert reply["isError"] == error, reply
@@ -68,6 +76,7 @@ def check_tools(runner, anchor, target, endpoint, private, expected, url, calls,
         return content if error else json.loads(content)
 
     try:
+        api_body = '{"operation":"fixture-check"}'
         test_command = os.environ.get("KEEPER_TEST_LOCAL_SANDBOX") == "1"
         # The runner uses a disposable socket directory. The owner worker
         # connects to the desktop's systemd user manager for command scopes.
@@ -76,6 +85,9 @@ def check_tools(runner, anchor, target, endpoint, private, expected, url, calls,
             vault = workspace.add(target, PASSWORD, False, name="Runner fixture")
         row, unapproved = expected[:2]
         workspace.save_binding(vault, Action("health", "Runner Status Check", row["id"], url + "/health"))
+        api = Action("api", "Runner API Check", api_entry, url + "/api", kind=ActionType.BEARER,
+                     method="POST", request_json=api_body)
+        workspace.save_binding(vault, api)
         command = None
         if test_command:
             check = "import hashlib,sys;sys.exit(hashlib.sha256(sys.stdin.buffer.read()).hexdigest()!=sys.argv[1])"
@@ -87,6 +99,7 @@ def check_tools(runner, anchor, target, endpoint, private, expected, url, calls,
         assert invoke("access_status") == {"status": "uninitialized"}
         request = {"identity": "Runner fixture", "project": "Synthetic",
                    "items": [{"metadata": True, "vault": vault, "entry": row["id"], "action": "health"}]}
+        request["items"].append({"vault": vault, "entry": api_entry, "action": "api"})
         if command is not None:
             request["items"].append({"vault": vault, "entry": row["id"], "action": "local"})
         assert invoke("request_access", {"request": request}) == {"status": "pending"}
@@ -113,6 +126,23 @@ def check_tools(runner, anchor, target, endpoint, private, expected, url, calls,
         assert not calls
         assert invoke("use_password", action) == {"outcome": "succeeded", "http_status": 200}
         assert calls == [("/health", header)]
+        api_use = {**action, "entry": api_entry, "action": "api"}
+        for override in ({"method": "GET"}, {"request_json": "{}"}, {"url": url + "/other"}):
+            invoke("use_password", {**api_use, **override}, error=True)
+        assert calls == [("/health", header)]
+        assert invoke("use_password", {**api_use, "note": "Verify fixed HTTPS API delivery"}) == {
+            "outcome": "succeeded", "http_status": 200,
+        }
+        expected_calls = [("/health", header), ("POST", "/api", f"Bearer {api_token}", "application/json", api_body.encode())]
+        assert calls == expected_calls
+        event, = activity.rows(action="Runner API Check", outcome="Succeeded")
+        assert event["destination"] == "POST " + url + "/api"
+        assert event["note"] == "Verify fixed HTTPS API delivery"
+        assert sha256(api_body.encode()).hexdigest() in event["scope"]
+        assert all(value not in repr(event) for value in (api_body, api_token))
+        workspace.save_binding(vault, replace(api, request_json='{"operation":"changed"}'), original="api")
+        invoke("use_password", api_use, error=True)
+        assert calls == expected_calls
         if command is not None:
             local = {**action, "action": "local", "command": command}
             invoke("use_password", {**local, "command": (*command, "--different")}, error=True)
@@ -144,7 +174,7 @@ def check_tools(runner, anchor, target, endpoint, private, expected, url, calls,
         assert invoke("request_access", {"request": change}) == {"status": "active"}
         assert invoke("list_entries", {"vault": vault}) == {"entries": [unapproved]}
         invoke("use_password", action, error=True)
-        assert calls == [("/health", header)]
+        assert calls == expected_calls
         grants.transition(record.id, "disabled")
         assert invoke("access_status") == {"status": "disabled"}
         invoke("list_vaults", error=True)
@@ -164,4 +194,4 @@ def check_tools(runner, anchor, target, endpoint, private, expected, url, calls,
 if __name__ == "__main__":
     with TemporaryDirectory(prefix="keeper-runner-") as root:
         check(Path(root))
-    print("Runner scenario passed: bundled runner, all seven stdio tools, separate peer UID, scoped TLS, persisted edits, and revocation")
+    print("Runner scenario passed: bundled runner, all seven stdio tools, separate peer UID, scoped TLS and fixed API delivery, persisted edits, and revocation")

@@ -2,6 +2,7 @@
 
 from dataclasses import asdict, dataclass
 from enum import Enum
+from hashlib import sha256
 import ipaddress
 import json
 from pathlib import Path
@@ -10,7 +11,7 @@ from shlex import join
 from urllib.parse import urlsplit
 from uuid import UUID
 
-from .protocol import validate_command
+from .protocol import decode, validate_command
 from .settings import SettingsError, write_private_json
 
 
@@ -42,6 +43,38 @@ REVIEW_ACTIONS = {
 }
 
 
+HTTPS_METHODS = ("GET", "HEAD", "POST", "PUT", "PATCH")
+HTTPS_WRITE_METHODS = frozenset(("POST", "PUT", "PATCH"))
+HTTPS_BODY_LIMIT = 2048
+HTTPS_JSON_DEPTH = 16
+
+
+def valid_json_depth(value, depth=1):
+    if depth > HTTPS_JSON_DEPTH:
+        return False
+    if isinstance(value, dict):
+        return all(valid_json_depth(item, depth + 1) for item in value.values())
+    if isinstance(value, list):
+        return all(valid_json_depth(item, depth + 1) for item in value)
+    return True
+
+
+def canonical_request_json(body):
+    if not isinstance(body, str) or len(body) > HTTPS_BODY_LIMIT:
+        raise ValueError("Enter a fixed JSON object up to 2,048 UTF-8 bytes.")
+    if not body:
+        return ""
+    try:
+        value = decode(body.encode("utf-8"))
+        if isinstance(value, dict) and valid_json_depth(value):
+            canonical = json.dumps(value, ensure_ascii=False, allow_nan=False, separators=(",", ":"), sort_keys=True)
+            if len(canonical.encode("utf-8")) <= HTTPS_BODY_LIMIT:
+                return canonical
+    except (ValueError, RecursionError):
+        pass
+    raise ValueError("Enter a valid, fixed JSON object up to 2,048 UTF-8 bytes.")
+
+
 class ActionType(str, Enum):
     BASIC = "https_basic_get"
     BEARER = "https_bearer_get"
@@ -59,8 +92,8 @@ class ActionType(str, Enum):
     @property
     def label(self):
         return {
-            self.BASIC: "HTTPS Basic-auth GET",
-            self.BEARER: "HTTPS Bearer token GET",
+            self.BASIC: "HTTPS Basic Auth",
+            self.BEARER: "HTTPS Bearer Token",
             self.STDIN: "Isolated command stdin",
             self.NETWORK_PROMPT: "Networked command prompt",
         }[self]
@@ -139,10 +172,21 @@ class Action:
     executable_sha256: str = ""
     prompt_variable: str = ""
     accepts_input: bool = False
+    method: str = "GET"
+    request_json: str = ""
 
     @property
     def is_command(self):
         return self.kind in (ActionType.STDIN, ActionType.NETWORK_PROMPT)
+
+    @property
+    def type_label(self):
+        if self.method == "GET":
+            if self.kind == ActionType.BASIC:
+                return "HTTPS Basic-auth GET"
+            if self.kind == ActionType.BEARER:
+                return "HTTPS Bearer token GET"
+        return self.kind.label
 
     @property
     def destination(self):
@@ -151,12 +195,21 @@ class Action:
         if self.kind == ActionType.NETWORK_PROMPT:
             return (f"{self.url} · {self.prompt_variable} · {join(self.command)}"
                     + (" · read-only input" if self.accepts_input else ""))
-        return self.url
+        return self.url if self.method == "GET" else f"{self.method} {self.url}"
+
+    @property
+    def request_summary(self):
+        if self.request_json:
+            body = self.request_json.encode("utf-8")
+            return f"Fixed JSON body · {len(body)} bytes · SHA-256 {sha256(body).hexdigest()}"
+        if self.method in HTTPS_WRITE_METHODS:
+            return "No request body"
+        return None
 
     @property
     def scope(self):
         return (self.kind, self.url, self.id, self.command, self.executable_sha256,
-                self.prompt_variable, self.accepts_input)
+                self.prompt_variable, self.accepts_input, self.method, self.request_json)
 
     def __post_init__(self):
         action_id(self.id)
@@ -171,6 +224,8 @@ class Action:
         if type(self.accepts_input) is not bool:
             raise ValueError("Invalid input file setting.")
         if kind in (ActionType.STDIN, ActionType.NETWORK_PROMPT):
+            if self.method != "GET" or self.request_json != "":
+                raise ValueError("Command actions do not accept HTTP method or body settings.")
             if not isinstance(self.executable_sha256, str) or not re.fullmatch(r"[a-f0-9]{64}", self.executable_sha256):
                 raise ValueError("Choose a pinned system executable.")
             object.__setattr__(self, "command", validate_command(self.command))
@@ -188,6 +243,12 @@ class Action:
         else:
             if self.command or self.executable_sha256 or self.prompt_variable or self.accepts_input:
                 raise ValueError("HTTPS actions do not accept command settings.")
+            if self.method not in HTTPS_METHODS:
+                raise ValueError("Choose a supported HTTPS method.")
+            body = canonical_request_json(self.request_json)
+            if body and self.method not in HTTPS_WRITE_METHODS:
+                raise ValueError("Only POST, PUT, and PATCH accept a JSON body.")
+            object.__setattr__(self, "request_json", body)
             object.__setattr__(self, "command", ())
             object.__setattr__(self, "url", Destination.parse(self.url).url)
         object.__setattr__(self, "kind", kind)

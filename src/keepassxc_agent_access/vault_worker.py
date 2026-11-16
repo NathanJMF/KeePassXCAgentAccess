@@ -85,7 +85,7 @@ def load_vault():
                             destination=Destination.parse(data["url"]), prompt_variable=data["prompt_variable"],
                             input_path=data["input_path"])
             else:
-                use(entry, data["url"], ActionType(data["kind"]))
+                use(entry, data["url"], ActionType(data["kind"]), data["method"], data["request_json"])
         else:
             return
 
@@ -106,7 +106,7 @@ def reply(data):
     sys.stdout.buffer.flush()
 
 
-def use(entry, url, kind):
+def use(entry, url, kind, method, request_json):
     if entry is None:
         reply(encode(failure()))
         return
@@ -114,7 +114,9 @@ def use(entry, url, kind):
         with prepare_https(url) as (connection, path):
             reply(encode({"ready": True}))
             decision = sys.stdin.buffer.readline(16)
-            result = authenticate(connection, path, entry, kind) if decision == b"dispatch\n" else failure()
+            result = failure()
+            if decision == b"dispatch\n":
+                result = authenticate(connection, path, entry, kind, method=method, request_json=request_json)
             reply(encode(result))
     except (OSError, HTTPException, ValueError):
         reply(encode(failure()))

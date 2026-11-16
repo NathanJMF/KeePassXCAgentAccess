@@ -4,7 +4,7 @@ from tempfile import TemporaryDirectory
 from threading import Event
 from types import SimpleNamespace
 from unittest import TestCase
-from unittest.mock import Mock, patch
+from unittest.mock import MagicMock, Mock, patch
 
 from pykeepass import create_database
 
@@ -27,6 +27,51 @@ class HTTPSActionTests(TestCase):
                     with self.subTest(path=path), prepare_https(url + path) as (connection, resource):
                         self.assertEqual(authenticate(connection, resource, entry, ActionType.BEARER.value), expected)
             self.assertEqual(calls, [("/check", authorization), ("/redirect", authorization)])
+
+    def test_fixed_json_worker_with_bearer_token_and_uncertain_write(self):
+        secret = "synthetic_api_token"
+        authorization = f"Bearer {secret}"
+        with TemporaryDirectory() as directory, tls_service(directory, authorization=authorization) as (cert, url, calls):
+            database = Path(directory) / "synthetic.kdbx"
+            vault = create_database(database, "Fixture unlock")
+            entry = vault.add_entry(vault.root_group, "Synthetic API", "fixture", secret)
+            vault.save()
+
+            def action(path, host=url):
+                return Action("trigger", "Trigger API", str(entry.uuid), host + path, kind=ActionType.BEARER,
+                              method="POST", request_json='{"event": "verify"}')
+
+            def allow(send):
+                send()
+                return True
+
+            with patch.dict(os.environ, {"SSL_CERT_FILE": str(cert)}):
+                with open_vault(VaultTarget(database), "Fixture unlock", Event()) as worker:
+                    with self.assertRaises(ListingError):
+                        worker.use(action("/check"), lambda _: False)
+                    self.assertEqual(worker.use(action("/wrong", url.replace("127.0.0.1", "localhost")), allow),
+                                     {"outcome": "failed"})
+                    self.assertEqual(calls, [])
+                    for path, result in (
+                        ("/check", {"outcome": "succeeded", "http_status": 200}),
+                        ("/redirect", {"outcome": "failed", "http_status": 302}),
+                        ("/disconnect", {"outcome": "uncertain"}),
+                    ):
+                        with self.subTest(path=path):
+                            self.assertEqual(worker.use(action(path), allow), result)
+            self.assertEqual(calls, [
+                ("POST", path, authorization, "application/json", b'{"event":"verify"}')
+                for path in ("/check", "/redirect", "/disconnect")
+            ])
+
+    def test_invalid_or_interim_status_leaves_write_outcome_unknown(self):
+        connection = MagicMock()
+        response = connection.getresponse.return_value.__enter__.return_value
+        for status in (103, 600):
+            with self.subTest(status=status):
+                response.status = status
+                self.assertEqual(authenticate(connection, "/check", SimpleNamespace(password="fixture"),
+                                              ActionType.BEARER, method="PUT"), {"outcome": "uncertain"})
 
     def test_bearer_rejects_invalid_tokens_before_sending_a_request(self):
         connection = Mock()

@@ -14,5 +14,12 @@
 - [x] Review the isolation and authorization path with Astra.
 - [x] Verify a synthetic HTTPS Git push end to end and check wrong-origin refusal, hidden credentials, and Activity.
 
+## HTTPS API requests
+
+- [x] Add separate credential review settings and migrate the previous password-use policy.
+- [x] Extend HTTPS profiles with a fixed method, endpoint, authentication scheme, and optional fixed JSON body.
+- [x] Include the method and body in review and the binding revision. Record the request outcome without credentials or raw API content.
+
 ## Additional profiles
-- [ ] Define and review reusable API and protected browser delivery profiles and test their session and output boundaries.
+
+- [ ] Define and review protected browser delivery and test its session and output boundaries.

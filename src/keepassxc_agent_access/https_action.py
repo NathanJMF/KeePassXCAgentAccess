@@ -5,7 +5,7 @@ from contextlib import contextmanager
 from http.client import HTTPException, HTTPSConnection
 import re
 
-from .access_settings import ActionType, Destination
+from .access_settings import ActionType, Destination, HTTPS_WRITE_METHODS
 
 
 SOCKET_TIMEOUT = 4
@@ -29,7 +29,7 @@ def prepare_https(url):
         connection.close()
 
 
-def authenticate(connection, path, entry, kind=ActionType.BASIC):
+def authenticate(connection, path, entry, kind=ActionType.BASIC, *, method="GET", request_json=""):
     password = entry.password
     if kind == ActionType.BEARER:
         if not isinstance(password, str) or not BEARER_TOKEN.fullmatch(password):
@@ -44,12 +44,19 @@ def authenticate(connection, path, entry, kind=ActionType.BASIC):
     else:
         return failure()
 
+    headers = {"Authorization": authorization}
+    body = None
+    if request_json:
+        body = request_json.encode("utf-8")
+        headers["Content-Type"] = "application/json"
+
     try:
-        connection.request("GET", path, headers={"Authorization": authorization})
+        connection.request(method, path, body=body, headers=headers)
         with connection.getresponse() as response:
             status = response.status
-        if not 100 <= status <= 599:
-            return failure()
-        return {"outcome": "succeeded" if 200 <= status < 300 else "failed", "http_status": status}
     except (OSError, HTTPException, ValueError):
-        return failure()
+        status = None
+    write = method in HTTPS_WRITE_METHODS
+    if status is not None and (200 if write else 100) <= status <= 599:
+        return {"outcome": "succeeded" if 200 <= status < 300 else "failed", "http_status": status}
+    return {"outcome": "uncertain"} if write else failure()
