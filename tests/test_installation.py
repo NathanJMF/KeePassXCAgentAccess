@@ -51,6 +51,15 @@ class InstallationTests(unittest.TestCase):
         self.assertEqual(self.skill.read_bytes(), edited)
         self.assertEqual(installation.launcher.read_bytes(), b"Locally edited launcher")
 
+    def test_desktop_upgrade_and_uninstall_leave_external_broker_running(self):
+        installation = self.installation
+        installation.install(False)
+        with patch("keepassxc_agent_access.installation.external_broker_active", return_value=True), \
+             patch("keepassxc_agent_access.installation.stop_application") as stop:
+            installation.install(False)
+            self.assertTrue(installation.uninstall())
+            stop.assert_not_called()
+
     def test_agent_install_failure_restores_desktop_install(self):
         installation = self.installation
         installation.install(False)

@@ -61,6 +61,13 @@ def systemctl(*args, check=True):
     return subprocess.run(["systemctl", "--user", *args], check=check, capture_output=True, text=True)
 
 
+def external_broker_active():
+    try:
+        return systemctl("is-active", "--quiet", LEGACY_SERVICE, check=False).returncode == 0
+    except FileNotFoundError:
+        return False
+
+
 def service_contents(app, uid):
     if not str(app).isprintable():
         raise ValueError("The installation path contains unsupported characters.")
@@ -229,7 +236,7 @@ class Installation:
                 if old_unit is not None and "unit" in previous:
                     systemctl("stop", SERVICE)
                     stopped_service = True
-                if previous or agent:
+                if agent or (previous and not external_broker_active()):
                     stop_application()
                 if self.app.exists():
                     self.app.rename(backup)
@@ -281,7 +288,8 @@ class Installation:
                 systemctl("disable", "--now", SERVICE)
                 self.unit.unlink()
                 systemctl("daemon-reload")
-        stop_application()
+        if not external_broker_active():
+            stop_application()
         self.remove_matching(self.launcher, state.get("launcher"))
         if state.get("skill_path") == str(skill_destination()):
             self.remove_matching(skill_destination(), state.get("skill"))
