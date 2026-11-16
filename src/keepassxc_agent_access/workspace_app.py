@@ -1094,7 +1094,7 @@ class WorkspaceApplication(Gtk.Application):
             card, "I Understand", self.workspace.token_auto_approval_acknowledged, acknowledge,
             "token-auto-approval-acknowledged",
             "These settings can automatically give agents access to more secrets or edits without individual "
-            "review. They work even when the toolbar’s Auto Approve is off.", danger=True,
+            "review.\nThey work even when the toolbar’s Auto Approve is off.", danger=True,
         )
         card.pack_start(suspended, False, False, 0)
         card.pack_start(revealer, False, False, 0)
