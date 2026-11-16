@@ -13,17 +13,21 @@ class UpdateTests(unittest.TestCase):
         directory = TemporaryDirectory()
         self.addCleanup(directory.cleanup)
         self.root = Path(directory.name)
-        self.publisher = self.root / "upstream"
+        self.base = self.root / "managed"
+        self.base.mkdir(mode=0o700)
+        self.publisher = self.base / "upstream"
         self.publisher.mkdir()
         self.git(self.publisher, "init", "--initial-branch=main")
         installer = self.publisher / "install"
         installer.write_text('#!/bin/sh\nprintf installed > install-result\n')
         installer.chmod(0o755)
         self.first = self.commit("Initial revision")
-        self.checkout = self.root / "Keeper checkout"
+        self.checkout = self.base / "update-source"
         self.git(self.root, "clone", str(self.publisher), str(self.checkout))
-        self.state = {"checkout": str(self.checkout), "revision": self.first}
-        self.installation = SimpleNamespace(installed=lambda: self.state, app=self.checkout)
+        self.checkout.chmod(0o700)
+        self.state = {"update_url": str(self.publisher), "update_ref": "refs/heads/main", "revision": self.first}
+        self.installation = SimpleNamespace(installed=lambda: self.state, app=self.checkout,
+                                            base=self.base, update_source=self.checkout)
 
     @staticmethod
     def git(directory, *args):
@@ -51,6 +55,11 @@ class UpdateTests(unittest.TestCase):
         self.assertEqual(self.git(self.checkout, "rev-parse", "HEAD"), target)
         self.assertEqual((self.checkout / "version").read_text(), "New release")
         self.assertEqual((self.checkout / "install-result").read_text(), "installed")
+
+    def test_legacy_workspace_update_source_requires_new_install(self):
+        self.state = {"checkout": str(self.checkout), "revision": self.first}
+        with self.assertRaisesRegex(UpdateError, "trusted Keeper checkout"):
+            check_for_update(self.installation)
 
     def test_refuses_dirty_checkout_and_preserves_local_changes(self):
         self.commit("Remote update")

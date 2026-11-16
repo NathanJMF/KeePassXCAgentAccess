@@ -3,7 +3,6 @@
 from contextlib import nullcontext
 from dataclasses import asdict, dataclass, replace
 from functools import partial
-from hashlib import file_digest
 import json
 import os
 from pathlib import Path
@@ -189,14 +188,10 @@ class Workspace:
                     raise VaultError("Enter the vault password to unlock.")
                 with self.keyring_mutex:
                     password = self.keyring.retrieve(record.item)
-            try:
-                with target.database.open("rb") as source:
-                    fingerprint = file_digest(source, "sha256").hexdigest()
-            except OSError:
-                raise VaultError("The database is missing or unreadable.") from None
+            worker = self.opener(target, password, cancelled)
+            fingerprint = worker.fingerprint
             if relinking and record.fingerprint != fingerprint:
                 raise VaultError("The selected file does not match the last verified vault.")
-            worker = self.opener(target, password, cancelled)
             snapshot = worker.owner_snapshot()
             session = Unlocked(worker, tuple(snapshot["groups"]), tuple(snapshot["entries"]),
                                snapshot.get("recycle_bin"))
@@ -222,6 +217,9 @@ class Workspace:
                         imported = self.legacy_access.read().for_vault(worker.identity).actions
                         record = replace(record, identity=worker.identity,
                                          bindings=tuple(Binding(action, new_id()) for action in imported))
+                    elif record.fingerprint != fingerprint:
+                        # An external save can change credentials without changing entry IDs.
+                        record = replace(record, bindings=tuple(replace(b, revision=new_id()) for b in record.bindings))
                     pending = tuple(i for i in self.pending if i != item)
                     if record.item and record.item != item:
                         pending += (record.item,)

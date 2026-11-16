@@ -7,12 +7,14 @@ import os
 from pathlib import Path
 import re
 import subprocess
+from urllib.parse import urlsplit
 
 from gi.repository import GLib
 
 from .installation import (
-    CHECKOUT, LEGACY_SERVICE, Installation, external_broker_active, present_application, systemctl,
+    LEGACY_SERVICE, Installation, external_broker_active, present_application, systemctl,
 )
+from .isolated_runner import owned
 from .settings import SettingsError, write_private_json
 
 
@@ -21,10 +23,12 @@ class UpdateError(Exception):
 
 
 def git(checkout, *arguments, timeout=12, failure="Keeper could not read its update checkout."):
-    environment = {**os.environ, "GIT_TERMINAL_PROMPT": "0", "GIT_ASKPASS": "/bin/false",
-                   "GIT_OPTIONAL_LOCKS": "0"}
+    environment = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
+    environment.update(PATH="/usr/bin:/bin", GIT_TERMINAL_PROMPT="0", GIT_ASKPASS="/bin/false",
+                       GIT_OPTIONAL_LOCKS="0", GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_GLOBAL="/dev/null")
     try:
-        return subprocess.run(["git", "-C", str(checkout), *arguments], env=environment,
+        return subprocess.run(["/usr/bin/git", "-c", "core.hooksPath=/dev/null", "-C", str(checkout),
+                               *arguments], env=environment,
                               capture_output=True, text=True, timeout=timeout, check=True).stdout.strip()
     except (OSError, subprocess.SubprocessError):
         raise UpdateError(failure) from None
@@ -43,32 +47,75 @@ class Candidate:
     target: str
 
 
+def update_upstream(source, base):
+    """Enroll an upstream only during an explicit install from a trusted checkout."""
+    branch = git(source, "branch", "--show-current")
+    if not branch:
+        raise UpdateError("The Keeper checkout needs a branch with a configured upstream.")
+    remote = git(source, "config", "--get", f"branch.{branch}.remote")
+    ref = git(source, "config", "--get", f"branch.{branch}.merge")
+    if remote == "." or not remote or remote.startswith("-") or not ref.startswith("refs/heads/"):
+        raise UpdateError("The Keeper checkout needs a branch with a configured upstream.")
+    url = git(source, "remote", "get-url", "--", remote)
+    return trusted_remote(url, base), ref
+
+
+def trusted_remote(url, base):
+    if isinstance(url, str) and url.isprintable() and not url.startswith("-"):
+        try:
+            parsed = urlsplit(url)
+            if parsed.scheme in ("https", "ssh") and parsed.hostname and not parsed.password:
+                return url
+        except ValueError:
+            pass
+        if re.fullmatch(r"(?:[\w.-]+@)?[\w.-]+:[\w./~-]+", url) and "::" not in url:
+            return url
+        path = Path(url)
+        if path.is_absolute() and path.resolve().is_relative_to(base.resolve()):
+            try:
+                owned(base, private=True)
+            except (OSError, ValueError):
+                pass
+            else:
+                return str(path.resolve())
+    raise UpdateError("Keeper requires a trusted HTTPS or SSH update upstream.")
+
+
+def seed_update_checkout(source, destination, revision_id):
+    # A local clone imports committed objects without copying the source Git config,
+    # hooks, worktree files, or hardlinks. The caller explicitly chose this build.
+    git(source, "clone", "--no-local", "--no-checkout", "--template=", "--",
+        str(source), str(destination), timeout=90)
+    destination.chmod(0o700)
+    git(destination, "remote", "remove", "origin")
+    git(destination, "checkout", "--detach", revision_id)
+
+
 def check_for_update(installation):
     try:
         state = installation.installed()
+        checkout = installation.update_source
+        owned(installation.base, private=True)
+        owned(checkout, private=True)
+        if not (checkout / ".git").is_dir() or (checkout / ".git").is_symlink():
+            raise ValueError
     except (OSError, ValueError):
-        raise UpdateError("Keeper could not read its installation record.") from None
-    source = state.get("checkout", str(CHECKOUT))
-    if not isinstance(source, str):
-        raise UpdateError("Keeper could not read its installation record.")
-    checkout = Path(source)
-    if not checkout.is_absolute() or not (checkout / ".git").exists():
-        raise UpdateError("The update checkout is unavailable. Run ./install from your Keeper checkout.")
-    installed = state.get("revision") or revision(checkout)
-    branch = git(checkout, "branch", "--show-current")
-    no_upstream = "The Keeper checkout needs a branch with a configured upstream."
-    if not branch:
-        raise UpdateError(no_upstream)
-    remote = git(checkout, "config", "--get", f"branch.{branch}.remote", failure=no_upstream)
-    ref = git(checkout, "config", "--get", f"branch.{branch}.merge", failure=no_upstream)
-    if remote == "." or not remote or remote.startswith("-") or not ref.startswith("refs/heads/"):
-        raise UpdateError(no_upstream)
+        raise UpdateError("Run ./install from a trusted Keeper checkout to configure updates.") from None
+    installed = state.get("revision")
+    ref = state.get("update_ref")
+    if not valid_revision(installed) or not isinstance(ref, str) or not ref.startswith("refs/heads/"):
+        raise UpdateError("Run ./install from a trusted Keeper checkout to configure updates.")
+    remote = trusted_remote(state.get("update_url"), installation.base)
     result = git(checkout, "ls-remote", "--exit-code", "--refs", "--", remote, ref,
                  failure="Keeper could not reach the update branch. Check your network and Git credentials.")
     target, _, reported_ref = result.partition("\t")
-    if reported_ref != ref or not re.fullmatch(r"[a-f0-9]{40}|[a-f0-9]{64}", target):
+    if reported_ref != ref or not valid_revision(target):
         raise UpdateError("Keeper could not identify the remote revision.")
     return Candidate(checkout, remote, ref, installed, target)
+
+
+def valid_revision(value):
+    return isinstance(value, str) and bool(re.fullmatch(r"[a-f0-9]{40}|[a-f0-9]{64}", value))
 
 
 def apply_update(installation, checked):
@@ -85,9 +132,11 @@ def apply_update(installation, checked):
         fetched = git(checked.checkout, "rev-parse", "--verify", "FETCH_HEAD")
         if fetched != checked.target:
             raise UpdateError("The update changed while it was downloading. Check for updates again.")
+        git(checked.checkout, "merge-base", "--is-ancestor", checked.installed, fetched,
+            failure="The update cannot be fast-forwarded. Update the checkout manually.")
         git(checked.checkout, "merge-base", "--is-ancestor", "HEAD", fetched,
             failure="The update cannot be fast-forwarded. Update the checkout manually.")
-        git(checked.checkout, "-c", "core.hooksPath=/dev/null", "merge", "--ff-only", "--no-edit", fetched,
+        git(checked.checkout, "merge", "--ff-only", "--no-edit", fetched,
             failure="Keeper could not fast-forward the checkout.")
         subprocess.run([str(checked.checkout / "install"), "--no-launch"], cwd=checked.checkout,
                        capture_output=True, check=True, timeout=180)
@@ -96,7 +145,7 @@ def apply_update(installation, checked):
 
     if external_broker_active():
         service = systemctl("show", "--property=ExecStart", "--value", LEGACY_SERVICE)
-        if f"path={checked.checkout / 'run-tray'} ;" not in service.stdout:
+        if f"path={installation.app / 'run-tray'} ;" not in service.stdout:
             return "Update installed. Restart your separately managed Keeper service to use it."
         systemctl("restart", LEGACY_SERVICE)
         present_application()
@@ -127,10 +176,11 @@ def detached(program, *options):
 
 
 def start_update(candidate, attempt):
-    program = ["/usr/bin/python3", "-m", "keepassxc_agent_access.updates", attempt,
+    program = ["/usr/bin/python3", "-I", str(Path(__file__).resolve().parents[1] / "keeper_bootstrap.py"),
+               "keepassxc_agent_access.updates", attempt,
                str(candidate.checkout), candidate.remote, candidate.ref, candidate.installed, candidate.target]
     try:
-        detached(program, "--unit=keeper-update", f"--setenv=PYTHONPATH={Path(__file__).resolve().parents[1]}")
+        detached(program, "--unit=keeper-update")
     except (OSError, subprocess.SubprocessError):
         raise UpdateError("Keeper could not start the updater. Check that your systemd user session is running.") from None
 

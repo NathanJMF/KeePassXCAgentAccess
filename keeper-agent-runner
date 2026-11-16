@@ -1,6 +1,6 @@
 #!/bin/sh
 set -eu
 
-file=$(readlink -f -- "$0")
-export PYTHONPATH="$(dirname -- "$file")/src"
-exec /usr/bin/python3 -m keepassxc_agent_access.agent_runner "$@"
+file=$(/usr/bin/readlink -f -- "$0")
+root=$(/usr/bin/dirname -- "$file")
+exec /usr/bin/python3 -I "$root/src/keeper_bootstrap.py" keepassxc_agent_access.agent_runner "$@"

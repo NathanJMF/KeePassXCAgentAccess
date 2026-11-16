@@ -147,6 +147,7 @@ class Installation:
         data = Path(GLib.get_user_data_dir())
         self.base = data / "keeper"
         self.app = self.base / "app"
+        self.update_source = self.base / "update-source"
         self.manifest = self.base / "installation.json"
         self.launcher = data / "applications" / DESKTOP_ID
         self.unit = Path(GLib.get_user_config_dir()) / "systemd/user" / SERVICE
@@ -224,12 +225,19 @@ class Installation:
             previous.get("skill_path") == str(skill) and previous.get("skill") == digest(old_skill)
         )
         state = {"version": 1, "launcher": digest(launcher)}
+        upstream = None
         if (CHECKOUT / ".git").exists():
-            from .updates import UpdateError, revision
+            from .updates import UpdateError, revision, update_upstream
 
             try:
-                state.update(checkout=str(CHECKOUT), revision=revision(CHECKOUT))
+                state["revision"] = revision(CHECKOUT)
+                if CHECKOUT == self.update_source.resolve():
+                    state.update(update_url=previous["update_url"], update_ref=previous["update_ref"])
+                else:
+                    upstream = update_upstream(CHECKOUT, self.base)
+                    state.update(update_url=upstream[0], update_ref=upstream[1])
             except UpdateError:
+                # The desktop install can still be used without a configured upstream.
                 pass
         writes = [(self.launcher, launcher, old_launcher)]
         if manage_skill:
@@ -242,6 +250,16 @@ class Installation:
         self.base.mkdir(mode=0o700, parents=True, exist_ok=True)
         with TemporaryDirectory(dir=self.base) as temporary:
             staging, backup = Path(temporary) / "app", Path(temporary) / "previous"
+            update_stage, old_update = Path(temporary) / "update", Path(temporary) / "previous-update"
+            if upstream:
+                from .updates import seed_update_checkout
+
+                try:
+                    seed_update_checkout(CHECKOUT, update_stage, state["revision"])
+                except UpdateError:
+                    raise ValueError("Keeper could not prepare its private update checkout.") from None
+                if self.update_source.exists() or self.update_source.is_symlink():
+                    owned(self.update_source, private=True)
             staging.mkdir(mode=0o700)
             shutil.copytree(CHECKOUT / "src", staging / "src", ignore=shutil.ignore_patterns("__pycache__"))
             shutil.copytree(CHECKOUT / "skills", staging / "skills")
@@ -250,6 +268,7 @@ class Installation:
 
             changed = []
             replaced_app = False
+            replaced_update = False
             stopped_service = False
             enabled_service = False
             try:
@@ -262,6 +281,11 @@ class Installation:
                     self.app.rename(backup)
                 staging.rename(self.app)
                 replaced_app = True
+                if upstream:
+                    if self.update_source.exists():
+                        self.update_source.rename(old_update)
+                    update_stage.rename(self.update_source)
+                    replaced_update = True
                 for path, content, original in writes:
                     publish(path, content)
                     changed.append((path, original))
@@ -280,6 +304,10 @@ class Installation:
                         path.unlink(missing_ok=True)
                     else:
                         publish(path, original)
+                if replaced_update:
+                    shutil.rmtree(self.update_source)
+                if old_update.exists():
+                    old_update.rename(self.update_source)
                 if replaced_app:
                     shutil.rmtree(self.app)
                 if backup.exists():
@@ -319,6 +347,9 @@ class Installation:
                 self.remove_matching(path, state.get("skill"))
         if self.app.exists():
             shutil.rmtree(self.app)
+        if self.update_source.exists() or self.update_source.is_symlink():
+            owned(self.update_source, private=True)
+            shutil.rmtree(self.update_source)
         self.manifest.unlink()
         return True
 

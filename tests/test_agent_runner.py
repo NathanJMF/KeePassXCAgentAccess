@@ -65,6 +65,14 @@ class RunnerTests(TestCase):
         self.assertEqual(stat.S_IMODE(self.profile.stat().st_mode), 0o700)
         self.assertEqual(list(self.profile.iterdir()), [])
 
+    def test_launchers_start_with_isolated_python_from_an_unrelated_directory(self):
+        environment = {**os.environ, "PYTHONHOME": str(self.root / "missing"), "PYTHONPATH": str(self.root)}
+        for executable in ("keeper-run-agent", "keeper-agent-runner", "keepassxc-agent"):
+            with self.subTest(executable=executable):
+                result = subprocess.run([RUNNER.with_name(executable), "--help"], cwd=self.root,
+                                        env=environment, capture_output=True, check=True, timeout=5)
+                self.assertIn(b"usage:", result.stdout)
+
     def test_unsafe_profiles_fail_distinctly(self):
         self.profile.mkdir()
         self.profile.chmod(0o755)

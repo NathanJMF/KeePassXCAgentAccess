@@ -110,6 +110,9 @@ def stage_runtime(checkout, stage):
     package.mkdir(mode=0o755, parents=True)
     for component in (launcher_dir, package.parent, package):
         component.chmod(0o755)
+    bootstrap = package.parent / "keeper_bootstrap.py"
+    copyfile(checkout / "src" / bootstrap.name, bootstrap)
+    bootstrap.chmod(0o644)
     for name in MODULES:
         destination = package / name
         copyfile(checkout / "src" / "keepassxc_agent_access" / name, destination)

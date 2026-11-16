@@ -65,6 +65,7 @@ def prepare(root):
     runtime = root / "cli"
     modules = runtime / "src" / "keepassxc_agent_access"
     modules.mkdir(parents=True)
+    shutil.copyfile(REPO / "src/keeper_bootstrap.py", modules.parent / "keeper_bootstrap.py")
     for file in ("__init__.py", "agent_cli.py", "protocol.py", "runner_token.py"):
         shutil.copyfile(REPO / "src/keepassxc_agent_access" / file, modules / file)
     shutil.copy2(REPO / "keepassxc-agent", runtime / CLI_ARGS[0])

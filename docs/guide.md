@@ -12,7 +12,7 @@ From this checkout, run:
 ./install
 ```
 
-Keeper installs the missing Ubuntu packages, adds **Keeper** to the application menu, and opens it. The bundled skill is installed at `Documents/Skills/Keeper/SKILL.md`. On upgrade, Keeper removes the old copy if it matches the bundled skill or the previous installation record. Keeper keeps locally edited copies. The installed app runs from a per-user copy, so you can move the checkout. To update, open **Keeper Settings → Updates**, select **Check for Updates**, then **Apply Update**. Keeper uses the Git upstream of the checkout you installed from and applies fast-forward updates. For a private upstream, configure Git authentication in your desktop account. You can also run `git pull --ff-only` and `./install` from that checkout. Close the window to keep Keeper running in the tray when GNOME has an AppIndicator host.
+Keeper installs the missing Ubuntu packages, adds **Keeper** to the application menu, and opens it. The bundled skill is installed at `Documents/Skills/Keeper/SKILL.md`. On upgrade, Keeper removes the old copy if it matches the bundled skill or the previous installation record. Keeper keeps locally edited copies. The installed app runs from a per-user copy, so you can move the checkout. To update, open **Keeper Settings → Updates**, select **Check for Updates**, then **Apply Update**. Keeper records the trusted checkout’s upstream URL and branch at install time. It checks and applies fast-forward updates in its private installation directory. For a private upstream, use SSH authentication in your desktop account. You can also install manually from a trusted, up-to-date checkout. Close the window to keep Keeper running in the tray when GNOME has an AppIndicator host.
 
 To set up the isolated agent runner and start Keeper’s broker at sign-in, run:
 
@@ -20,7 +20,7 @@ To set up the isolated agent runner and start Keeper’s broker at sign-in, run:
 ./install --agent
 ```
 
-Run as your desktop user. Setup asks for sudo if it needs Ubuntu packages. Agent setup also needs a systemd user session and subordinate UID/GID mappings for your account. Use the command printed by the installer for your agent client’s stdio server. Choose a separate `--profile` name for each independent agent. Agent access starts paused. If you already have a separately managed broker service, use `./install` for desktop updates and keep using your existing runner.
+Run as your desktop user. Setup asks for sudo if it needs Ubuntu packages. Agent setup also needs a systemd user session and subordinate UID/GID mappings for your account. Use the command printed by the installer for your agent client’s stdio server. Choose a separate `--profile` name for each independent agent. Agent access starts paused. If you already have a separately managed broker service, use `./install` and configure that service and its runner to start from your protected installation. For the default Ubuntu data location, use `~/.local/share/keeper/app/run-tray` for the service and `~/.local/share/keeper/app/keeper-run-agent` for the runner.
 
 To remove the managed installation, use `./uninstall` or the uninstall command printed by setup. It removes the installed app, launcher and managed broker service, and any unmodified skill installed by setup. It keeps your vaults, remembered credentials, settings, tokens, runner profiles, Activity and shared Ubuntu packages.
 
@@ -46,6 +46,10 @@ Keeper checks for external changes before replacing the encrypted file. If Keepe
 3. Quit and restart the tray app. Select the vault, click **Unlock**, and check that its groups and entries appear. Keeper tries the saved keyring password first and prompts you if it needs a new one.
 4. Retire the old plaintext file after verifying the keyring unlock. Review any backups separately because older database copies can still use the previous password.
 
+## Isolate the agent runtime
+
+Keep Keeper’s installation, update files, desktop and keyring sockets, startup configuration, and owner settings outside the agent’s writable or controllable environment. The bundled runner changes the OS identity of the Keeper MCP subprocess. Keep agents tools-only, or isolate their shell, filesystem, and desktop tools separately from the desktop owner, using a separate unprivileged OS account or an independently enforced sandbox. The MCP host must control the runner command, profile, and startup environment. Approve installs and software updates from a trusted owner session.
+
 ## Configure a custom agent runtime
 
 For a separately managed runner, run the tray under the desktop owner's account and start the agent in a separate, unprivileged OS account. Keep the vault, key file, settings, keyring, desktop session, and process memory inaccessible to the runner. Install the CLI and source in a location the runner can read but cannot change.
@@ -61,7 +65,7 @@ export KEEPASSXC_AGENT_UID="$(id -u agent-runner)"
 
 Save the socket path and runner account in **Broker Settings** for app-menu launches. The broker checks the connecting OS UID before accepting token requests.
 
-Install `keeper-agent-runner`, `keepassxc-agent`, and their adjacent package in `src/keepassxc_agent_access` in an owner-controlled directory. Configure your agent's stdio MCP client to launch the runner under the admitted OS account.
+Use the installed `keeper-agent-runner` and `keepassxc-agent` from an owner-controlled directory. For a manual deployment, keep both executables beside the full `src` directory, including the startup bootstrap. Configure your agent's stdio MCP client to launch the runner under the admitted OS account.
 
 ```sh
 keeper-agent-runner --socket /run/keepassxc-agent-access/entries.sock \
@@ -90,7 +94,7 @@ Right-click a folder and choose **Copy Group Reference**, or right-click an entr
 
 The CLI submits proposals with `keepassxc-agent edits request --json` and checks their status with `keepassxc-agent edits status --request REQUEST_UUID --json`. The stdio runner offers `request_edit` and `edit_status`. See the KeePass skill for the request format. Reuse the same UUID for transport retries. Each approval applies to a single change.
 
-Supported requests create entries or groups, edit entry metadata or rename groups, move or recycle an item within its vault, and replace an entry password. A password request selects **Keeper-generated** or **owner-entered** in the request. Keeper handles the actual password inside the owner account. Changes to an entry's username or password invalidate its existing credential action approvals. Edit outcomes and changed field names are recorded in **Activity**. The Vault, Group, and Key columns identify the affected resource. Related events show their latest outcome in a summary row. Expand it to see the full history, and double-click an event for details.
+Supported requests create entries or groups, edit entry metadata or rename groups, move or recycle an item within its vault, and replace an entry password. A password request selects **Keeper-generated** or **owner-entered** in the request. Keeper handles the actual password inside the owner account. Changes through Keeper to an entry's username or password invalidate its credential action approvals. Reopening a vault saved by another KeePass client invalidates all credential action approvals for that vault. Keeper refuses vaults with duplicate entry or group IDs. Edit outcomes and changed field names are recorded in **Activity**. The Vault, Group, and Key columns identify the affected resource. Related events show their latest outcome in a summary row. Expand it to see the full history, and double-click an event for details.
 
 ## Test with synthetic data
 

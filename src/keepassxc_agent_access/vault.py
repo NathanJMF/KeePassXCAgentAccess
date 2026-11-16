@@ -37,6 +37,7 @@ class VaultSession:
     def __init__(self, process):
         self._process = process
         self.identity = None
+        self.fingerprint = None
         self._state = Lock()
         self._requests = Lock()
 
@@ -217,7 +218,8 @@ def open_vault(target: VaultTarget, password: str, cancelled: Event, *, writable
 
     try:
         process = subprocess.Popen(
-            [sys.executable, "-m", "keepassxc_agent_access.vault_worker", str(os.getpid())],
+            [sys.executable, "-I", str(Path(__file__).resolve().parents[1] / "keeper_bootstrap.py"),
+             "keepassxc_agent_access.vault_worker", str(os.getpid())],
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
@@ -239,12 +241,14 @@ def open_vault(target: VaultTarget, password: str, cancelled: Event, *, writable
         while not cancelled.is_set():
             readable, _, _ = select([process.stdout], [], [], 0.05)
             if readable:
-                response = process.stdout.readline(64)
+                response = process.stdout.readline(128)
                 if response.startswith(b"ready "):
                     if cancelled.is_set():
                         break
-                    session.identity = response[6:].strip().decode("ascii")
+                    _, session.identity, session.fingerprint = response.decode("ascii").split()
                     return session
+                if response == b"ambiguous\n":
+                    raise VaultError("The database has duplicate entry or group IDs.")
                 if response == b"credentials\n":
                     raise VaultError("The database rejected the password or key file.")
                 raise VaultError("The database could not be opened. Check the files and format.")

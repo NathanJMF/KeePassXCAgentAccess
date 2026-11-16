@@ -26,7 +26,9 @@ def main(root):
     from keepassxc_agent_access.installation import CHECKOUT, PROGRAMS, Installation
     from keepassxc_agent_access.updates import check_for_update, start_update, update_result
 
-    publisher = root / "upstream"
+    base = root / "data/keeper"
+    base.mkdir(mode=0o700, parents=True)
+    publisher = base / "upstream"
     publisher.mkdir()
     git(publisher, "init", "--initial-branch=main")
     shutil.copytree(CHECKOUT / "src", publisher / "src", ignore=shutil.ignore_patterns("__pycache__"))
@@ -61,7 +63,11 @@ subprocess.Popen(sys.argv[separator + 1:], env=environment, start_new_session=Tr
     installation = Installation()
     assert installation.base == root / "data/keeper"
     subprocess.run([checkout / "install", "--no-launch"], check=True, capture_output=True)
-    assert installation.installed()["checkout"] == str(checkout)
+    assert installation.installed()["update_url"] == str(publisher)
+    assert installation.update_source != checkout
+    assert git(installation.update_source, "rev-parse", "HEAD") == first
+    assert not git(installation.update_source, "remote")
+    (checkout / "worktree-only").touch()
     initial = check_for_update(installation)
     assert initial.installed == initial.target == first
     initial_process = subprocess.Popen([installation.app / "run-tray", "--show-window"])
@@ -78,6 +84,7 @@ subprocess.Popen(sys.argv[separator + 1:], env=environment, start_new_session=Tr
         assert update_result(installation)[1] == "Keeper was updated.", update_result(installation)[1]
         assert wait_for(app_pid) != old_pid
         assert check_for_update(installation).installed == second
+        assert git(checkout, "rev-parse", "HEAD") == first
         assert (installation.app / "src/keepassxc_agent_access/release-fixture").read_text() == "second"
         assert initial_process.wait(timeout=5) == 0
     finally:

@@ -1,8 +1,9 @@
 """Private worker protocol over inherited pipes."""
 
 import ctypes
-import json
+from hashlib import file_digest
 from http.client import HTTPException
+import json
 import os
 from select import select
 import sys
@@ -25,6 +26,8 @@ def load_vault():
     try:
         with (database_file(path) if writable else open(path, "rb")) as database:
             stamp = file_stamp(os.fstat(database.fileno()))
+            fingerprint = file_digest(database, "sha256").hexdigest()
+            database.seek(0)
             vault = PyKeePass(database, password=request["password"], keyfile=request["key_file"])
             if file_stamp(os.fstat(database.fileno())) != stamp:
                 return
@@ -34,7 +37,11 @@ def load_vault():
     finally:
         request.pop("password", None)
     vault.password = None
-    print("ready", vault.root_group.uuid, flush=True)
+    for resources in (vault.entries, vault.groups):
+        if len({item.uuid for item in resources}) != len(resources):
+            print("ambiguous", flush=True)
+            return
+    print("ready", vault.root_group.uuid, fingerprint, flush=True)
     while line := sys.stdin.buffer.readline(EDIT_LIMIT):
         if line == b"list_entries\n":
             reply(entry_listing(vault))

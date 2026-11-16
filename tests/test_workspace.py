@@ -62,6 +62,31 @@ class WorkspaceTests(unittest.TestCase):
         self.assertEqual(self.keyring.items, {})
         self.assertTrue(self.primary.is_file())
 
+    def test_external_save_requires_fresh_credential_approval(self):
+        identifier = self.workspace.add(VaultTarget(self.primary), self.password, True)
+        self.workspace.save_binding(identifier, Action("check", "Check", str(self.entry.uuid), "https://example.test/"))
+        before = self.workspace.registrations[identifier]
+        self.workspace.lock(identifier)
+        self.workspace.unlock(identifier)
+        self.assertEqual(self.workspace.registrations[identifier], before)
+
+        self.workspace.lock(identifier)
+        self.entry.password = "Rotated synthetic credential"
+        self.vault.save()
+        self.workspace.unlock(identifier)
+        after = self.workspace.registrations[identifier]
+        self.assertNotEqual(after.fingerprint, before.fingerprint)
+        self.assertEqual(after.bindings[0].action, before.bindings[0].action)
+        self.assertNotEqual(after.bindings[0].revision, before.bindings[0].revision)
+        self.assertEqual(Workspace(self.root, self.keyring).registrations[identifier], after)
+
+    def test_rejects_nonunique_entry_ids_on_open(self):
+        self.vault.add_entry(self.group, "Second fixture", "", "", force_creation=True).uuid = self.entry.uuid
+        self.vault.save()
+        with self.assertRaisesRegex(VaultError, "duplicate entry or group IDs"):
+            self.workspace.add(VaultTarget(self.primary), self.password, False)
+        self.assertFalse(self.workspace.registrations)
+
     def test_migrate_legacy_keyring_and_bindings_and_relink(self):
         target = VaultTarget(self.primary)
         SettingsStore(self.root / "settings.json").write(Settings(target, "fixture-item", ("stale-item",)))
