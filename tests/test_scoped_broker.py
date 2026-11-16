@@ -103,6 +103,25 @@ class ScopedBrokerTests(unittest.TestCase):
         self.assert_code("paused", "list_entries", vault=self.vaults[0])
         self.assertEqual(len(self.activity.rows(action="Request token")), 1)
 
+    def test_rate_limit_bounds_denied_audit_without_blocking_active_agents(self):
+        item = {"vault": self.vaults[0], "entry": self.entry, "metadata": True}
+        with patch("keepassxc_agent_access.scoped_broker.monotonic", return_value=0):
+            self.approve([item], index=1)
+            self.enroll([item])
+        with patch("keepassxc_agent_access.scoped_broker.TOKEN_REQUESTS", 1), \
+             patch("keepassxc_agent_access.scoped_broker.BROKER_REQUESTS", 1), \
+             patch("keepassxc_agent_access.scoped_broker.monotonic", return_value=60):
+            self.assert_code("ineligible", "list_vaults")
+            for _ in range(3):
+                self.assert_code("busy", "list_vaults")
+            self.assert_code("busy", "request_access", 2, request={})
+            self.assertEqual(self.invoke("access_status"), {"status": "pending"})
+            self.assertEqual(len(self.invoke("list_vaults", 1)["vaults"]), 1)
+        self.assertEqual(len(self.activity.rows(outcome="Rate limited")), 1)
+        self.assertEqual(len(self.activity.rows(action="List vaults", agent="Fixture agent 0")), 1)
+        with patch("keepassxc_agent_access.scoped_broker.monotonic", return_value=120):
+            self.assert_code("ineligible", "list_vaults")
+
     def test_auto_enrollment_keeps_usage_paused_and_enforces_resolved_scope(self):
         self.workspace.set_token_auto_approval("auto_approve_tokens", True)
         self.workspace.pause()

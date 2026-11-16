@@ -1,13 +1,19 @@
 """Authorize scoped requests and recheck their state before releasing data."""
 
+from collections import Counter, deque
 from time import monotonic, time
 
 from .approvals import Approval, ApprovalQueue
 from .access_settings import action_id, uuid_text
 from .activity import ActivityError, Attribution, entry_label, entry_target_labels
-from .grants import OPTIONAL_METADATA_FIELDS
+from .grants import OPTIONAL_METADATA_FIELDS, verifier
 from .protocol import RESPONSE_LIMIT, ListingError, encode
 from .settings import SettingsError
+
+
+REQUEST_WINDOW = 60
+TOKEN_REQUESTS = 48
+BROKER_REQUESTS = 240
 
 
 class ScopedBroker:
@@ -17,6 +23,31 @@ class ScopedBroker:
         self.activity = activity
         self.edits = edits
         self.approvals = approvals or ApprovalQueue()
+        self.requests = deque()
+        self.request_counts = Counter()
+        self.request_classes = Counter()
+        self.next_limit_notice = 0
+
+    def _charge_request(self, credential_key, uid, *, active):
+        # Called under the workspace mutex before the request can write audit data.
+        # Unapproved callers share a separate budget from active agents.
+        now = monotonic()
+        key = (active, credential_key)
+        while self.requests and self.requests[0][0] <= now - REQUEST_WINDOW:
+            _, expired = self.requests.popleft()
+            self.request_classes[expired[0]] -= 1
+            self.request_counts[expired] -= 1
+            if not self.request_counts[expired]:
+                del self.request_counts[expired]
+        if self.request_classes[active] >= BROKER_REQUESTS or self.request_counts[key] >= TOKEN_REQUESTS:
+            if now >= self.next_limit_notice:
+                self.next_limit_notice = now + REQUEST_WINDOW
+                event = self.activity.begin(uid, Attribution(), "Broker request rate limit", None)
+                self.activity.finish(event, "Rate limited")
+            raise ListingError("busy")
+        self.requests.append((now, key))
+        self.request_counts[key] += 1
+        self.request_classes[active] += 1
 
     def __call__(self, payload, uid, _engine, live, dispatch, deliver):
         try:
@@ -68,14 +99,16 @@ class ScopedBroker:
                 if not live():
                     raise ListingError("revoked")
                 token = self.grants.authenticate(credential, uid)
-                if self.edits is None:
+                if self.edits is None or token.status != "active":
                     raise ListingError("ineligible")
+                self._charge_request(token.verifier, uid, active=True)
             return encode(self.edits.submit(token, payload["request"], context, live=live))
 
         with self.workspace.mutex:
             if not live():
                 raise ListingError("revoked")
             if operation == "request_access":
+                self._charge_request(verifier(credential), uid, active=False)
                 status = self.grants.enroll(credential, uid, payload["request"], context)
                 return encode({"status": status})
             token = self.grants.authenticate(credential, uid)
@@ -85,6 +118,7 @@ class ScopedBroker:
                 if self.edits is None:
                     raise ListingError("ineligible")
                 return encode(self.edits.status(token, payload["id"]))
+            self._charge_request(token.verifier, uid, active=token.status == "active")
             generation = self.workspace.generation
             review_usage = self.workspace.requires_review(operation)
             name = {"list_vaults": "List vaults", "list_entries": "List entries",

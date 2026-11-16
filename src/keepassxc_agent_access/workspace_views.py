@@ -240,6 +240,7 @@ ACTIVITY_STATES = {
     "Disabled": ("action-unavailable-symbolic", "keeper_muted"),
     "Removed": ("user-trash-symbolic", "keeper_muted"),
     "Revoked": ("action-unavailable-symbolic", "keeper_muted"),
+    "Rate limited": ("appointment-soon-symbolic", "keeper_warning"),
 }
 
 
@@ -1125,7 +1126,7 @@ class ActivityView(Gtk.Box):
         filters = {name: field.get_text().strip().casefold() for name, field in self.filters.items()
                    if field.get_text().strip()}
         try:
-            rows = self.app.activity.rows(limit=None)
+            rows = self.app.activity.rows()
         except ActivityError:
             rows = []
         records = self.app.grants.records if self.app.grants else {}

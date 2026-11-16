@@ -75,6 +75,7 @@ CREATE TABLE IF NOT EXISTS activity (
     outcome TEXT NOT NULL,
     status INTEGER
 );
+CREATE INDEX IF NOT EXISTS activity_requested ON activity(requested DESC, id DESC);
 """
 
 
