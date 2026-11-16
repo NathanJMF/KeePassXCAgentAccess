@@ -69,6 +69,42 @@ class LegacyTray:
         self.process.force_exit()
 
 
+def _x11_shape(display):
+    from ctypes import (CDLL, POINTER, Structure, c_int, c_short, c_ulong, c_ushort, c_void_p,
+                        py_object, pythonapi)
+
+    class XRectangle(Structure):
+        _fields_ = [("x", c_short), ("y", c_short), ("width", c_ushort), ("height", c_ushort)]
+
+    capsule_pointer = pythonapi.PyCapsule_GetPointer
+    capsule_pointer.argtypes = [py_object, c_void_p]
+    capsule_pointer.restype = c_void_p
+    get_xdisplay = CDLL("libgdk-3.so.0").gdk_x11_display_get_xdisplay
+    get_xdisplay.argtypes = [c_void_p]
+    get_xdisplay.restype = c_void_p
+    xdisplay = get_xdisplay(capsule_pointer(display.__gpointer__, None))
+    combine = CDLL("libXext.so.6").XShapeCombineRectangles
+    combine.argtypes = [c_void_p, c_ulong, c_int, c_int, c_int, POINTER(XRectangle), c_int, c_int, c_int]
+    combine.restype = None
+
+    def apply(window, region, x, y, scale):
+        rectangles = [
+            XRectangle(rect.x * scale, rect.y * scale, rect.width * scale, rect.height * scale)
+            for rect in (region.get_rectangle(index) for index in range(region.num_rectangles()))
+        ]
+        array = (XRectangle * len(rectangles))(*rectangles)
+        # GTK can omit the native shape update after the tray host embeds the plug.
+        # Apply ShapeBounding / ShapeSet / Unsorted on GTK's own X11 connection.
+        display.error_trap_push()
+        try:
+            combine(xdisplay, window, 0, x * scale, y * scale, array, len(array), 0, 0)
+        finally:
+            display.error_trap_pop_ignored()
+        display.flush()
+
+    return apply
+
+
 def main():
     initialized, _ = Gtk.init_check()
     if not initialized:
@@ -78,6 +114,8 @@ def main():
     gi.require_version("GdkX11", "3.0")
     from gi.repository import Gdk, GdkX11
 
+    display = Gdk.Display.get_default()
+    apply_shape = _x11_shape(display) if display.supports_shapes() else None
     icon = Gtk.StatusIcon()
     icon.set_title("Keeper")
     icon.set_name("Keeper")
@@ -91,9 +129,10 @@ def main():
         sys.stdout.flush()
 
     def shape_icon():
-        if not icon.is_embedded():
+        if apply_shape is None or not icon.is_embedded():
             return GLib.SOURCE_REMOVE
-        window = GdkX11.X11Window.lookup_for_display(Gdk.Display.get_default(), icon.get_x11_window_id())
+        xid = icon.get_x11_window_id()
+        window = GdkX11.X11Window.lookup_for_display(display, xid)
         if window is None or window.get_visual().get_depth() == 32:
             return GLib.SOURCE_REMOVE
         tray = next((widget for widget in Gtk.Window.list_toplevels() if widget.get_window() == window), None)
@@ -117,7 +156,7 @@ def main():
         if not region.is_empty():
             x = (window.get_width() - width) // 2
             y = (window.get_height() - height) // 2
-            window.shape_combine_region(region, x, y)
+            apply_shape(xid, region, x, y, window.get_scale_factor())
         return GLib.SOURCE_REMOVE
 
     def size_changed(*_):
