@@ -21,10 +21,14 @@ def _exec_argument(value):
     return '"' + escaped.replace("\\", "\\\\").replace("%", "%%") + '"'
 
 
-def _install_skill():
+def skill_destination():
     documents = GLib.get_user_special_dir(GLib.UserDirectory.DIRECTORY_DOCUMENTS)
     documents = Path(documents) if documents else Path.home() / "Documents"
-    destination = documents / "Skills" / SKILL_PATH
+    return documents / "Skills" / SKILL_PATH
+
+
+def _install_skill():
+    destination = skill_destination()
     if destination.exists() or destination.is_symlink():
         return
     source = Path(__file__).resolve().parents[2] / "skills" / SKILL_PATH
@@ -44,14 +48,8 @@ def _install_skill():
             temporary.unlink(missing_ok=True)
 
 
-def install(executable, data_directory):
-    executable = Path(executable).resolve(strict=True)
-    if not executable.is_file() or not os.access(executable, os.X_OK):
-        raise ValueError("The tray executable is unavailable.")
-    directory = Path(data_directory) / "applications"
-    directory.mkdir(parents=True, exist_ok=True)
-    path = directory / DESKTOP_ID
-    contents = "\n".join([
+def desktop_contents(executable):
+    return "\n".join([
         "[Desktop Entry]",
         "Type=Application",
         f"Name={APP_TITLE}",
@@ -62,6 +60,16 @@ def install(executable, data_directory):
         "Categories=Utility;Security;",
         "",
     ])
+
+
+def install(executable, data_directory):
+    executable = Path(executable).resolve(strict=True)
+    if not executable.is_file() or not os.access(executable, os.X_OK):
+        raise ValueError("The tray executable is unavailable.")
+    directory = Path(data_directory) / "applications"
+    directory.mkdir(parents=True, exist_ok=True)
+    path = directory / DESKTOP_ID
+    contents = desktop_contents(executable)
     with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=directory, delete=False) as file:
         temporary = Path(file.name)
         try:

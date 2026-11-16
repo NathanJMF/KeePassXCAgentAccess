@@ -4,7 +4,6 @@ from base64 import b64encode
 import json
 import os
 from pathlib import Path
-import shutil
 import subprocess
 from tempfile import TemporaryDirectory
 from time import monotonic, sleep
@@ -13,12 +12,13 @@ from uuid import UUID, uuid4
 
 from pykeepass import PyKeePass
 
-from broker_scenarios import NAMESPACE, PASSWORD, REPO, isolated_uid, prepare
+from broker_scenarios import NAMESPACE, PASSWORD, REPO, prepare
 from keepassxc_agent_access.access_settings import Action
 from keepassxc_agent_access.activity import ActivityStore
 from keepassxc_agent_access.broker import BrokerConfig, ListingBroker
 from keepassxc_agent_access.edit_requests import EditRequests
 from keepassxc_agent_access.grants import Grants
+from keepassxc_agent_access.isolated_runner import alter_acl, namespace, subordinate_ids
 from keepassxc_agent_access.scoped_broker import ScopedBroker
 from keepassxc_agent_access.workspace import Workspace
 from test_agent_runner import call_tool
@@ -26,38 +26,33 @@ from tls_fixture import tls_service
 
 
 def check(root):
-    target, endpoint, private, expected = prepare(root)
-    header = "Basic " + b64encode(b"synthetic user:synthetic credential").decode("ascii")
-    with tls_service(private, authorization=header) as (certificate, url, calls):
-        with patch.dict(os.environ, SSL_CERT_FILE=str(certificate)):
-            check_tools(root, target, endpoint, private, expected, url, calls, header)
+    target, _, private, expected = prepare(root)
+    runtime = root / "runtime"
+    runtime.mkdir(mode=0o700)
+    with patch.dict(os.environ, XDG_RUNTIME_DIR=str(runtime), XDG_STATE_HOME=str(root / "state")):
+        runner = REPO / "keeper-run-agent"
+        subprocess.run([runner, "--prepare-socket"], check=True)
+        endpoint = runtime / "keeper-scoped-runner" / "broker.sock"
+        anchor = root / "state/keeper-scoped-runner/fixture"
+        header = "Basic " + b64encode(b"synthetic user:synthetic credential").decode("ascii")
+        with tls_service(private, authorization=header) as (certificate, url, calls):
+            with patch.dict(os.environ, SSL_CERT_FILE=str(certificate)):
+                check_tools(runner, anchor, target, endpoint, private, expected, url, calls, header)
 
 
-def check_tools(root, target, endpoint, private, expected, url, calls, header):
+def check_tools(runner, anchor, target, endpoint, private, expected, url, calls, header):
     workspace = Workspace(private, None)
     activity = ActivityStore(private / "activity.sqlite")
     activity.recover(30)
     grants = Grants(workspace, activity)
     edits = EditRequests(workspace, grants, activity)
     engine = ScopedBroker(workspace, grants, activity, edits=edits)
-    uid = isolated_uid()
+    uid, gid = subordinate_ids()
     broker = ListingBroker(BrokerConfig(endpoint, uid), lambda: engine, engine)
-
-    runtime = root / "cli"
-    shutil.copy2(REPO / "keeper-agent-runner", runtime / "keeper-agent-runner")
-    shutil.copyfile(REPO / "src/keepassxc_agent_access/agent_runner.py",
-                    runtime / "src/keepassxc_agent_access/agent_runner.py")
-    profiles = root / "profiles"
-    profiles.mkdir()
-    profiles.chmod(0o1777)
-    runner_home = profiles / "trial-home"
-    subprocess.run([*NAMESPACE, "mkdir", "-m", "700", str(runner_home)], check=True)
-    profile = runner_home / "profile"
 
     def invoke(tool, arguments=None, *, error=False):
         process = subprocess.run(
-            [*NAMESPACE, "/usr/bin/env", "-i", "PATH=/usr/bin:/bin",
-             str(runtime / "keeper-agent-runner"), "--socket", str(endpoint), "--profile-dir", str(profile)],
+            [runner, "--profile", "fixture"],
             cwd="/tmp", input=json.dumps(call_tool(tool, arguments)) + "\n", text=True,
             capture_output=True, check=True, timeout=12,
         )
@@ -73,7 +68,6 @@ def check_tools(root, target, endpoint, private, expected, url, calls, header):
         row, unapproved = expected[:2]
         workspace.save_binding(vault, Action("health", "Runner Status Check", row["id"], url + "/health"))
         broker.start()
-        subprocess.run(["setfacl", "-m", f"u:{uid}:rw", endpoint], check=True)
         subprocess.run([*NAMESPACE, "test", "!", "-r", str(target.database)], check=True)
         assert invoke("access_status") == {"status": "uninitialized"}
         request = {"identity": "Runner fixture", "project": "Synthetic",
@@ -132,10 +126,17 @@ def check_tools(root, target, endpoint, private, expected, url, calls, header):
     finally:
         broker.stop()
         workspace.lock_all()
-        subprocess.run([*NAMESPACE, "rm", "-rf", "--", str(runner_home)], check=True)
+        if anchor.is_dir():
+            fd = os.open(anchor, os.O_PATH | os.O_DIRECTORY)
+            try:
+                alter_acl(anchor, "-m", f"u:{uid}:rwx")
+                subprocess.run([*namespace(uid, gid), "/usr/bin/rm", "-rf",
+                                f"/proc/self/fd/{fd}/profile"], cwd="/", pass_fds=(fd,), check=True)
+            finally:
+                os.close(fd)
 
 
 if __name__ == "__main__":
     with TemporaryDirectory(prefix="keeper-runner-") as root:
         check(Path(root))
-    print("Runner scenario passed: all seven stdio tools, separate peer UID, scoped TLS, persisted edits, and revocation")
+    print("Runner scenario passed: bundled runner, all seven stdio tools, separate peer UID, scoped TLS, persisted edits, and revocation")

@@ -111,9 +111,13 @@ def main(root):
     installed.write_bytes(edited)
     subprocess.run(["./install-launcher"], check=True, capture_output=True)
     assert installed.read_bytes() == edited
+    subprocess.run(["./install", "--no-launch"], check=True, capture_output=True)
+    assert installed.read_bytes() == edited
+    managed = Path(os.environ["XDG_DATA_HOME"]) / "keeper" / "app"
     launcher = Gio.DesktopAppInfo.new(DESKTOP_ID)
     assert launcher is not None and "--show-window" in launcher.get_commandline()
     assert launcher.get_name() == "Keeper"
+    assert str(managed / "run-tray") in launcher.get_commandline()
 
     assert launcher.launch([], None)
     first = wait_for(app_pid)
@@ -149,7 +153,24 @@ def main(root):
     finally:
         stop(second)
     assert not endpoint.exists()
-    print("Launcher scenario passed: skill installation, GNOME registration, single instance and persisted settings", flush=True)
+    vault_before = target.database.read_bytes()
+    settings_before = access.path.read_bytes()
+    saved_item = store.read().active_item
+    assert saved_item is not None
+    assert launcher.launch([], None)
+    wait_for(app_pid)
+    subprocess.run([str(managed / "uninstall")], check=True, capture_output=True)
+    assert not managed.exists()
+    assert not (Path(os.environ["XDG_DATA_HOME"]) / "applications" / DESKTOP_ID).exists()
+    assert installed.read_bytes() == edited
+    assert target.database.read_bytes() == vault_before
+    assert access.path.read_bytes() == settings_before
+    assert SystemKeyring().retrieve(saved_item) == PASSWORD
+    subprocess.run(["./uninstall"], check=True, capture_output=True)
+    subprocess.run(["./install", "--no-launch"], check=True, capture_output=True)
+    assert (managed / "run-tray").exists()
+    print("Launcher scenario passed: managed install, GNOME launch, single instance, removal, reinstall and preserved data",
+          flush=True)
 
 
 if __name__ == "__main__":

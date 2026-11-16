@@ -2,17 +2,25 @@
 
 Keeper is a Linux tray app for browsing existing KeePass databases and granting agents access to specific entries and credential actions. The desktop can edit KDBX 4 vaults and independently remember each database password in the owner's OS keyring.
 
-## Run on Ubuntu GNOME
+## Install on Ubuntu GNOME
 
-Use a Wayland session with the AppIndicator extension enabled. Install the desktop and vault dependencies from Ubuntu.
+From this checkout, run:
 
 ```sh
-sudo apt install python3-gi python3-gi-cairo python3-pykeepass gir1.2-gtk-3.0 \
-  gir1.2-secret-1 gir1.2-ayatanaappindicator3-0.1 gnome-keyring
-./run-tray
+./install
 ```
 
-Run `./install-launcher` from the owner-controlled checkout to add **Keeper** to the GNOME application menu and install its bundled skill at `Skills/keepassxc-agent-access/SKILL.md` under your Documents directory. Rerun the installer to refresh an existing launcher or if the checkout moves. Existing skill copies are preserved. Closing the window leaves the app running when the tray icon is available.
+Keeper installs the missing Ubuntu packages, adds **Keeper** to the application menu, and opens it. The bundled skill is installed under `Skills/keepassxc-agent-access/SKILL.md` in your Documents folder. The installed app runs from a per-user copy, so you can move the checkout. To update Keeper, run `./install` from the updated checkout. Close the window to keep Keeper running in the tray when GNOME has an AppIndicator host.
+
+To set up the isolated agent runner and start Keeper’s broker at sign-in, run:
+
+```sh
+./install --agent
+```
+
+Run as your desktop user. Setup asks for sudo if it needs Ubuntu packages. Agent setup also needs a systemd user session and subordinate UID/GID mappings for your account. Use the command printed by the installer for your agent client’s stdio server. Choose a separate `--profile` name for each independent agent. Agent access starts paused. If you already have a separately managed broker service, use `./install` for desktop updates and keep using your existing runner.
+
+To remove the managed installation, use `./uninstall` or the uninstall command printed by setup. It removes the installed app, launcher and managed broker service, and any unmodified skill installed by setup. It keeps your vaults, remembered credentials, settings, tokens, runner profiles, Activity and shared Ubuntu packages.
 
 1. Select **Add Vault…** and choose an existing KeePass file. The picker opens the Keeper folder in your Documents directory when that folder exists. Enter its password and select its key file if required.
 2. Select **Remember on This Device** to save the password in the system keyring, then select **Verify and Save**.
@@ -36,9 +44,9 @@ Keeper checks for external changes before replacing the encrypted file. If Keepe
 3. Quit and restart the tray app. Select the vault, click **Unlock**, and check that its groups and entries appear. Keeper tries the saved keyring password first and prompts you if it needs a new one.
 4. Retire the old plaintext file after verifying the keyring unlock. Review any backups separately because older database copies can still use the previous password.
 
-## Isolate the agent runtime
+## Configure a custom agent runtime
 
-Run the tray under the desktop owner's account and start the agent in a separate, unprivileged OS account. Keep the vault, key file, settings, keyring, desktop session, and process memory inaccessible to the runner. Install the CLI and source in a location the runner can read but cannot change.
+For a separately managed runner, run the tray under the desktop owner's account and start the agent in a separate, unprivileged OS account. Keep the vault, key file, settings, keyring, desktop session, and process memory inaccessible to the runner. Install the CLI and source in a location the runner can read but cannot change.
 
 Provision a socket directory that the owner controls and the agent can traverse. The agent must be able to write to the socket inode to connect. This example assumes that the owner and dedicated agent account are members of a group called `vault-listing`.
 
