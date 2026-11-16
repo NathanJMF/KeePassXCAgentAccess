@@ -60,7 +60,7 @@ class AccessEngine:
                 name = "List entries"
                 destination = None
             elif (not action or not action.enabled or action.entry != request.entry or action.is_command
-                  or action.method != "GET"):
+                  or action.method != "GET" or action.browser is not None):
                 event = self.activity.begin(uid, request.attribution, "Use password · unavailable action", None)
                 raise ListingError("ineligible")
             else:

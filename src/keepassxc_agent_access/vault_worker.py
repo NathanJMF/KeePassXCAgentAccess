@@ -6,10 +6,12 @@ from http.client import HTTPException
 import json
 import os
 from select import select
+import subprocess
 import sys
 from threading import Thread
 
-from .access_settings import ActionType, Destination
+from .access_settings import ActionType, BrowserForm, Destination
+from .browser_action import prepare_browser
 from .command_action import deliver_credential, deliver_prompt, prepare_command
 from .entry_projection import active_entry, entry_listing, owner_snapshot
 from .https_action import authenticate, failure, prepare_https
@@ -84,6 +86,8 @@ def load_vault():
                 use_command(entry, data["command"], data["executable_sha256"],
                             destination=Destination.parse(data["url"]), prompt_variable=data["prompt_variable"],
                             input_path=data["input_path"])
+            elif data["kind"] == ActionType.BROWSER:
+                use_browser(entry, data["url"], BrowserForm(**data["browser"]))
             else:
                 use(entry, data["url"], ActionType(data["kind"]), data["method"], data["request_json"])
         else:
@@ -119,6 +123,19 @@ def use(entry, url, kind, method, request_json):
                 result = authenticate(connection, path, entry, kind, method=method, request_json=request_json)
             reply(encode(result))
     except (OSError, HTTPException, ValueError):
+        reply(encode(failure()))
+
+
+def use_browser(entry, url, profile):
+    if entry is None:
+        reply(encode(failure()))
+        return
+    try:
+        with prepare_browser(url, profile, entry) as submit:
+            reply(encode({"ready": True}))
+            result = submit() if sys.stdin.buffer.readline(16) == b"dispatch\n" else failure()
+            reply(encode(result))
+    except (OSError, HTTPException, ValueError, subprocess.SubprocessError):
         reply(encode(failure()))
 
 

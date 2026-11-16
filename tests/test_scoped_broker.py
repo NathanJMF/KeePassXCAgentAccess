@@ -8,7 +8,7 @@ import unittest
 from unittest.mock import patch
 from uuid import uuid4
 
-from keepassxc_agent_access.access_settings import Action, ActionType
+from keepassxc_agent_access.access_settings import Action, ActionType, BrowserForm
 from keepassxc_agent_access.activity import ActivityStore, Attribution
 from keepassxc_agent_access.grants import Grants
 from keepassxc_agent_access.protocol import ListingError, decode
@@ -323,9 +323,13 @@ class ScopedBrokerTests(unittest.TestCase):
         network = Action("network", "Network check", self.entry, "https://example.test/",
                          kind=ActionType.NETWORK_PROMPT, command=command,
                          executable_sha256="b" * 64, prompt_variable="TEST_ASKPASS")
-        for action in (local, network):
+        form = BrowserForm("https://example.test/submit", "login", "account", "password", "home")
+        browser = Action("browser", "Browser check", self.entry, "https://example.test/login",
+                         kind=ActionType.BROWSER, browser=form)
+        for action in (local, network, browser):
             self.workspace.save_binding(vault, action)
-        profiles = {"use_https": self.action, "use_local_command": local, "use_networked_command": network}
+        profiles = {"use_https": self.action, "use_local_command": local, "use_networked_command": network,
+                    "use_browser": browser}
         self.approve([{"vault": vault, "entry": self.entry, "action": action.id}
                       for action in profiles.values()])
 

@@ -66,8 +66,25 @@ Keeper SHALL use a saved entry through an exact HTTPS method, endpoint, authenti
 
 ### Requirement: Credential review settings are independent by transport
 
-Keeper SHALL allow independent per-use review settings for HTTPS requests, local commands, and networked commands. A saved password-use review setting SHALL supply the initial setting for all three.
+Keeper SHALL allow independent per-use review settings for HTTPS requests, local commands, networked commands, and browser sign-ins. A legacy combined password-use review setting SHALL supply their initial values.
 
 #### Scenario: A legacy combined review setting is enabled
 - **WHEN** Keeper reads the saved combined password-use review setting
 - **THEN** each credential transport requires review regardless of the agent's approved grant
+
+
+### Requirement: Browser sign-ins release the credential only to a fixed form
+
+Keeper SHALL pin a login page, exact same-origin HTTPS POST endpoint, form and field identifiers, and success criterion in a binding revision. It SHALL inspect the form offline with website scripts disabled, verify the form before using the credential, and recheck authorization immediately before submission. Keeper SHALL discard the temporary session and return only a structured result.
+
+#### Scenario: An agent invokes an approved browser sign-in
+- **WHEN** the fixed form matches the approved scope and the site confirms successful sign-in
+- **THEN** Keeper reports success and records the request in Activity without credentials, cookies, or page content
+
+#### Scenario: The form changes or its destination differs
+- **WHEN** the form cannot be verified against the configured binding
+- **THEN** Keeper blocks credential submission
+
+#### Scenario: The site does not confirm a dispatched form
+- **WHEN** Keeper cannot verify the success marker after a POST
+- **THEN** it records an uncertain outcome and does not retry

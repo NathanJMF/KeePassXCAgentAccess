@@ -16,7 +16,7 @@ AUTHORIZATION = "Basic " + b64encode(f"{USERNAME}:{PASSWORD}".encode()).decode("
 
 
 @contextmanager
-def tls_service(root, *, authorization=AUTHORIZATION, extra_authorization=()):
+def tls_service(root, *, authorization=AUTHORIZATION, extra_authorization=(), handler=None):
     root = Path(root)
     cert, key = root / "certificate.pem", root / "key.pem"
     subprocess.run([
@@ -64,7 +64,7 @@ def tls_service(root, *, authorization=AUTHORIZATION, extra_authorization=()):
             except (OSError, ssl.SSLError):
                 pass
 
-    with ThreadingHTTPServer(("127.0.0.1", 0), Handler) as server:
+    with ThreadingHTTPServer(("127.0.0.1", 0), handler or Handler) as server:
         context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
         context.load_cert_chain(cert, key)
         server.socket = context.wrap_socket(server.socket, server_side=True)

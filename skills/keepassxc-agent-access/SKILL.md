@@ -49,11 +49,13 @@ Use the exact approved reference, including owner-provided entry IDs for use-onl
 
 For a configured API action, use the same command or call `use_password` with the vault, entry, and action references. The owner configures the HTTPS method, endpoint, and any fixed JSON body. Ask the owner for the matching action ID when you need a different operation. If a write returns `uncertain`, check the destination before retrying.
 
+For a configured Browser Sign-in, use the same command or tool with the owner-approved action reference. Keeper verifies the fixed HTML form and checks the configured success page or element. The result describes one sign-in attempt. The temporary session is discarded. Check the destination before retrying an `uncertain` result.
+
 For an approved isolated command, use the entry and action as the credential reference. Leave stdin free for Keeper. Supply the exact executable and argument vector approved by the owner.
 
     keepassxc-agent run --vault VAULT_UUID --entry ENTRY_UUID --action ACTION_ID --json -- /usr/bin/example --read-stdin
 
-With stdio, call use_password with entry, action, optional vault, and command as an array of literal strings. The command receives the secret on its private stdin followed by EOF. It runs without network or host workspace access. The tool returns success or failure. A networked command uses the same references and exact argv. Keeper answers the trusted program's configured password prompt and permits its approved origin. Provide a binary artifact only if the binding allows it. Use `--input` with redirected stdin, or pass an `input_base64` string to the stdio tool. The file becomes read-only `/input` inside the sandbox. Do not automatically retry an `uncertain` outcome. Check the destination first. Generic browser sessions require a separate delivery policy.
+With stdio, call use_password with entry, action, optional vault, and command as an array of literal strings. The command receives the secret on its private stdin followed by EOF. It runs without network or host workspace access. The tool returns success or failure. A networked command uses the same references and exact argv. Keeper answers the trusted program's configured password prompt and permits its approved origin. Provide a binary artifact only if the binding allows it. Use `--input` with redirected stdin, or pass an `input_base64` string to the stdio tool. The file becomes read-only `/input` inside the sandbox. Do not automatically retry an `uncertain` outcome. Check the destination first.
 
 ## Request a vault edit
 

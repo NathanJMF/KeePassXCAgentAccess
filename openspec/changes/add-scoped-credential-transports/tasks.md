@@ -20,6 +20,9 @@
 - [x] Extend HTTPS profiles with a fixed method, endpoint, authentication scheme, and optional fixed JSON body.
 - [x] Include the method and body in review and the binding revision. Record the request outcome without credentials or raw API content.
 
-## Additional profiles
+## Browser sign-ins
 
-- [ ] Define and review protected browser delivery and test its session and output boundaries.
+- [x] Pin the login page, form fields, exact submit URL, and success check in the token scope.
+- [x] Inspect HTML in a private offline browser and submit through the trusted TLS worker.
+- [x] Record the authorization and outcome in Activity without session data.
+- [x] Verify the isolated runner against a synthetic login and complete implementation review.

@@ -7,7 +7,7 @@ from unittest import TestCase
 from unittest.mock import patch
 from uuid import uuid4
 
-from keepassxc_agent_access.access_settings import AccessMode, AccessStore, Action, ActionType, Destination, VaultPolicy
+from keepassxc_agent_access.access_settings import AccessMode, AccessStore, Action, ActionType, BrowserForm, Destination, VaultPolicy
 from keepassxc_agent_access.activity import ActivityError, ActivityStore, Attribution
 from keepassxc_agent_access.broker import BrokerConfig
 
@@ -52,7 +52,7 @@ class AccessStorageTests(TestCase):
 
         migrated = store.read()
         self.assertEqual(migrated, replace(default, review_actions=frozenset({
-            "use_https", "use_local_command", "use_networked_command", "list_entries",
+            "use_https", "use_local_command", "use_networked_command", "use_browser", "list_entries",
         })))
         updated = replace(migrated, review_actions=frozenset({"use_local_command", "list_entries"}))
         store.write(updated)
@@ -104,6 +104,25 @@ class AccessStorageTests(TestCase):
         for method in ("GET", "HEAD", "CONNECT", "POST\r\n"):
             with self.subTest(method=method), self.assertRaises(ValueError):
                 replace(action, method=method)
+
+    def test_browser_profile_is_saved_and_pins_all_form_settings(self):
+        store = AccessStore(self.root / "actions.json")
+        vault, entry = str(uuid4()), str(uuid4())
+        browser = BrowserForm("https://example.invalid/session", "login", "user", "pass",
+                              "account", "https://example.invalid/home")
+        action = Action("login", "Sign in", entry, "https://example.invalid/login",
+                        kind=ActionType.BROWSER, browser=browser)
+        policy = VaultPolicy(actions=(action,))
+        store.write(replace(store.read(), vaults=((vault, policy),)))
+        self.assertEqual(AccessStore(store.path).read().for_vault(vault), policy)
+        self.assertNotEqual(action.scope, replace(action, browser=replace(browser, success_id="new-id")).scope)
+        self.assertNotEqual(action.scope, replace(action, browser=replace(browser, username_field="email")).scope)
+        with self.assertRaisesRegex(ValueError, "same HTTPS origin"):
+            replace(action, browser=replace(browser, success_url="https://other.invalid/"))
+        with self.assertRaises(ValueError):
+            replace(browser, username_field=browser.password_field)
+        with self.assertRaises(ValueError):
+            replace(action, kind=ActionType.BASIC)
 
     def test_activity_sessions_per_request_labels_and_recovery(self):
         store = ActivityStore(self.root / "activity.sqlite")

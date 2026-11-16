@@ -254,7 +254,7 @@ class ScopedBroker:
                         send()
                     return guard(lambda: dispatch(audit_and_send))
 
-                if binding.action.is_command:
+                if binding.action.is_command or binding.action.browser:
                     with self._command_slot():
                         if input_info is None:
                             result = session.worker.use(binding.action, gate)

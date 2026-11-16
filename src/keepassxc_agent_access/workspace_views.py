@@ -6,7 +6,7 @@ from shlex import join, split
 
 from gi.repository import GLib, Gtk, Pango
 
-from .access_settings import Action, ActionType, HTTPS_METHODS, HTTPS_WRITE_METHODS
+from .access_settings import Action, ActionType, BrowserForm, HTTPS_METHODS, HTTPS_WRITE_METHODS
 from .activity import ActivityError
 from .activity_grouping import EDIT_STAGES, ActivityResources, activity_groups, activity_matches, event_time
 from .command_action import executable_digest
@@ -843,7 +843,9 @@ class AccessView(Gtk.Box):
                 action = binding.action if binding else None
                 name = f"Run {action.name}" if action else f"Run credential action {item.action}"
                 destination = f"{action.type_label} · {action.destination}" if action else None
-                if action and action.request_json:
+                if action and action.browser:
+                    destination += "\n" + action.browser.description
+                elif action and action.request_json:
                     destination += "\nFixed JSON body · " + action.request_json
                 access_permission(permissions, name, destination)
             facts = activity_facts((
@@ -1262,6 +1264,7 @@ def edit_binding(app, vault, entry, previous):
         fields.append(field)
     target_label = _label("")
     target = Gtk.Entry()
+    target.set_name("action-destination")
     body.pack_start(target_label, False, False, 0)
     body.pack_start(target, False, False, 0)
     fields.append(target)
@@ -1296,18 +1299,46 @@ def edit_binding(app, vault, entry, previous):
     https.pack_start(request_json, False, False, 0)
     body.pack_start(https, False, False, 0)
 
+    browser = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=7)
+    browser.set_no_show_all(True)
+    browser_fields = {}
+    profile = previous.action.browser if previous else None
+    for field_name, caption, hint in (
+        ("submit_url", "Form Submit URL", "https://example.com/session"),
+        ("form_id", "Form ID", "sign-in"),
+        ("username_field", "Username Input Name", "username"),
+        ("password_field", "Password Input Name", "password"),
+        ("success_id", "Success Element ID", "account-home"),
+        ("success_url", "Success Redirect URL (Optional)", "https://example.com/account"),
+    ):
+        add_label(browser, caption)
+        field = Gtk.Entry(text=getattr(profile, field_name, ""), placeholder_text=hint)
+        field.set_name("browser-" + field_name)
+        browser.pack_start(field, False, False, 0)
+        browser_fields[field_name] = field
+    body.pack_start(browser, False, False, 0)
+
     def update_target(*_):
         selected = ActionType(kind.get_active_id())
         command = selected in (ActionType.STDIN, ActionType.NETWORK_PROMPT)
-        target_label.set_text("Executable and Arguments" if command else "HTTPS Endpoint")
-        if command:
+        is_browser = selected == ActionType.BROWSER
+        if is_browser:
+            target_label.set_text("HTTPS Sign-in Page")
+            for child in browser.get_children():
+                child.show_all()
+            browser.show()
+        else:
+            target_label.set_text("Executable and Arguments" if command else "HTTPS Endpoint")
+            browser.hide()
+        if command or is_browser:
             https.hide()
         else:
             for child in https.get_children():
                 child.show_all()
             https.show()
         request_json.set_sensitive(method.get_active_id() in HTTPS_WRITE_METHODS)
-        target.set_placeholder_text("/usr/bin/example" if command else "https://example.com/status")
+        target.set_placeholder_text("/usr/bin/example" if command else "https://example.com/sign-in"
+                                    if is_browser else "https://example.com/status")
         if selected == ActionType.NETWORK_PROMPT:
             for child in network.get_children():
                 child.show_all()
@@ -1341,6 +1372,9 @@ def edit_binding(app, vault, entry, previous):
                                 command=command, executable_sha256=executable_digest(command),
                                 prompt_variable=prompt.get_text() if routed else "",
                                 accepts_input=routed and accepts_input.get_active())
+            elif chosen_kind == ActionType.BROWSER:
+                profile = BrowserForm(**{key: field.get_text() for key, field in browser_fields.items()})
+                action = Action(identifier, name, entry, url, enabled.get_active(), kind=chosen_kind, browser=profile)
             else:
                 verb = method.get_active_id()
                 action = Action(identifier, name, entry, url, enabled.get_active(), kind=chosen_kind, method=verb,

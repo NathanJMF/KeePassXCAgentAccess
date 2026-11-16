@@ -78,7 +78,7 @@ def executable_digest(command):
 
 
 @contextmanager
-def syscall_filter(unix_sockets=False):
+def syscall_filter(unix_sockets=False, *, unix_socket_pairs=False):
     seccomp = ctypes.CDLL("libseccomp.so.2")
     seccomp.seccomp_init.argtypes = (ctypes.c_uint32,)
     seccomp.seccomp_init.restype = ctypes.c_void_p
@@ -101,7 +101,7 @@ def syscall_filter(unix_sockets=False):
             number = seccomp.seccomp_syscall_resolve_name(name.encode("ascii"))
             if number < 0:
                 raise OSError("Could not compile the command syscall filter.")
-            if name == "socket" and unix_sockets:
+            if (name == "socket" and unix_sockets) or (name == "socketpair" and unix_socket_pairs):
                 comparison = Compare(0, 1, socket.AF_UNIX, 0)  # SCMP_CMP_NE
                 result = seccomp.seccomp_rule_add_array(context, denied, number, 1, ctypes.byref(comparison))
             else:
@@ -151,7 +151,7 @@ def sandbox_arguments(command, seccomp, scope, *, relay_path=None, prompt_variab
     return [*arguments, "--", "/keeper/prompt", "--launch", prompt_variable, *command]
 
 
-def verify_scope_limits(pid, scope):
+def verify_scope_limits(pid, scope, *, memory_limit=_MEMORY_LIMIT, task_limit=_TASK_LIMIT):
     lines = Path(f"/proc/{pid}/cgroup").read_text().splitlines()
     relative = next((line[4:] for line in lines if line.startswith("0::/")), "")
     location = Path(relative)
@@ -163,7 +163,7 @@ def verify_scope_limits(pid, scope):
         swap = int((directory / "memory.swap.max").read_text())
         tasks = int((directory / "pids.max").read_text())
         quota, period = map(int, (directory / "cpu.max").read_text().split())
-        if not (0 < memory <= _MEMORY_LIMIT and swap == 0 and 0 < tasks <= _TASK_LIMIT and 0 < quota <= period):
+        if not (0 < memory <= memory_limit and swap == 0 and 0 < tasks <= task_limit and 0 < quota <= period):
             raise ValueError
     except (OSError, ValueError):
         raise OSError("The command scope's resource limits are unavailable.") from None

@@ -25,6 +25,7 @@ CREDENTIAL_REVIEW_ACTIONS = {
     "use_https": "Passwords - HTTPS Requests",
     "use_local_command": "Passwords - Local Commands",
     "use_networked_command": "Passwords - Networked Commands",
+    "use_browser": "Passwords - Browser Sign-ins",
 }
 
 REVIEW_ACTIONS = {
@@ -80,6 +81,7 @@ class ActionType(str, Enum):
     BEARER = "https_bearer_get"
     STDIN = "local_command_stdin"
     NETWORK_PROMPT = "network_command_prompt"
+    BROWSER = "browser_form_post"
 
     @property
     def review_operation(self):
@@ -87,6 +89,8 @@ class ActionType(str, Enum):
             return "use_local_command"
         if self == self.NETWORK_PROMPT:
             return "use_networked_command"
+        if self == self.BROWSER:
+            return "use_browser"
         return "use_https"
 
     @property
@@ -96,6 +100,7 @@ class ActionType(str, Enum):
             self.BEARER: "HTTPS Bearer Token",
             self.STDIN: "Isolated command stdin",
             self.NETWORK_PROMPT: "Networked command prompt",
+            self.BROWSER: "Browser Sign-in",
         }[self]
 
 
@@ -161,6 +166,31 @@ class Destination:
 
 
 @dataclass(frozen=True)
+class BrowserForm:
+    submit_url: str
+    form_id: str
+    username_field: str
+    password_field: str
+    success_id: str
+    success_url: str = ""
+
+    def __post_init__(self):
+        for value in (self.form_id, self.username_field, self.password_field, self.success_id):
+            if not isinstance(value, str) or not re.fullmatch(r"[A-Za-z0-9_][A-Za-z0-9_.:\[\]-]{0,79}", value):
+                raise ValueError("Enter short HTML IDs and input names.")
+        if self.username_field == self.password_field:
+            raise ValueError("The username and password inputs must have different names.")
+        object.__setattr__(self, "submit_url", Destination.parse(self.submit_url).url)
+        if self.success_url != "":
+            object.__setattr__(self, "success_url", Destination.parse(self.success_url).url)
+
+    @property
+    def description(self):
+        result = f"Form ID {self.form_id} · Username input {self.username_field} · Password input {self.password_field}"
+        return result + f" · Success element ID {self.success_id}"
+
+
+@dataclass(frozen=True)
 class Action:
     id: str
     name: str
@@ -174,6 +204,7 @@ class Action:
     accepts_input: bool = False
     method: str = "GET"
     request_json: str = ""
+    browser: BrowserForm | None = None
 
     @property
     def is_command(self):
@@ -195,10 +226,15 @@ class Action:
         if self.kind == ActionType.NETWORK_PROMPT:
             return (f"{self.url} · {self.prompt_variable} · {join(self.command)}"
                     + (" · read-only input" if self.accepts_input else ""))
+        if self.browser:
+            result = f"GET {self.url} · POST {self.browser.submit_url}"
+            return result + (f" · GET {self.browser.success_url}" if self.browser.success_url else "")
         return self.url if self.method == "GET" else f"{self.method} {self.url}"
 
     @property
     def request_summary(self):
+        if self.browser:
+            return self.browser.description
         if self.request_json:
             body = self.request_json.encode("utf-8")
             return f"Fixed JSON body · {len(body)} bytes · SHA-256 {sha256(body).hexdigest()}"
@@ -209,7 +245,7 @@ class Action:
     @property
     def scope(self):
         return (self.kind, self.url, self.id, self.command, self.executable_sha256,
-                self.prompt_variable, self.accepts_input, self.method, self.request_json)
+                self.prompt_variable, self.accepts_input, self.method, self.request_json, self.browser)
 
     def __post_init__(self):
         action_id(self.id)
@@ -223,6 +259,21 @@ class Action:
         object.__setattr__(self, "entry", uuid_text(self.entry))
         if type(self.accepts_input) is not bool:
             raise ValueError("Invalid input file setting.")
+        if kind == ActionType.BROWSER:
+            profile = BrowserForm(**self.browser) if isinstance(self.browser, dict) else self.browser
+            if not isinstance(profile, BrowserForm):
+                raise ValueError("Configure a browser form first.")
+            origin = Destination.parse(self.url)
+            for url in (profile.submit_url, profile.success_url):
+                if url:
+                    target = Destination.parse(url)
+                    if (target.host, target.port) != (origin.host, origin.port):
+                        raise ValueError("Login, submit, and success pages must share the same HTTPS origin.")
+            if self.method != "GET" or self.request_json:
+                raise ValueError("Browser sign-ins use their configured form settings.")
+            object.__setattr__(self, "browser", profile)
+        elif self.browser is not None:
+            raise ValueError("Choose Browser Sign-in to configure an HTML form.")
         if kind in (ActionType.STDIN, ActionType.NETWORK_PROMPT):
             if self.method != "GET" or self.request_json != "":
                 raise ValueError("Command actions do not accept HTTP method or body settings.")

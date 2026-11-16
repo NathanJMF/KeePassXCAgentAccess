@@ -3,7 +3,7 @@
 from contextlib import contextmanager
 import json
 import os
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from select import select
 import subprocess
@@ -185,9 +185,10 @@ class VaultSession:
         request = encode({"operation": "use_password", "entry": action.entry,
                           "url": action.url, "kind": action.kind, "command": action.command,
                           "method": action.method, "request_json": action.request_json,
+                          "browser": asdict(action.browser) if action.browser else None,
                           "executable_sha256": action.executable_sha256, "prompt_variable": action.prompt_variable,
                           "input_path": str(input_path) if input_path is not None else None})
-        timeout = 25 if action.prompt_variable else 12
+        timeout = 33 if action.browser else 25 if action.prompt_variable else 12
         with self._exchange(request, timeout) as read:
             response = decode(read())
             if response != {"ready": True}:

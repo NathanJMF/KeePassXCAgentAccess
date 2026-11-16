@@ -27,6 +27,8 @@ The HTTPS action adds an owner-selected method and optional fixed JSON object to
 Legacy HTTPS profiles retain their bodyless GET behavior. The former password-use review switch migrates to the same value for HTTPS requests, local commands, and networked commands.
 
 
-## Protected browser delivery
+## Browser sign-ins
 
-Future browser delivery needs private session state protected from agent-controlled tools and connectors, along with bound origins and verified navigation and form destinations. Raw remote output can contain credentials supplied by the request or created in the response.
+An owner configures a fixed HTML form and an exact same-origin HTTPS submission endpoint. An offline WebKit process in a private X display and bounded Linux namespace inspects the form. The process receives the HTML response and the form identifiers, disables website scripts, and returns bounded metadata. Keeper verifies the action and field schema, prepares the request inside the trusted vault worker, and checks authorization immediately before submitting it. Cookies remain in a temporary worker-only session.
+
+A successful result requires the owner-configured HTML marker. Keeper can follow a 302 or 303 once as a GET to the exact configured confirmation URL. It never forwards the original credential in a redirect. An unconfirmed post returns an uncertain outcome. Agent output and Activity contain only structured results and the configured scope. The worker discards the session after each attempt.

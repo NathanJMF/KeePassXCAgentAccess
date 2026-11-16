@@ -32,6 +32,7 @@ from keepassxc_agent_access.workspace_app import (
     ENTRY_FOLDER_COLUMN, ENTRY_ID_COLUMN, Gdk, WorkspaceApplication,
 )
 from keepassxc_agent_access.workspace_editor import edit_entry
+from keepassxc_agent_access.workspace_views import edit_binding
 from keepassxc_agent_access.keyring import SystemKeyring
 from tls_fixture import AUTHORIZATION, PASSWORD, USERNAME, tls_service
 
@@ -1326,6 +1327,32 @@ def main(root):
                 approve("bearer")
                 assert use("bearer", first) == {"outcome": "succeeded", "http_status": 200}
                 assert calls[-1] == ("/first", BEARER_AUTHORIZATION)
+
+                def configure_browser(dialog):
+                    widgets = {child.get_name(): child for child in descendants(dialog)}
+                    widgets["action-kind"].set_active_id(ActionType.BROWSER.value)
+                    fields = {
+                        "action-destination": url + "/sign-in",
+                        "browser-submit_url": url + "/session",
+                        "browser-form_id": "sign-in",
+                        "browser-username_field": "user",
+                        "browser-password_field": "password",
+                        "browser-success_id": "account-home",
+                        "browser-success_url": url + "/account",
+                    }
+                    for name, value in fields.items():
+                        field = widgets[name]
+                        assert field.get_visible()
+                        field.set_text(value)
+                    assert not widgets["action-method"].is_visible()
+                    dialog.response(Gtk.ResponseType.OK)
+
+                drive_dialog(lambda: edit_binding(app, first, first_entry, None), configure_browser)
+                browser = app.workspace.registrations[first].binding(first_entry, "health-check")
+                assert browser.action.kind is ActionType.BROWSER
+                assert browser.action.browser.success_id == "account-home"
+                assert browser.action.browser.submit_url == url + "/session"
+                app.workspace.remove_binding(first, first_entry, "health-check")
 
                 app.workspace.save_binding(first, replace(imported, url=url + "/changed"), "check")
                 assert use("alpha", first, expected=1) == denied
