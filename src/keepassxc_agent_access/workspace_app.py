@@ -1067,11 +1067,10 @@ class WorkspaceApplication(Gtk.Application):
             stack.add_titled(scroll, name, title)
             return rows
 
-        notifications = page("notifications", "Notifications", "preferences-system-notifications-symbolic")
-        self._settings_switch(self._settings_card(notifications), "Request Pop-Ups", self.review_popups.enabled,
-                              self._set_request_popups, "request-popups",
-                              "Open the review window when a request arrives.")
         approvals = page("auto-approve", "Auto Approve", "changes-prevent-symbolic")
+        self._settings_switch(self._settings_card(approvals), "Request Pop-Ups", self.review_popups.enabled,
+                              self._set_request_popups, "request-popups",
+                              "Show a review dialog when an agent request needs your decision.")
         self._settings_switch(
             self._settings_card(approvals), "Enable Auto Approve", not self.workspace.review_usage,
             self._set_usage_policy, "auto-approve-usage",
@@ -1095,7 +1094,7 @@ class WorkspaceApplication(Gtk.Application):
         self._updates_settings_page(self._settings_card(updates))
         broker = page("broker", "Broker Settings", "network-server-symbolic")
         self._broker_settings_page(self._settings_card(broker))
-        stack.set_visible_child_name("notifications")
+        stack.set_visible_child_name("auto-approve")
         return dialog
 
     def _token_auto_approval_settings(self, page):

@@ -149,15 +149,15 @@ def main(root):
                 assert divider.get_allocated_height() == area.get_allocated_height()
                 pages = next(widget for widget in descendants(dialog) if widget.get_name() == "keeper-settings-pages")
                 assert [pages.child_get_property(child, "title") for child in pages.get_children()] == [
-                    "Notifications", "Auto Approve", "Vaults", "Updates", "Broker Settings",
+                    "Auto Approve", "Vaults", "Updates", "Broker Settings",
                 ]
-                assert pages.get_visible_child_name() == "notifications"
+                assert pages.get_visible_child_name() == "auto-approve"
                 assert dialog.get_widget_for_response(Gtk.ResponseType.CLOSE) is None
                 pages.set_visible_child_name(page)
                 toggles = [widget for widget in descendants(pages.get_visible_child()) if isinstance(widget, Gtk.Switch)]
                 if page == "auto-approve":
                     assert [widget.get_name() for widget in toggles] == [
-                        "auto-approve-usage", *REVIEW_ACTIONS, "token-auto-approval-acknowledged",
+                        "request-popups", "auto-approve-usage", *REVIEW_ACTIONS, "token-auto-approval-acknowledged",
                         "auto_approve_tokens", "auto_approve_token_changes",
                     ]
                     acknowledgement = toggles[-3]
@@ -1234,7 +1234,7 @@ def main(root):
                             {"vault": second, "entry": nested_entry, "metadata": True}]
                 assert app.workspace.paused
                 app.set_agent_paused(False)
-                assert settings_switch("notifications", "request-popups")
+                assert settings_switch("auto-approve", "request-popups", label="Request Pop-Ups")
                 app.minimize_button.clicked()
                 assert not app.window.get_visible()
                 assert enroll("alpha", alpha) == enroll("alpha", alpha) == {"status": "pending"}
@@ -1245,7 +1245,7 @@ def main(root):
                 deny("review-paused", popup=True)
                 assert app.workspace.paused
                 app._present()
-                assert not settings_switch("notifications", "request-popups", False)
+                assert not settings_switch("auto-approve", "request-popups", False)
                 config = private / "desktop-notifications.json"
                 assert json.loads(config.read_text()) == {"desktop_notifications": False}
                 assert enroll("beta", beta) == {"status": "pending"}
@@ -1286,7 +1286,7 @@ def main(root):
                 deny("review")
                 assert app.workspace.paused
                 assert "unavailable for this token" in invoke("review", "vaults", "list", expected=1)
-                assert settings_switch("notifications", "request-popups", True)
+                assert settings_switch("auto-approve", "request-popups", True)
                 assert json.loads(config.read_text()) == {"desktop_notifications": True}
                 assert "paused" in invoke("alpha", "vaults", "list", expected=1)
                 approve("beta", second, popup=True, resume=True)
