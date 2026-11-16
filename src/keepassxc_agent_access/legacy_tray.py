@@ -73,6 +73,11 @@ def main():
     initialized, _ = Gtk.init_check()
     if not initialized:
         return
+
+    import cairo
+    gi.require_version("GdkX11", "3.0")
+    from gi.repository import Gdk, GdkX11
+
     icon = Gtk.StatusIcon()
     icon.set_title("Keeper")
     icon.set_name("Keeper")
@@ -85,13 +90,49 @@ def main():
         sys.stdout.buffer.write(event)
         sys.stdout.flush()
 
+    def shape_icon():
+        if not icon.is_embedded():
+            return GLib.SOURCE_REMOVE
+        window = GdkX11.X11Window.lookup_for_display(Gdk.Display.get_default(), icon.get_x11_window_id())
+        if window is None or window.get_visual().get_depth() == 32:
+            return GLib.SOURCE_REMOVE
+        tray = next((widget for widget in Gtk.Window.list_toplevels() if widget.get_window() == window), None)
+        if tray is None:
+            return GLib.SOURCE_REMOVE
+
+        # A legacy tray host may give GTK a window without an alpha channel.
+        # Use the same scaled icon surface GTK uses to paint the window.
+        image = tray.get_child()
+        surface = image.get_property("surface") if isinstance(image, Gtk.Image) else None
+        if surface is None:
+            return GLib.SOURCE_REMOVE
+        scale_x, scale_y = surface.get_device_scale()
+        width = round(surface.get_width() / scale_x)
+        height = round(surface.get_height() / scale_y)
+        mask = cairo.ImageSurface(cairo.FORMAT_ARGB32, width, height)
+        context = cairo.Context(mask)
+        context.set_source_surface(surface)
+        context.paint()
+        region = Gdk.cairo_region_create_from_surface(mask)
+        if not region.is_empty():
+            x = (window.get_width() - width) // 2
+            y = (window.get_height() - height) // 2
+            window.shape_combine_region(region, x, y)
+        return GLib.SOURCE_REMOVE
+
+    def size_changed(*_):
+        GLib.idle_add(shape_icon)
+        return False
+
     def set_icon(paused):
         name = PAUSED_ICON if paused else ACTIVE_ICON
         icon.set_from_file(str(ICON_DIRECTORY / f"{name}.png"))
         icon.set_tooltip_text("Keeper · " + ("Agent access paused" if paused else "Agent access active"))
+        GLib.idle_add(shape_icon)
 
     def embedded(*_):
         if icon.is_embedded():
+            GLib.idle_add(shape_icon)
             send(b"C")
         else:
             Gtk.main_quit()
@@ -113,6 +154,7 @@ def main():
     show.connect("activate", lambda *_: send(b"O"))
     icon.connect("popup-menu", lambda *_: menu.popup_at_pointer(None))
     icon.connect("notify::embedded", embedded)
+    icon.connect("size-changed", size_changed)
     set_icon(True)
     GLib.timeout_add(EMBED_TIMEOUT_MS, check_embedded)
     GLib.io_add_watch(sys.stdin, GLib.PRIORITY_DEFAULT, GLib.IO_IN | GLib.IO_HUP, update_state)
