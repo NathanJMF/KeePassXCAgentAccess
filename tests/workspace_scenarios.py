@@ -1522,7 +1522,9 @@ def main(root):
                 assert not table.row_expanded(token_summary.path)
                 assert table.expand_row(token_summary.path, False)
                 pending = activity_leaf(token_events[-1]["id"])
-                check_child_indentation(table, token_summary, pending)
+                for child in token_summary.iterchildren():
+                    assert not child.model.iter_has_child(child.iter)
+                    check_child_indentation(table, token_summary, child)
                 action_column = table.get_column(view.ACTION)
                 _, action_icon, action_text = action_column.get_cells()
                 action_column.cell_set_cell_data(pending.model, pending.iter, False, False)
@@ -1530,8 +1532,16 @@ def main(root):
                 assert action_text.get_property("text") == "Request token"
                 wait_for_paint(table)
                 outcome_column = table.get_column(view.OUTCOME)
-                outcome_column.cell_set_cell_data(pending.model, pending.iter, False, False)
                 outcome_indent, outcome_icon, outcome_text = outcome_column.get_cells()
+                disabled_event = activity_leaf(token_events[2]["id"])
+                for event, label, icon in (
+                    (token_summary, "Removed", "user-trash-symbolic"),
+                    (disabled_event, "Disabled", "action-unavailable-symbolic"),
+                ):
+                    outcome_column.cell_set_cell_data(event.model, event.iter, False, False)
+                    assert outcome_icon.get_property("icon-name") == icon
+                    assert outcome_text.get_property("text") == label
+                outcome_column.cell_set_cell_data(pending.model, pending.iter, False, False)
                 assert outcome_icon.get_property("icon-name") == "appointment-soon-symbolic"
                 assert outcome_text.get_property("text") == "Pending approval"
                 required = sum(cell.get_preferred_width(table)[1]

@@ -193,12 +193,12 @@ def pane_table(model, titles, widths, *, lead_icon=None, status=None, expand_col
 
 
 def _indent_cell(_column, spacer, model, row, table):
-    depth = model.iter_depth(row)
-    spacer.set_visible(depth > 0)
-    if depth:
-        # Match GTK 3's native indentation in the expander column.
+    is_child = model.iter_parent(row) is not None
+    spacer.set_visible(is_child)
+    if is_child:
+        # Match one level of GTK 3 indentation in the expander column.
         step = table.style_get_property("expander-size") + table.style_get_property("horizontal-separator") // 2
-        spacer.set_fixed_size(depth * (step + table.get_level_indentation()), 0)
+        spacer.set_fixed_size(step + table.get_level_indentation(), 0)
 
 
 def _status_icon(_column, cell, model, row, status):
@@ -237,6 +237,8 @@ ACTIVITY_STATES = {
     "Failed": ("dialog-error-symbolic", "keeper_failure"),
     "Denied": ("action-unavailable-symbolic", "keeper_failure"),
     "Paused": ("media-playback-pause-symbolic", "keeper_warning"),
+    "Disabled": ("action-unavailable-symbolic", "keeper_muted"),
+    "Removed": ("user-trash-symbolic", "keeper_muted"),
     "Revoked": ("action-unavailable-symbolic", "keeper_muted"),
 }
 
