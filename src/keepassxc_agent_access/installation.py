@@ -138,7 +138,7 @@ def stop_application():
     deadline = monotonic() + 8
     while call("NameHasOwner"):
         if monotonic() >= deadline:
-            raise ValueError("Quit Keeper from the system tray, then try again.")
+            raise ValueError("Open Keeper and press Ctrl+Q, then try again.")
         sleep(.1)
 
 

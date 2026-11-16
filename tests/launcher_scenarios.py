@@ -58,7 +58,10 @@ def menu():
                  GLib.Variant("(ss)", ("org.kde.StatusNotifierItem", "Menu")))
     _, layout = call(name, path, "com.canonical.dbusmenu", "GetLayout",
                      GLib.Variant("(iias)", (0, -1, ["label", "enabled", "visible"])))
-    return name, path, {props["label"]: (item, props) for item, props, _ in layout[2] if "label" in props}
+    assert len(layout[2]) == 1
+    item, props, children = layout[2][0]
+    assert not children
+    return name, path, {props["label"]: (item, props)}
 
 
 def row(label):
@@ -70,7 +73,7 @@ def row(label):
 
 def tray_labels():
     _, _, rows = menu()
-    return tuple(label for label, (_, props) in rows.items() if props.get("visible", True))
+    return tuple(rows)
 
 
 def click(label):
@@ -140,16 +143,22 @@ def main(root):
     assert launcher.launch([], None)
     second = wait_for(app_pid)
     try:
-        wait_for(lambda: tray_labels() == ("Open Keeper", "Resume Agent Access", "Quit"))
+        wait_for(lambda: tray_labels() == ("Open Keeper",))
+        assert call(APP, "/" + APP.replace(".", "/"), "org.gtk.Actions", "List") == ([],)
         wait_for(endpoint.exists)
         subprocess.run(["setfacl", "-m", f"u:{uid}:rw", endpoint], check=True)
         result = invoke(root, endpoint)
         assert result.returncode != 0 and not result.stdout
         assert b"approved access token" in result.stderr
-        click("Resume Agent Access")
-        wait_for(lambda: tray_labels() == ("Open Keeper", "Pause Agent Access", "Quit"))
-        click("Pause Agent Access")
-        wait_for(lambda: tray_labels() == ("Open Keeper", "Resume Agent Access", "Quit"))
+        before = access.path.read_bytes()
+        click("Open Keeper")
+        assert tray_labels() == ("Open Keeper",)
+        assert app_pid() == second
+        assert access.path.read_bytes() == before
+        icon_name = call(menu()[0], "/org/ayatana/NotificationItem/keepassxc_agent_access",
+                         "org.freedesktop.DBus.Properties", "Get",
+                         GLib.Variant("(ss)", ("org.kde.StatusNotifierItem", "IconName")))[0]
+        assert icon_name == "keeper-agent-access-paused"
     finally:
         stop(second)
     assert not endpoint.exists()
@@ -169,7 +178,7 @@ def main(root):
     subprocess.run(["./uninstall"], check=True, capture_output=True)
     subprocess.run(["./install", "--no-launch"], check=True, capture_output=True)
     assert (managed / "run-tray").exists()
-    print("Launcher scenario passed: managed install, GNOME launch, single instance, removal, reinstall and preserved data",
+    print("Launcher scenario passed: managed install, GNOME launch, single instance, open-only tray, removal, reinstall and preserved data",
           flush=True)
 
 

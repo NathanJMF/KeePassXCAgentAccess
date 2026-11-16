@@ -198,26 +198,13 @@ class VaultApplication(Gtk.Application):
             AyatanaAppIndicator3.IndicatorCategory.APPLICATION_STATUS,
         )
         self.menu = Gtk.Menu()
-        self.menu_items = {}
-        for key, label, callback in (
-            ("status", "Setup required", None),
-            ("setup", "Setup", self._configure_dialog),
-            ("unlock", "Unlock", self._unlock),
-            ("lock", "Lock now", self._lock),
-            ("enable_listing", "Enable agent access", self._enable_listing),
-            ("stop_listing", "Stop agent access", self._stop_listing),
-            ("pending", "Pending requests", self._show_pending),
-            ("activity", "Activity", lambda *_: self._owner_view("activity")),
-            ("settings", "Settings", self._present),
-            ("quit", "Quit", self._quit),
-        ):
-            item = Gtk.MenuItem(label=label)
-            if callback:
-                item.connect("activate", callback)
-            else:
-                item.set_sensitive(False)
-            self.menu.append(item)
-            self.menu_items[key] = item
+        status = Gtk.MenuItem(label="Setup required")
+        status.set_sensitive(False)
+        show = Gtk.MenuItem(label=f"Open {APP_TITLE}")
+        show.connect("activate", self._present)
+        self.menu.append(status)
+        self.menu.append(show)
+        self.menu_items = {"status": status, "open": show}
         self.menu.show_all()
         self.indicator.set_menu(self.menu)
         self.indicator.connect("connection-changed", self._tray_changed)
@@ -292,10 +279,6 @@ class VaultApplication(Gtk.Application):
             if listing:
                 tray_status += " · Agent access enabled"
             self.menu_items["status"].set_label(tray_status)
-            for key in ("setup", "unlock", "lock", "enable_listing", "stop_listing"):
-                visible = target is None if key == "setup" else available[key]
-                self.menu_items[key].set_visible(visible)
-                self.menu_items[key].set_sensitive(not self.busy or key in ("lock", "stop_listing"))
 
     def save_access_settings(self, settings):
         config = settings.broker_config(self.fallback_config)

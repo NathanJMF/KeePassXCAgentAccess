@@ -80,13 +80,13 @@ def invoke(root, endpoint):
     )
 
 
-def verify_isolation(target):
+def verify_isolation(target, *owner_records):
     socket_path = Path(os.environ["XDG_RUNTIME_DIR"]) / os.environ["WAYLAND_DISPLAY"]
     with (REPO / "tests/isolation_probe.py").open() as probe:
         subprocess.run(
             [*NAMESPACE, "/usr/bin/python3", "-", str(target.database), str(target.key_file),
              os.environ["DBUS_SESSION_BUS_ADDRESS"], str(socket_path), str(os.getpid()),
-             str(os.geteuid())],
+             str(os.geteuid()), *map(str, owner_records)],
             stdin=probe, cwd="/tmp", check=True, timeout=15,
         )
 
@@ -114,13 +114,13 @@ def main(root, hold):
         assert {row["id"]: row for row in actual} == {row["id"]: row for row in expected}
 
     def enable():
-        app.menu_items["enable_listing"].activate()
+        app.buttons["enable_listing"].clicked()
         assert app.broker.enabled
         assert "Agent access enabled" in app.menu_items["status"].get_label()
         subprocess.run(["setfacl", "-m", f"u:{uid}:rw", endpoint], check=True)
 
     def unlock():
-        app.menu_items["unlock"].activate()
+        app.buttons["unlock"].clicked()
         wait_for(lambda: not app.busy, "test vault did not unlock")
         assert app.status.get_text() == "Unlocked"
         assert not app.broker.enabled
@@ -130,7 +130,7 @@ def main(root, hold):
         if not (private / "revoke").exists():
             return GLib.SOURCE_CONTINUE
         try:
-            app.menu_items["stop_listing"].activate()
+            app.buttons["stop_listing"].clicked()
             unavailable()
             (private / "revoked").touch()
             print("Broker scenario passed: skill trial revocation", flush=True)
@@ -161,7 +161,7 @@ def main(root, hold):
                 keep_running = True
                 return GLib.SOURCE_REMOVE
 
-            app.menu_items["stop_listing"].activate()
+            app.buttons["stop_listing"].clicked()
             unavailable()
             enable()
             set_screen_active(True)

@@ -19,7 +19,7 @@ On Ubuntu GNOME, clone this repository and run one of these commands from the ch
 
 ## Agent Access
 
-Use a tools-only agent or isolate its other tools from your desktop session and Keeper installation. The bundled runner isolates the Keeper connection. See [agent isolation](docs/guide.md#isolate-the-agent-runtime) for setup boundaries.
+**Security boundary.** Keep every agent tool outside your desktop owner account and session. The bundled runner isolates the Keeper connection. Agents with owner-session shell or desktop privileges can act with the owner’s authority. Use a tools-only agent or isolate its remaining capabilities and escalation paths. See [agent isolation](docs/guide.md#isolate-the-agent-runtime).
 
 Expand a token to see which vaults, groups, and entries it covers. Open its details to review requested permissions, or disable or remove a token you previously approved. Use **Pause Agent Access** to stop agents from using their tokens.
 

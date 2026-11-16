@@ -73,7 +73,10 @@ def set_screen_active(enabled):
 
 def configure(app, root, database, key_file):
     assert app.status.get_text() == "Setup required"
-    assert app.menu_items["setup"].get_visible()
+    assert app.buttons["setup"].get_visible()
+    status, opening = app.menu.get_children()
+    assert status.get_label() == "Setup required" and not status.get_sensitive()
+    assert opening.get_label() == "Open Keeper"
     key_file.write_bytes(bytes(range(32)))
     create_database(database, ORIGINAL, str(key_file))
     legacy = root / "legacy-input.txt"
@@ -100,8 +103,8 @@ def configure(app, root, database, key_file):
 def verify(app, root, database, key_file):
     assert not (root / "legacy-input.txt").exists()
     assert app.status.get_text() == "Locked"
-    assert app.menu_items["unlock"].get_visible()
-    app.menu_items["unlock"].activate()
+    assert app.buttons["unlock"].get_visible()
+    app.buttons["unlock"].clicked()
     wait_for(lambda: not app.busy, "saved password unlock did not finish")
     assert app.status.get_text() == "Unlocked", app.notice.get_text()
     assert app.menu_items["status"].get_label() == "Unlocked · OS keyring"
@@ -109,16 +112,16 @@ def verify(app, root, database, key_file):
     if os.environ.get("TRAY_TEST_ISOLATION") == "1":
         check_isolation(database, key_file)
 
-    app.menu_items["lock"].activate()
+    app.buttons["lock"].clicked()
     assert app.status.get_text() == "Locked"
-    app.menu_items["settings"].activate()
+    app.menu_items["open"].activate()
     assert app.window.get_visible()
     app.window.close()
     wait_for(lambda: not app.window.get_visible(), "the window did not close to the tray")
-    app.menu_items["settings"].activate()
+    app.menu_items["open"].activate()
     assert app.window.get_visible()
 
-    app.menu_items["unlock"].activate()
+    app.buttons["unlock"].clicked()
     wait_for(lambda: not app.busy, "second unlock did not finish")
     set_screen_active(True)
     wait_for(lambda: app.status.get_text() == "Locked", "GNOME session lock did not lock the vault")
@@ -135,7 +138,7 @@ def verify(app, root, database, key_file):
         return open_vault(target, password, attempt)
 
     app.setup.controller._opener = delayed
-    app.menu_items["unlock"].activate()
+    app.buttons["unlock"].clicked()
     wait_for(started.is_set, "test unlock did not start")
     set_screen_active(True)
     wait_for(lambda: not app.busy, "in-flight unlock did not stop when the desktop locked")
@@ -164,7 +167,7 @@ def check_isolation(database, key_file):
 
 def recover(app, root, _database, _key_file):
     assert app.status.get_text() == "Locked"
-    app.menu_items["unlock"].activate()
+    app.buttons["unlock"].clicked()
     wait_for(lambda: not app.busy, "invalid saved unlock did not finish")
     assert app.status.get_text() == "Locked"
     assert "rejected" in app.notice.get_text()

@@ -992,7 +992,6 @@ def main(root):
                 assert app.workspace.registrations[first].item == original_item
                 assert app.broker.enabled and endpoint.exists()
                 subprocess.run(["setfacl", "-m", f"u:{uid}:rw", endpoint], check=True)
-                verify_isolation(target)
                 assert "token is required" in invoke(None, "entries", "list", expected=1)
                 wait_for(lambda: not app.busy and app.workspace.session(first), "Saved vault did not unlock at startup")
                 assert app.vault_lock_button.get_accessible().get_name() == "Lock All Vaults"
@@ -1203,6 +1202,7 @@ def main(root):
                 assert settings_switch("notifications", "request-popups")
                 app.window.hide()
                 assert enroll("alpha", alpha) == enroll("alpha", alpha) == {"status": "pending"}
+                verify_isolation(target, old_access.path, app.workspace.path, app.grants.path)
                 approve("alpha", popup=True)
                 app.set_agent_paused(True)
                 assert enroll("review-paused", alpha) == {"status": "pending"}
@@ -1642,7 +1642,7 @@ def main(root):
                 assert invoke("beta", "entries", "list")["entries"] == fixture[2:]
                 assert app.pause_button.get_accessible().get_name() == "Pause Agent Access"
                 pause_size = check_toolbar_button(app.pause_button)
-                app.tray_items["pause"].activate()
+                app.pause_button.clicked()
                 assert app.pause_button.get_accessible().get_name() == "Resume Agent Access"
                 assert check_toolbar_button(app.pause_button) == pause_size
                 assert app.workspace.paused and app.workspace.session(second)
@@ -1656,7 +1656,7 @@ def main(root):
                 assert any(row["outcome"] == "Succeeded" for row in same_scope[1:])
                 app.activity_view.refresh()
                 activity_group(same_scope, "Paused")
-                app.tray_items["pause"].activate()
+                app.pause_button.clicked()
                 assert app.indicator.get_icon() == "keeper-agent-access-active"
                 assert not settings_switch("auto-approve", "auto_approve_token_changes",
                                            label="Access Tokens - Update Permissions")

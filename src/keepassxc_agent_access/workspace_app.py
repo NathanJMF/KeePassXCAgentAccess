@@ -336,6 +336,9 @@ class WorkspaceApplication(Gtk.Application):
         self.empty_area = area
 
     def _keyboard(self, _window, event):
+        if event.state & Gdk.ModifierType.CONTROL_MASK and event.keyval == Gdk.KEY_q:
+            self._quit()
+            return True
         if (event.state & Gtk.accelerator_get_default_mod_mask() == Gdk.ModifierType.CONTROL_MASK
                 and event.keyval in (Gdk.KEY_f, Gdk.KEY_F)
                 and self.stack.get_visible_child_name() == "browse" and self.entry_search.get_visible()):
@@ -355,16 +358,11 @@ class WorkspaceApplication(Gtk.Application):
         )
         self.indicator.set_title(APP_TITLE)
         self.menu = Gtk.Menu()
-        self.tray_items = {}
-        for key, name, callback in (
-            ("open", f"Open {APP_TITLE}", self._present),
-            ("pause", "Resume Agent Access", self._toggle_pause),
-            ("quit", "Quit", self._quit),
-        ):
-            item = Gtk.MenuItem(label=name)
-            item.connect("activate", callback)
-            self.menu.append(item)
-            self.tray_items[key] = item
+        # AppIndicator exports activation over the owner session bus.
+        # Keep settings and authorization controls in the desktop window.
+        show = Gtk.MenuItem(label=f"Open {APP_TITLE}")
+        show.connect("activate", self._present)
+        self.menu.append(show)
         self.menu.show_all()
         self.indicator.set_menu(self.menu)
         self.indicator.connect("connection-changed", self._tray_status)
@@ -420,8 +418,6 @@ class WorkspaceApplication(Gtk.Application):
             access_label = f"Access ({count})" if count else "Access"
             self.access_button.set_label(access_label)
             if self.indicator:
-                self.tray_items["pause"].set_label(pause_label)
-                self.tray_items["pause"].set_sensitive(self.pause_button.get_sensitive())
                 self.indicator.set_icon_full(
                     TRAY_PAUSED_ICON if paused else TRAY_ACTIVE_ICON,
                     "Agent access paused" if paused else "Agent access active",

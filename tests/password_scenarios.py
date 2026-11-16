@@ -79,12 +79,12 @@ def main(root):
             return json.loads(process.stdout) if process.stdout else None
 
         def unlock():
-            app.menu_items["unlock"].activate()
+            app.buttons["unlock"].clicked()
             wait_for(lambda: not app.busy, "vault unlock failed")
             assert app.status.get_text() == "Unlocked", app.notice.get_text()
 
         def enable():
-            app.menu_items["enable_listing"].activate()
+            app.buttons["enable_listing"].clicked()
             assert app.broker.enabled
             subprocess.run(["setfacl", "-m", f"u:{uid}:rw", endpoint], check=True)
 
@@ -145,7 +145,7 @@ def main(root):
 
                 reviewed = use(1, "two")
                 popup = pending(reviewed)
-                app.menu_items["pending"].activate()
+                app._show_pending()
                 assert app.approval_ui.dialog is popup
                 assert any(isinstance(item, Gtk.Label) and url in item.get_text()
                            for item in descendants(popup))
@@ -188,7 +188,7 @@ def main(root):
                 wait_for(lambda: app.approval_ui.dialog is None, "Stale prompt did not close")
                 revoked = use(1, "two")
                 pending(revoked)
-                app.menu_items["stop_listing"].activate()
+                app.buttons["stop_listing"].clicked()
                 assert done(revoked, 1) is None
                 assert not endpoint.exists()
                 enable()
@@ -212,7 +212,7 @@ def main(root):
                 assert all(header == AUTHORIZATION for _, header in calls)
                 assert PASSWORD.encode() not in app.activity_store.path.read_bytes()
                 assert AUTHORIZATION.encode() not in app.activity_store.path.read_bytes()
-                app.menu_items["activity"].activate()
+                app.buttons["activity"].clicked()
                 tree = next(child for child in descendants(app.owner_views.dialog) if isinstance(child, Gtk.TreeView))
                 assert [col.get_title() for col in tree.get_columns()] == ["Time", "Model", "Chat", "Action", "Outcome"]
                 assert len(tree.get_model()) == len(rows)

@@ -104,6 +104,19 @@ class ScopedBrokerTests(unittest.TestCase):
         self.assert_code("paused", "list_entries", vault=self.vaults[0])
         self.assertEqual(len(self.activity.rows(action="Request token")), 1)
 
+    def test_agent_token_cannot_control_owner_settings_or_approvals(self):
+        item = {"vault": self.vaults[0], "entry": self.entry, "metadata": True}
+        self.approve([item])
+        self.enroll([item], index=1)
+        self.workspace.pause()
+        settings = self.workspace.legacy_access.read()
+        for operation in ("resume_agent_access", "save_settings", "set_auto_approve", "approve_access", "approve_edit"):
+            with self.subTest(operation=operation):
+                self.assert_code("invalid_request", operation)
+        self.assertTrue(self.workspace.paused)
+        self.assertEqual(self.workspace.legacy_access.read(), settings)
+        self.assertEqual(self.invoke("access_status", 1), {"status": "pending"})
+
     def test_rate_limit_bounds_denied_audit_without_blocking_active_agents(self):
         item = {"vault": self.vaults[0], "entry": self.entry, "metadata": True}
         with patch("keepassxc_agent_access.scoped_broker.monotonic", return_value=0):

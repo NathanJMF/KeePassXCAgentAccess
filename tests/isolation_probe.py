@@ -28,7 +28,11 @@ def connect(path):
         stream.connect(path)
 
 
-def main(database, key_file, bus, wayland, pid, owner):
+def open_for_write(path):
+    os.close(os.open(path, os.O_WRONLY))
+
+
+def main(database, key_file, bus, wayland, pid, owner, *owner_records):
     with open("/proc/self/uid_map", encoding="ascii") as stream:
         maps = [tuple(map(int, line.split())) for line in stream]
     host_uid = next(host + os.geteuid() - guest for guest, host, count in maps
@@ -38,6 +42,10 @@ def main(database, key_file, bus, wayland, pid, owner):
     must_deny("key file", lambda: read_one(key_file))
     must_deny("owner process memory", lambda: read_one(f"/proc/{pid}/mem"))
     must_deny("desktop control socket", lambda: connect(wayland))
+    for label, path in zip(("owner access settings", "owner vault registry", "owner approval records"),
+                           owner_records, strict=bool(owner_records)):
+        must_deny(f"reading {label}", lambda: read_one(path))
+        must_deny(f"opening {label} for writing", lambda: open_for_write(path))
 
     for label, name, method, path in (
         ("owner session bus", "org.freedesktop.DBus",

@@ -44,7 +44,7 @@ Broker operations that address an entry or group SHALL use its registered vault 
 
 ### Requirement: Globally pause agent access
 
-The main window and tray SHALL offer a global agent lock. Locking SHALL suspend vault discovery and protected operations for all tokens and invalidate pending deliveries. The owner SHALL be able to keep browsing and review enrollment while agent access is locked. Resuming SHALL use the existing active scopes and vault states. Startup and desktop lock SHALL engage the global agent lock.
+The main window SHALL offer a global agent lock. Locking SHALL suspend vault discovery and protected operations for all tokens and invalidate pending deliveries. The owner SHALL be able to keep browsing and review enrollment while agent access is locked. Resuming SHALL use the existing active scopes and vault states. Startup and desktop lock SHALL engage the global agent lock.
 
 #### Scenario: Pause while a request is in flight
 - **WHEN** the owner engages the global lock before a protected operation is dispatched or metadata is released
@@ -53,6 +53,14 @@ The main window and tray SHALL offer a global agent lock. Locking SHALL suspend 
 #### Scenario: Resume with a locked vault or a disabled token
 - **WHEN** the owner resumes agent access
 - **THEN** a disabled token remains disabled and any separately locked vault remains locked
+
+### Requirement: Keep owner controls in the owner desktop window
+
+The exported tray menu SHALL allow opening the Keeper window only. Access policy, settings, approval decisions, and application shutdown controls SHALL live in the desktop window. The agent deployment SHALL keep shell, filesystem, desktop, and escalation capabilities outside the owner's account and session.
+
+#### Scenario: A session-bus caller opens Keeper from the tray
+- **WHEN** the caller invokes the exported tray menu item
+- **THEN** Keeper opens its window and preserves the current access state, settings, and approvals
 
 ### Requirement: Recheck token scope before every protected delivery
 
