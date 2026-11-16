@@ -74,7 +74,7 @@ def _request_details(container, app, record, preview):
     container.pack_start(details, False, False, 0)
 
 
-def review_edit(app, record):
+def review_edit(app, record, *, standalone=False):
     if app.desktop.locked or app.busy or record.status != "pending":
         return
     operation = record.request.operation
@@ -172,7 +172,7 @@ def review_edit(app, record):
     )
     update()
     try:
-        response = app.run_dialog(dialog)
+        response = app.run_dialog(dialog, standalone=standalone)
         value = owner_password.get_text() if owner_password is not None and response == Gtk.ResponseType.ACCEPT else None
     finally:
         for widget, signal in signals:

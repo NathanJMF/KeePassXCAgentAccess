@@ -582,7 +582,7 @@ class AccessView(Gtk.Box):
             [(self.REMOVE, lambda: self._update_token(identifier, "removed"))],
         ]
 
-    def open_record(self, identifier, kind, *, pending_only=False):
+    def open_record(self, identifier, kind, *, automatic=False):
         if self.app.desktop.locked:
             return
         if kind == "usage":
@@ -590,7 +590,7 @@ class AccessView(Gtk.Box):
                            if str(request.id) == identifier), None)
             if ticket:
                 self.app.review_popups.mark_reviewed(kind, identifier)
-                self._review_usage(ticket)
+                self._review_usage(ticket, standalone=automatic)
             return
         if kind == "edit":
             token_id, _, request_id = identifier.partition("/")
@@ -598,23 +598,23 @@ class AccessView(Gtk.Box):
                            if edit.token_id == token_id and edit.id == request_id), None)
             if record is not None and record.status == "pending" and not self.app.busy:
                 self.app.review_popups.mark_reviewed(kind, identifier)
-                review_edit(self.app, record)
+                review_edit(self.app, record, standalone=automatic)
             return
         grant_id, _, change_id = identifier.partition("/")
         grant = self.app.grants.records.get(grant_id) if self.app.grants else None
         if kind == "grant-change":
             if grant and grant.pending_change and grant.pending_change.id == change_id:
                 self.app.review_popups.mark_reviewed(kind, identifier)
-                self._review(grant, grant.pending_change)
+                self._review(grant, grant.pending_change, standalone=automatic)
             return
         if grant:
             if grant.status == "pending":
                 self.app.review_popups.mark_reviewed(kind, identifier)
-                self._review(grant)
-            elif not pending_only:
+                self._review(grant, standalone=automatic)
+            elif not automatic:
                 self._manage(grant)
 
-    def _review_usage(self, ticket):
+    def _review_usage(self, ticket, *, standalone=False):
         queue = self.app.usage_approvals
         dialog, body = _dialog(self.app, "Review Agent Usage", 620, -1)
         dialog.set_name("keeper-access-review")
@@ -647,14 +647,14 @@ class AccessView(Gtk.Box):
 
         watch = GLib.timeout_add(200, check_pending)
         try:
-            response = self.app.run_dialog(dialog)
+            response = self.app.run_dialog(dialog, standalone=standalone)
         finally:
             GLib.source_remove(watch)
         if response in (Gtk.ResponseType.ACCEPT, Gtk.ResponseType.REJECT):
             queue.resolve(ticket.id, response == Gtk.ResponseType.ACCEPT)
             self.app._refresh()
 
-    def _review(self, grant, change=None):
+    def _review(self, grant, change=None, *, standalone=False):
         request = change or grant
         title = "Review Token Permission Change" if change else "Review Access Request"
         dialog, body = _dialog(self.app, title, 620, -1)
@@ -741,7 +741,7 @@ class AccessView(Gtk.Box):
 
         watch = GLib.timeout_add(250, changed)
         try:
-            response = self.app.run_dialog(dialog)
+            response = self.app.run_dialog(dialog, standalone=standalone)
         finally:
             GLib.source_remove(watch)
         change_id = change.id if change else None

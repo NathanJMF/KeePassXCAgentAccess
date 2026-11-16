@@ -266,6 +266,19 @@ def main(root):
             if failures:
                 raise failures[0]
 
+        def drive_request_popup(callback):
+            visible = app.window.get_visible()
+
+            def check(dialog):
+                assert dialog.get_mapped()
+                assert dialog.get_transient_for() is None
+                assert app.window.get_visible() == visible
+                callback(dialog)
+
+            with patch.object(app.window, "present", side_effect=AssertionError("Request raised the Keeper window")):
+                drive_dialog(app._refresh, check, opens_async=True)
+            assert app.window.get_visible() == visible
+
         def access_root(profile):
             view = app.access_view
             return next(row for row in view.table.get_model() if row[view.RECORD_ID] == token_ids[profile])
@@ -280,7 +293,8 @@ def main(root):
         def approve(profile, vault=None, *, popup=False, resume=False):
             def confirm(dialog):
                 assert dialog.get_title() == "Review Access Request"
-                assert app.window.get_visible()
+                if not popup:
+                    assert dialog.get_transient_for() == app.window
                 labels = [child for child in descendants(dialog) if isinstance(child, Gtk.Label)]
                 expander, = [child for child in descendants(dialog) if isinstance(child, Gtk.Expander)]
                 assert not expander.get_expanded()
@@ -330,7 +344,7 @@ def main(root):
                 assert_keypress_ignored(dialog, profile)
                 click_decision(approve_button)
             if popup:
-                drive_dialog(app._refresh, confirm, opens_async=True)
+                drive_request_popup(confirm)
             else:
                 drive_dialog(access_row(profile), confirm)
 
@@ -344,7 +358,7 @@ def main(root):
 
             paused = app.workspace.paused
             if popup:
-                drive_dialog(app._refresh, reject, opens_async=True)
+                drive_request_popup(reject)
             else:
                 drive_dialog(access_row(profile), reject)
             assert app.workspace.paused == paused
@@ -876,7 +890,7 @@ def main(root):
                         dialog.response(response)
 
                 if popup:
-                    drive_dialog(app._refresh, check, opens_async=True)
+                    drive_request_popup(check)
                 else:
                     drive_dialog(lambda: table.row_activated(path, table.get_column(0)), check)
                 wait_for(lambda: not app.busy, "Approved agent edit did not finish")
@@ -1221,7 +1235,8 @@ def main(root):
                 assert app.workspace.paused
                 app.set_agent_paused(False)
                 assert settings_switch("notifications", "request-popups")
-                app.window.hide()
+                app.minimize_button.clicked()
+                assert not app.window.get_visible()
                 assert enroll("alpha", alpha) == enroll("alpha", alpha) == {"status": "pending"}
                 verify_isolation(target, old_access.path, app.workspace.path, app.grants.path)
                 approve("alpha", popup=True)
@@ -1229,6 +1244,7 @@ def main(root):
                 assert enroll("review-paused", alpha) == {"status": "pending"}
                 deny("review-paused", popup=True)
                 assert app.workspace.paused
+                app._present()
                 assert not settings_switch("notifications", "request-popups", False)
                 config = private / "desktop-notifications.json"
                 assert json.loads(config.read_text()) == {"desktop_notifications": False}
@@ -1657,7 +1673,7 @@ def main(root):
                 assert old_access.read().review_actions == {"list_entries"}
                 with ThreadPoolExecutor() as pool:
                     reviewed = pool.submit(invoke, "beta", "entries", "list")
-                    drive_dialog(app._refresh, review_usage, opens_async=True)
+                    drive_request_popup(review_usage)
                     assert reviewed.result(timeout=4)["entries"] == fixture[2:]
                 assert settings_switch("auto-approve", "list_entries", True)
                 assert invoke("beta", "entries", "list")["entries"] == fixture[2:]
@@ -1717,7 +1733,7 @@ def main(root):
                     assert_keypress_ignored(dialog, "auto-token", permission_change=True)
                     click_decision(dialog.get_widget_for_response(Gtk.ResponseType.ACCEPT))
 
-                drive_dialog(app._refresh, approve_permission_change, opens_async=True)
+                drive_request_popup(approve_permission_change)
                 assert invoke("auto-token", "access", "request", request=change) == {"status": "active"}
                 assert invoke("auto-token", "entries", "list", "--vault", second)["entries"][0]["id"] == nested_entry
                 assert settings_switch("auto-approve", "auto_approve_token_changes", True)

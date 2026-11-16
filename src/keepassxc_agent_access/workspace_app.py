@@ -530,8 +530,7 @@ class WorkspaceApplication(Gtk.Application):
         if not self._can_open_request_popup() or request != self.review_popups.next_request(self._review_requests()):
             return GLib.SOURCE_REMOVE
         kind, identifier = request
-        self._present()
-        self.access_view.open_record(identifier, kind, pending_only=True)
+        self.access_view.open_record(identifier, kind, automatic=True)
         return GLib.SOURCE_REMOVE
 
     def pending_edits(self):
@@ -785,13 +784,19 @@ class WorkspaceApplication(Gtk.Application):
             if identifier in self.entry_rows:
                 entry_details(self, self.selection[0], self.entry_rows[identifier])
 
-    def run_dialog(self, dialog):
+    def run_dialog(self, dialog, *, standalone=False):
         if self.desktop.locked or self.exiting:
             dialog.destroy()
             return Gtk.ResponseType.CANCEL
+        if standalone:
+            dialog.set_transient_for(None)
+            dialog.set_destroy_with_parent(False)
+            dialog.set_position(Gtk.WindowPosition.CENTER)
         previous = self.dialog
         self.dialog = dialog
         dialog.show_all()
+        if standalone:
+            dialog.present()
         try:
             return dialog.run()
         finally:
