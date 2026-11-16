@@ -172,6 +172,15 @@ class WorkspaceApplication(Gtk.Application):
 
     def _build_header(self):
         header = styled(Gtk.HeaderBar(title=APP_TITLE, show_close_button=True), "keeper-header")
+        header.set_decoration_layout(":maximize,close")
+        self.minimize_button = styled(Gtk.Button(valign=Gtk.Align.CENTER), "titlebutton", "minimize")
+        self.minimize_button.set_image(
+            Gtk.Image.new_from_icon_name("window-minimize-symbolic", Gtk.IconSize.MENU)
+        )
+        self.minimize_button.set_tooltip_text("Minimize")
+        self.minimize_button.get_accessible().set_name("Minimize")
+        self.minimize_button.connect("clicked", self._minimize)
+        header.pack_end(self.minimize_button)
         header.set_custom_title(Gtk.Box())
         self.window.set_titlebar(header)
         self.window.set_title(APP_TITLE)
@@ -365,6 +374,7 @@ class WorkspaceApplication(Gtk.Application):
         self.menu.append(show)
         self.menu.show_all()
         self.indicator.set_menu(self.menu)
+        self.indicator.set_secondary_activate_target(show)
         self.indicator.connect("connection-changed", self._tray_status)
         self.indicator.set_status(AyatanaAppIndicator3.IndicatorStatus.ACTIVE)
 
@@ -373,11 +383,14 @@ class WorkspaceApplication(Gtk.Application):
         if not connected:
             self._present()
 
-    def _window_closed(self, *_):
+    def _minimize(self, *_):
         if self.tray_connected:
             self.window.hide()
         else:
-            self._quit()
+            self.window.iconify()
+
+    def _window_closed(self, *_):
+        self._quit()
         return True
 
     def _view(self, name):

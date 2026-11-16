@@ -996,6 +996,16 @@ def main(root):
                 wait_for(lambda: app.tray_connected, "AppIndicator did not connect")
                 assert app.window.get_visible()
                 assert app.window.get_title() == "Keeper"
+                app.minimize_button.clicked()
+                assert not app.window.get_visible()
+                assert app.broker.enabled and endpoint.exists()
+                bus = app.get_dbus_connection()
+                bus.call(
+                    bus.get_unique_name(), "/org/ayatana/NotificationItem/keepassxc_agent_access",
+                    "org.kde.StatusNotifierItem", "XAyatanaSecondaryActivate", GLib.Variant("(u)", (0,)),
+                    None, Gio.DBusCallFlags.NONE, 1500, None, None, None,
+                )
+                wait_for(app.window.get_visible, "Tray middle-click did not restore Keeper")
                 assert app.workspace.paused and app.grants.rows() == []
                 assert app.indicator.get_icon() == "keeper-agent-access-paused"
                 assert old_activity.rows(action="Legacy fixture")[0]["token"] is None
@@ -1740,12 +1750,15 @@ def main(root):
                     assert all(sentinel.encode() not in data for call in captured for data in call)
                 assert not any(application == app.get_application_id()
                                for _, (application, *_) in notification_messages)
+                app.window.close()
+                wait_for(lambda: app.exiting, "Closing the window did not quit Keeper")
                 print("Workspace scenario passed: two vaults, scoped CLI, GNOME mouse-only request pop-ups, four access decisions, credential types, migration, locks and Activity", flush=True)
                 result = 0
             except Exception:
                 traceback.print_exc()
             finally:
-                app._quit()
+                if not app.exiting:
+                    app._quit()
             return GLib.SOURCE_REMOVE
 
         app.connect("activate", lambda *_: GLib.idle_add(exercise))
