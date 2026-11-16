@@ -20,6 +20,12 @@ class AccessMode(str, Enum):
     SMART = "Smart access"
 
 
+CREDENTIAL_REVIEW_ACTIONS = {
+    "use_https": "Passwords - HTTPS Requests",
+    "use_local_command": "Passwords - Local Commands",
+    "use_networked_command": "Passwords - Networked Commands",
+}
+
 REVIEW_ACTIONS = {
     "list_vaults": "Vaults - List",
     "create_group": "Groups - Create",
@@ -31,7 +37,7 @@ REVIEW_ACTIONS = {
     "update_entry": "Entries - Update",
     "move_entry": "Entries - Move",
     "recycle_entry": "Entries - Delete (Move to Recycle Bin)",
-    "use_password": "Passwords - Use in Actions",
+    **CREDENTIAL_REVIEW_ACTIONS,
     "replace_password": "Passwords - Replace",
 }
 
@@ -43,6 +49,14 @@ class ActionType(str, Enum):
     NETWORK_PROMPT = "network_command_prompt"
 
     @property
+    def review_operation(self):
+        if self == self.STDIN:
+            return "use_local_command"
+        if self == self.NETWORK_PROMPT:
+            return "use_networked_command"
+        return "use_https"
+
+    @property
     def label(self):
         return {
             self.BASIC: "HTTPS Basic-auth GET",
@@ -50,6 +64,15 @@ class ActionType(str, Enum):
             self.STDIN: "Isolated command stdin",
             self.NETWORK_PROMPT: "Networked command prompt",
         }[self]
+
+
+def normalize_review_actions(actions):
+    selected = frozenset(actions)
+    if "use_password" in selected:
+        selected = (selected - {"use_password"}) | CREDENTIAL_REVIEW_ACTIONS.keys()
+    if not selected <= REVIEW_ACTIONS.keys():
+        raise ValueError("Choose a supported action to review.")
+    return frozenset(selected)
 
 
 def uuid_text(value):
@@ -225,7 +248,7 @@ class AccessStore:
             if (type(retention) is not int or not 1 <= retention <= 365 or type(review_usage) is not bool
                     or type(start_unlocked) is not bool or type(auto_approve_tokens) is not bool
                     or type(auto_approve_token_changes) is not bool or not isinstance(review_actions, list)
-                    or any(not isinstance(action, str) or action not in REVIEW_ACTIONS for action in review_actions)):
+                    or any(not isinstance(action, str) for action in review_actions)):
                 raise ValueError
             vaults = tuple(
                 (uuid_text(identity), VaultPolicy(
@@ -235,7 +258,7 @@ class AccessStore:
                 for identity, policy in data["vaults"].items()
             )
             return AccessSettings(AccessMode(data["mode"]), endpoint, uid, retention, vaults, review_usage,
-                                  frozenset(review_actions), start_unlocked,
+                                  normalize_review_actions(review_actions), start_unlocked,
                                   auto_approve_tokens, auto_approve_token_changes)
         except FileNotFoundError:
             return AccessSettings()
@@ -246,14 +269,13 @@ class AccessStore:
         config = settings.broker_config()
         if config:
             config.validate()
-        if not settings.review_actions <= REVIEW_ACTIONS.keys():
-            raise ValueError("Choose a supported action to review.")
+        review_actions = normalize_review_actions(settings.review_actions)
         if not 1 <= settings.retention_days <= 365:
             raise ValueError("Choose a retention period between 1 and 365 days.")
         write_private_json(self.path, {
             "mode": settings.mode.value,
             "review_usage": settings.review_usage,
-            "review_actions": sorted(settings.review_actions),
+            "review_actions": sorted(review_actions),
             "start_unlocked": settings.start_unlocked,
             "auto_approve_tokens": settings.auto_approve_tokens,
             "auto_approve_token_changes": settings.auto_approve_token_changes,

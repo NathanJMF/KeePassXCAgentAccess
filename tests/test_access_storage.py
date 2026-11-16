@@ -41,6 +41,24 @@ class AccessStorageTests(TestCase):
         self.assertNotIn(stable_id, reopened.for_vault(other).automatic)
         self.assertEqual(store.path.stat().st_mode & 0o777, 0o600)
 
+    def test_legacy_password_review_expands_to_all_transports(self):
+        store = AccessStore(self.root / "access.json")
+        default = replace(store.read(), review_usage=True, start_unlocked=False,
+                          auto_approve_token_changes=True)
+        store.write(default)
+        persisted = json.loads(store.path.read_text())
+        persisted["review_actions"] = ["use_password", "use_https", "list_entries"]
+        store.path.write_text(json.dumps(persisted))
+
+        migrated = store.read()
+        self.assertEqual(migrated, replace(default, review_actions=frozenset({
+            "use_https", "use_local_command", "use_networked_command", "list_entries",
+        })))
+        updated = replace(migrated, review_actions=frozenset({"use_local_command", "list_entries"}))
+        store.write(updated)
+        self.assertEqual(AccessStore(store.path).read(), updated)
+        self.assertNotIn("use_password", json.loads(store.path.read_text())["review_actions"])
+
     def test_refuses_ambiguous_destinations(self):
         for invalid in ("http://test.invalid/", "https://user@host.invalid/", "https://test.invalid/?x=y",
                         "https://test.invalid/#", "https://test.invalid:0/", "https://[::1]extra/",

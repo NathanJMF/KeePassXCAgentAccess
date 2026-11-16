@@ -142,7 +142,6 @@ class ScopedBroker:
                 return encode(self.edits.status(token, payload["id"]))
             self._charge_request(token.verifier, uid, active=token.status == "active")
             generation = self.workspace.generation
-            review_usage = self.workspace.requires_review(operation)
             name = {"list_vaults": "List vaults", "list_entries": "List entries",
                     "use_password": "Use password"}[operation]
             registered = self._catalog(token)
@@ -152,6 +151,8 @@ class ScopedBroker:
             registration = self.workspace.registrations.get(chosen) if chosen in registered else None
             session = self.workspace.session(chosen) if registration else None
             binding = registration.binding(entry, binding_id) if registration and entry else None
+            review_operation = binding.action.kind.review_operation if binding else operation
+            review_usage = self.workspace.requires_review(review_operation)
             permitted = (
                 binding is not None and binding.action.enabled and
                 any((s.vault, s.entry, s.action, s.revision) == (chosen, entry, binding_id, binding.revision)

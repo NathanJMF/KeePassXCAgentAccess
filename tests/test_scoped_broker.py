@@ -314,6 +314,36 @@ class ScopedBrokerTests(unittest.TestCase):
         self.assertNotIn(self.secrets[0].encode(), self.grants.path.read_bytes())
         self.assertEqual(Grants(self.workspace, self.activity).records[pending.id].status, "removed")
 
+    def test_credential_transports_have_independent_review_settings(self):
+        vault = self.vaults[0]
+        command = ("/usr/bin/cat",)
+        local = Action("local", "Local check", self.entry, "", kind=ActionType.STDIN,
+                       command=command, executable_sha256="a" * 64)
+        network = Action("network", "Network check", self.entry, "https://example.test/",
+                         kind=ActionType.NETWORK_PROMPT, command=command,
+                         executable_sha256="b" * 64, prompt_variable="TEST_ASKPASS")
+        for action in (local, network):
+            self.workspace.save_binding(vault, action)
+        profiles = {"use_https": self.action, "use_local_command": local, "use_networked_command": network}
+        self.approve([{"vault": vault, "entry": self.entry, "action": action.id}
+                      for action in profiles.values()])
+
+        def approval(ticket, _):
+            reviewed.append(ticket.action)
+            return "approved"
+
+        with patch.object(self.engine.approvals, "wait", side_effect=approval):
+            for operation, selected in profiles.items():
+                with self.subTest(operation=operation):
+                    reviewed = []
+                    self.workspace.set_review_action(operation, True)
+                    for action in profiles.values():
+                        params = {"command": command} if action.is_command else {}
+                        result = self.invoke("use_password", entry=self.entry, action=action.id, **params)
+                        self.assertEqual(result["outcome"], "succeeded")
+                    self.assertEqual(reviewed, [f"Use password · {selected.name}"])
+                    self.workspace.set_review_action(operation, False)
+
     def test_local_command_scope_rejects_modified_arguments_before_dispatch(self):
         vault = self.vaults[0]
         command = ("/usr/bin/cat",)
