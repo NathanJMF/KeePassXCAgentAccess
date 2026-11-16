@@ -6,6 +6,8 @@ from pathlib import Path
 import pwd
 import signal
 from threading import Thread
+from time import monotonic
+from uuid import uuid4
 
 import gi
 
@@ -20,6 +22,7 @@ from .broker import BrokerConfig, ListingBroker
 from .desktop import DesktopSession
 from .edit_requests import EditRequests
 from .grants import Grants
+from .installation import Installation
 from .keyring import KeyringError, SystemKeyring
 from .owner_views import _dialog, _label, _scroll, table_time
 from .protocol import ListingError
@@ -27,6 +30,7 @@ from .review_popups import ReviewPopups
 from .scoped_broker import ScopedBroker
 from .settings import SettingsError, SettingsStore
 from .tray import APP_ID, APP_TITLE, SetupDialog, password_entry
+from .updates import UpdateError, check_for_update, start_update, update_result
 from .vault import UnlockCancelled, VaultError
 from .workspace import Workspace, ordered_groups
 from .workspace_context import DELETE_LABEL, attach_row_context
@@ -1053,6 +1057,8 @@ class WorkspaceApplication(Gtk.Application):
         vaults = page("vaults", "Vaults", "drive-harddisk-symbolic")
         self._settings_switch(self._settings_card(vaults), "Start Unlocked", self.start_unlocked, self._set_start_unlocked,
                               "start-unlocked", "Use saved keyring passwords to unlock vaults when Keeper starts.")
+        updates = page("updates", "Updates", "system-software-update-symbolic")
+        self._updates_settings_page(self._settings_card(updates))
         broker = page("broker", "Broker Settings", "network-server-symbolic")
         self._broker_settings_page(self._settings_card(broker))
         stack.set_visible_child_name("notifications")
@@ -1081,6 +1087,85 @@ class WorkspaceApplication(Gtk.Application):
         row.pack_start(labels, True, True, 0)
         row.pack_end(toggle, False, False, 0)
         page.pack_start(row, False, False, 0)
+
+    def _updates_settings_page(self, card):
+        installation = Installation()
+        _, previous_result = update_result(installation)
+        status = styled(_label(previous_result or "Check the configured Git upstream for a newer Keeper version."),
+                        "keeper-settings-description")
+        card.pack_start(status, False, False, 0)
+        controls = Gtk.Box(spacing=8)
+        card.pack_start(controls, False, False, 0)
+        candidate = None
+
+        def run(operation, finished):
+            def work():
+                try:
+                    result, error = operation(), None
+                except UpdateError as failure:
+                    result, error = None, str(failure)
+                GLib.idle_add(deliver, result, error)
+
+            def deliver(result, error):
+                if card.get_parent() is not None:
+                    finished(result, error)
+                return GLib.SOURCE_REMOVE
+
+            Thread(target=work, daemon=True).start()
+
+        def checked(result, error):
+            nonlocal candidate
+            candidate = result
+            check.set_sensitive(True)
+            available = bool(result and result.target != result.installed)
+            apply.set_sensitive(available)
+            status.set_text(error or (f"Update available · {result.target[:12]}" if available
+                                      else "Keeper is up to date."))
+
+        def check_updates(*_):
+            check.set_sensitive(False)
+            apply.set_sensitive(False)
+            status.set_text("Checking for updates…")
+            run(lambda: check_for_update(installation), checked)
+
+        def install_update(*_):
+            if candidate is None or self.desktop.locked:
+                return
+            if self.busy:
+                status.set_text("Wait for Keeper to finish its current task, then try again.")
+                return
+            check.set_sensitive(False)
+            apply.set_sensitive(False)
+            status.set_text("Applying update. Keeper will reopen when ready.")
+            attempt = str(uuid4())
+            deadline = monotonic() + 325
+
+            def poll():
+                if card.get_parent() is None:
+                    return GLib.SOURCE_REMOVE
+                identifier, message = update_result(installation)
+                if identifier != attempt and monotonic() < deadline:
+                    return GLib.SOURCE_CONTINUE
+                status.set_text(message if identifier == attempt else "Update status is unavailable. Check again.")
+                check.set_sensitive(True)
+                return GLib.SOURCE_REMOVE
+
+            def started(_, error):
+                if error:
+                    status.set_text(error)
+                    check.set_sensitive(True)
+                    apply.set_sensitive(True)
+                else:
+                    GLib.timeout_add_seconds(1, poll)
+
+            run(lambda: start_update(candidate, attempt), started)
+
+        check = Gtk.Button(label="Check for Updates")
+        check.connect("clicked", check_updates)
+        controls.pack_start(check, False, False, 0)
+        apply = styled(Gtk.Button(label="Apply Update", sensitive=False), "keeper-settings-save")
+        apply.connect("clicked", install_update)
+        controls.pack_start(apply, False, False, 0)
 
     def _set_action_auto_approval(self, control, operation):
         previous = operation not in self.workspace.review_actions

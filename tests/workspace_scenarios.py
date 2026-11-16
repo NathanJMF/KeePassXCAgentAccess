@@ -148,7 +148,7 @@ def main(root):
                 assert divider.get_allocated_height() == area.get_allocated_height()
                 pages = next(widget for widget in descendants(dialog) if widget.get_name() == "keeper-settings-pages")
                 assert [pages.child_get_property(child, "title") for child in pages.get_children()] == [
-                    "Notifications", "Auto Approve", "Vaults", "Broker Settings",
+                    "Notifications", "Auto Approve", "Vaults", "Updates", "Broker Settings",
                 ]
                 assert pages.get_visible_child_name() == "notifications"
                 assert dialog.get_widget_for_response(Gtk.ResponseType.CLOSE) is None
@@ -997,6 +997,36 @@ def main(root):
                 assert app.vault_lock_button.get_accessible().get_name() == "Lock All Vaults"
                 check_toolbar_button(app.add_vault_button)
                 vault_lock_size = check_toolbar_button(app.vault_lock_button)
+                def check_updates(dialog):
+                    pages = next(widget for widget in descendants(dialog) if widget.get_name() == "keeper-settings-pages")
+                    pages.set_visible_child_name("updates")
+                    page = pages.get_visible_child()
+                    check = button(page, "Check for Updates")
+                    apply = button(page, "Apply Update")
+
+                    def status(value):
+                        return any(isinstance(label, Gtk.Label) and label.get_text() == value
+                                   for label in descendants(page))
+
+                    assert not apply.get_sensitive()
+                    check.clicked()
+                    wait_for(lambda: status("Keeper is up to date."), "Update status was unavailable.")
+                    assert not apply.get_sensitive()
+                    check.clicked()
+                    wait_for(apply.get_sensitive, "Apply Update was unavailable.")
+                    assert status("Update available · 222222222222")
+                    apply.clicked()
+                    wait_for(lambda: start.called, "The updater did not start.")
+                    assert start.call_args.args[0] == newer
+                    dialog.close()
+
+                from keepassxc_agent_access.updates import Candidate
+                current = Candidate(Path("/fixture"), "origin", "refs/heads/main", "1" * 40, "1" * 40)
+                newer = replace(current, target="2" * 40)
+                with patch("keepassxc_agent_access.workspace_app.check_for_update", side_effect=(current, newer)), \
+                     patch("keepassxc_agent_access.workspace_app.start_update") as start:
+                    drive_dialog(app.settings_button.clicked, check_updates)
+
                 assert settings_switch("vaults", "start-unlocked")
                 assert not settings_switch("vaults", "start-unlocked", False)
                 assert not old_access.read().start_unlocked

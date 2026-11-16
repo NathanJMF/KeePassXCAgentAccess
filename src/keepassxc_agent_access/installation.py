@@ -105,6 +105,10 @@ def session_query():
 
 def open_application():
     systemctl("start", SERVICE)
+    present_application()
+
+
+def present_application():
     call = session_query()
     deadline = monotonic() + 8
     while not call("NameHasOwner"):
@@ -211,6 +215,13 @@ class Installation:
             previous.get("skill_path") == str(skill) and previous.get("skill") == digest(old_skill)
         )
         state = {"version": 1, "launcher": digest(launcher)}
+        if (CHECKOUT / ".git").exists():
+            from .updates import UpdateError, revision
+
+            try:
+                state.update(checkout=str(CHECKOUT), revision=revision(CHECKOUT))
+            except UpdateError:
+                pass
         writes = [(self.launcher, launcher, old_launcher)]
         if manage_skill:
             state.update(skill_path=str(skill), skill=digest(source_skill))
