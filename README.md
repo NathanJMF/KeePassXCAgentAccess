@@ -15,7 +15,7 @@ On Ubuntu GNOME, clone this repository and run one of these commands from the ch
 
 1. Open **Keeper** and select **Add Vault…** to open an existing KeePass database.
 2. To remember a vault password, select **Remember on This Device**. Keeper stores it in the OS keyring.
-3. For agent access, configure your agent client with the runner command printed by the installer and give it the [Keeper skill](skills/keepassxc-agent-access/SKILL.md). Open **Access** to review requests for entries and permissions.
+3. For agent access, configure your agent client with the runner command printed by the installer and give it the [Keeper skill](skills/keepassxc-agent-access/SKILL.md). The installer puts it at `Documents/Skills/Keeper/SKILL.md`. Open **Access** to review requests for entries and permissions.
 
 ## Agent Access
 

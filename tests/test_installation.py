@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 import subprocess
 from tempfile import TemporaryDirectory
@@ -13,7 +14,8 @@ class InstallationTests(unittest.TestCase):
         directory = TemporaryDirectory()
         self.addCleanup(directory.cleanup)
         self.root = Path(directory.name)
-        self.skill = self.root / "Documents/Skills/keepassxc-agent-access/SKILL.md"
+        self.skill = self.root / "Documents/Skills/Keeper/SKILL.md"
+        self.legacy_skill = self.root / "Documents/Skills/keepassxc-agent-access/SKILL.md"
         with patch("keepassxc_agent_access.installation.GLib.get_user_data_dir", return_value=str(self.root / "data")), \
              patch("keepassxc_agent_access.installation.GLib.get_user_config_dir", return_value=str(self.root / "config")):
             self.installation = Installation()
@@ -36,6 +38,24 @@ class InstallationTests(unittest.TestCase):
         self.assertTrue(installation.uninstall())
         self.assertFalse(launcher.exists() or self.skill.exists() or installation.app.exists())
         self.assertFalse(installation.uninstall())
+
+    def test_upgrade_cleans_up_bundled_legacy_copy_and_preserves_edited_copy(self):
+        installation = self.installation
+        installation.install(False)
+        bundled = self.skill.read_bytes()
+        self.legacy_skill.parent.mkdir()
+        self.legacy_skill.write_bytes(bundled)
+        self.skill.unlink()
+        installation.install(False)
+        self.assertEqual(self.skill.read_bytes(), bundled)
+        self.assertFalse(self.legacy_skill.exists())
+
+        edited = b"Locally edited legacy skill"
+        self.legacy_skill.write_bytes(edited)
+        installation.install(False)
+        installation.uninstall()
+        self.assertFalse(self.skill.exists())
+        self.assertEqual(self.legacy_skill.read_bytes(), edited)
 
     def test_preserves_custom_skill_and_refuses_to_overwrite_custom_launcher(self):
         installation = self.installation
@@ -63,7 +83,12 @@ class InstallationTests(unittest.TestCase):
     def test_agent_install_failure_restores_desktop_install(self):
         installation = self.installation
         installation.install(False)
-        old_state = installation.manifest.read_bytes()
+        self.legacy_skill.parent.mkdir()
+        self.skill.rename(self.legacy_skill)
+        state = json.loads(installation.manifest.read_bytes())
+        state["skill_path"] = str(self.legacy_skill)
+        old_state = json.dumps(state).encode()
+        installation.manifest.write_bytes(old_state)
         previous_launcher = installation.launcher.read_bytes()
         previous_program = (installation.app / "run-tray").read_bytes()
         failed = subprocess.CalledProcessError(1, ["systemctl"])
@@ -78,6 +103,8 @@ class InstallationTests(unittest.TestCase):
                 installation.install(True)
             manager.assert_any_call("disable", "--now", SERVICE, check=False)
         self.assertFalse(installation.unit.exists())
+        self.assertTrue(self.legacy_skill.is_file())
+        self.assertFalse(self.skill.exists())
         self.assertEqual(installation.manifest.read_bytes(), old_state)
         self.assertEqual(installation.launcher.read_bytes(), previous_launcher)
         self.assertEqual((installation.app / "run-tray").read_bytes(), previous_program)

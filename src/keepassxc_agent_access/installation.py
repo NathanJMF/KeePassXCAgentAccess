@@ -211,6 +211,15 @@ class Installation:
         skill = skill_destination()
         source_skill = (CHECKOUT / "skills" / SKILL_PATH).read_bytes()
         old_skill = regular_file(skill) if not skill.is_symlink() else b""
+        legacy_skill = skill.parents[1] / SKILL_PATH
+        legacy_contents = None
+        if not legacy_skill.parent.is_symlink() and not legacy_skill.is_symlink() and legacy_skill.is_file():
+            contents = regular_file(legacy_skill)
+            if contents is not None and (
+                contents == source_skill
+                or (previous.get("skill_path") == str(legacy_skill) and previous.get("skill") == digest(contents))
+            ):
+                legacy_contents = contents
         manage_skill = old_skill is None or (
             previous.get("skill_path") == str(skill) and previous.get("skill") == digest(old_skill)
         )
@@ -260,6 +269,8 @@ class Installation:
                     systemctl("daemon-reload")
                     enabled_service = True
                     systemctl("enable", "--now", SERVICE)
+                if legacy_contents is not None and self.remove_matching(legacy_skill, digest(legacy_contents)):
+                    changed.append((legacy_skill, legacy_contents))
                 publish(self.manifest, json.dumps(state).encode())
             except Exception:
                 if enabled_service:
@@ -302,8 +313,10 @@ class Installation:
         if not external_broker_active():
             stop_application()
         self.remove_matching(self.launcher, state.get("launcher"))
-        if state.get("skill_path") == str(skill_destination()):
-            self.remove_matching(skill_destination(), state.get("skill"))
+        skill = skill_destination()
+        for path in (skill, skill.parents[1] / SKILL_PATH):
+            if state.get("skill_path") == str(path) and not path.parent.is_symlink():
+                self.remove_matching(path, state.get("skill"))
         if self.app.exists():
             shutil.rmtree(self.app)
         self.manifest.unlink()
@@ -313,6 +326,8 @@ class Installation:
     def remove_matching(path, checksum):
         if not path.is_symlink() and (content := regular_file(path)) is not None and digest(content) == checksum:
             path.unlink()
+            return True
+        return False
 
 
 def main():

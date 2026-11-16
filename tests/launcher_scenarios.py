@@ -105,7 +105,7 @@ def main(root):
     (config / "user-dirs.dirs").write_text(f'XDG_DOCUMENTS_DIR="{documents}"\n', encoding="utf-8")
     subprocess.run(["./install-launcher"], check=True, capture_output=True)
     relative_skill = Path("keepassxc-agent-access") / "SKILL.md"
-    installed = documents / "Skills" / relative_skill
+    installed = documents / "Skills" / "Keeper" / "SKILL.md"
     assert installed.read_bytes() == (Path("skills") / relative_skill).read_bytes()
     edited = b"Locally edited Keeper skill\n"
     installed.write_bytes(edited)

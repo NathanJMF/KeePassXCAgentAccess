@@ -12,7 +12,7 @@ From this checkout, run:
 ./install
 ```
 
-Keeper installs the missing Ubuntu packages, adds **Keeper** to the application menu, and opens it. The bundled skill is installed under `Skills/keepassxc-agent-access/SKILL.md` in your Documents folder. The installed app runs from a per-user copy, so you can move the checkout. To update, open **Keeper Settings → Updates**, select **Check for Updates**, then **Apply Update**. Keeper uses the Git upstream of the checkout you installed from and applies fast-forward updates. For a private upstream, configure Git authentication in your desktop account. You can also run `git pull --ff-only` and `./install` from that checkout. Close the window to keep Keeper running in the tray when GNOME has an AppIndicator host.
+Keeper installs the missing Ubuntu packages, adds **Keeper** to the application menu, and opens it. The bundled skill is installed at `Documents/Skills/Keeper/SKILL.md`. On upgrade, Keeper removes the old copy if it matches the bundled skill or the previous installation record. Keeper keeps locally edited copies. The installed app runs from a per-user copy, so you can move the checkout. To update, open **Keeper Settings → Updates**, select **Check for Updates**, then **Apply Update**. Keeper uses the Git upstream of the checkout you installed from and applies fast-forward updates. For a private upstream, configure Git authentication in your desktop account. You can also run `git pull --ff-only` and `./install` from that checkout. Close the window to keep Keeper running in the tray when GNOME has an AppIndicator host.
 
 To set up the isolated agent runner and start Keeper’s broker at sign-in, run:
 

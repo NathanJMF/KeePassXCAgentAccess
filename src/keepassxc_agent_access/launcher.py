@@ -24,7 +24,7 @@ def _exec_argument(value):
 def skill_destination():
     documents = GLib.get_user_special_dir(GLib.UserDirectory.DIRECTORY_DOCUMENTS)
     documents = Path(documents) if documents else Path.home() / "Documents"
-    return documents / "Skills" / SKILL_PATH
+    return documents / "Skills" / "Keeper" / SKILL_PATH.name
 
 
 def _install_skill():
