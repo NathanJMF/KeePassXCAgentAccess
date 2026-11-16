@@ -33,3 +33,20 @@ Keeper SHALL record the requesting agent, entry, configured action, destination 
 #### Scenario: Authorization is revoked while preparing work
 - **WHEN** the owner pauses or the token changes before private stdin delivery
 - **THEN** Keeper blocks delivery and records the revocation
+
+
+### Requirement: Networked command delivery is scoped and auditable
+
+Keeper SHALL bind a networked command to a trusted executable and exact argv, a credential prompt policy, and an approved host and port. It SHALL block direct networking and arbitrary host paths. It SHALL verify the length and digest of input artifacts before mounting them read-only. The trusted command SHALL enforce TLS and application-level resource scope.
+
+#### Scenario: Agent pushes a synthetic Git commit
+- **WHEN** an entitled agent runs the configured Git command with a valid input artifact
+- **THEN** the credential is delivered only inside the job and Activity records the approved operation and outcome
+
+#### Scenario: Networked command chooses another origin
+- **WHEN** the command asks the relay to connect to a different host or port
+- **THEN** the relay refuses without connecting
+
+#### Scenario: A networked command fails after sending traffic
+- **WHEN** Keeper cannot establish whether the remote accepted a dispatched operation
+- **THEN** it records an uncertain result and does not retry

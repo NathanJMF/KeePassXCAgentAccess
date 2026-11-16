@@ -9,8 +9,8 @@ from select import select
 import sys
 from threading import Thread
 
-from .access_settings import ActionType
-from .command_action import deliver_credential, prepare_command
+from .access_settings import ActionType, Destination
+from .command_action import deliver_credential, deliver_prompt, prepare_command
 from .entry_projection import active_entry, entry_listing, owner_snapshot
 from .https_action import authenticate, failure, prepare_https
 from .protocol import RESPONSE_LIMIT, encode
@@ -80,6 +80,10 @@ def load_vault():
         elif data["operation"] == "use_password":
             if data["kind"] == ActionType.STDIN:
                 use_command(entry, data["command"], data["executable_sha256"])
+            elif data["kind"] == ActionType.NETWORK_PROMPT:
+                use_command(entry, data["command"], data["executable_sha256"],
+                            destination=Destination.parse(data["url"]), prompt_variable=data["prompt_variable"],
+                            input_path=data["input_path"])
             else:
                 use(entry, data["url"], ActionType(data["kind"]))
         else:
@@ -116,16 +120,19 @@ def use(entry, url, kind):
         reply(encode(failure()))
 
 
-def use_command(entry, command, digest):
+def use_command(entry, command, digest, **profile):
     if entry is None:
         reply(encode(failure()))
         return
     try:
-        with prepare_command(command, digest) as process:
+        with prepare_command(command, digest, **profile) as process:
             reply(encode({"ready": True}))
             if sys.stdin.buffer.readline(16) == b"dispatch\n":
-                succeeded = deliver_credential(process, entry.password)
-                reply(encode({"outcome": "succeeded" if succeeded else "failed"}))
+                if "destination" in profile:
+                    outcome = deliver_prompt(process, entry.password)
+                else:
+                    outcome = "succeeded" if deliver_credential(process, entry.password) else "failed"
+                reply(encode({"outcome": outcome}))
             else:
                 reply(encode(failure()))
     except (OSError, ValueError):

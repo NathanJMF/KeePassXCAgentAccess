@@ -8,7 +8,11 @@
 - [x] Verify exact-scope rejection, binding revision changes, revocation, and sandbox behaviour with a synthetic vault.
 - [x] Complete the staged implementation review with Astra.
 
-## Additional profiles
+## Networked command prompts
 
-- [ ] Define and review a reusable credential-delivery policy for networked CLI. Verify it with a scoped Git push.
+- [x] Add a private prompt, bounded input file transfer, and an exact-origin network relay.
+- [x] Review the isolation and authorization path with Astra.
+- [x] Verify a synthetic HTTPS Git push end to end and check wrong-origin refusal, hidden credentials, and Activity.
+
+## Additional profiles
 - [ ] Define and review reusable API and protected browser delivery profiles and test their session and output boundaries.

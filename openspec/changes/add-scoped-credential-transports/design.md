@@ -12,8 +12,14 @@ The consumer is an owner-approved system executable with an exact argument vecto
 
 Keeper waits for sandbox readiness and rechecks authorization before delivering the entry's password as UTF-8 bytes on stdin followed by EOF. The secret never appears in argv or the command environment. The broker generates a success or failure result. It discards stdout and stderr and confines process lifetime to the sandbox and its supervisor.
 
-## Additional profiles
+## Networked command profile
 
-Future networked CLI delivery requires a trusted process with reusable input framing, destination enforcement, and bounded results. Git should exercise that profile with a repository-scoped credential, the usual command interface, and an auditable result. A command that can read a secret can try to forward it, so each delivery profile needs explicit boundaries for network, configuration, workspace access, and output.
+The owner binds the exact command, HTTPS origin, prompt variable, and input file policy. The sandbox remains disconnected from direct IP sockets and exposes a per-job Unix-socket SOCKS relay. The relay resolves only the approved host, connects to the resolved numeric address and approved port, and bounds traffic, connections, and lifetime. The trusted command verifies TLS and enforces its HTTPS path, repository, and branch. Scope is updated when any of those policy inputs change.
+
+The private prompt helper answers one bounded password prompt with a newline-terminated credential. Git and other programs configure the username independently. The broker accepts an optional bounded input file from the approved agent, verifies its length and hash, and mounts it read-only at a fixed path. It never opens a host path supplied by the agent. Git uses a bare repository populated from the artifact and an owner-fixed HTTPS URL and refspec; Keeper has no Git-specific runtime handler.
+
+Prompt delivery begins after the final authorization check. A dispatched operation can complete after token revocation. If a networked process fails after bytes were relayed, Keeper records an uncertain outcome without retrying.
+
+## Additional profiles
 
 Future API delivery needs owner-approved methods, destinations, and input and result schemas. Future browser delivery needs private session state protected from all agent-controlled tools and connectors. It needs bound origins and verified navigation and form destinations. Raw remote output can contain credentials supplied by the request or new credentials created in the response.

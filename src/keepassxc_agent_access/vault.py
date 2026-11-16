@@ -181,11 +181,13 @@ class VaultSession:
         with self._exchange(request, WORKER_TIMEOUT) as read:
             return decode(read())["entry"]
 
-    def use(self, action, gate):
+    def use(self, action, gate, *, input_path=None):
         request = encode({"operation": "use_password", "entry": action.entry,
                           "url": action.url, "kind": action.kind, "command": action.command,
-                          "executable_sha256": action.executable_sha256})
-        with self._exchange(request, 12) as read:
+                          "executable_sha256": action.executable_sha256, "prompt_variable": action.prompt_variable,
+                          "input_path": str(input_path) if input_path is not None else None})
+        timeout = 25 if action.prompt_variable else 12
+        with self._exchange(request, timeout) as read:
             response = decode(read())
             if response != {"ready": True}:
                 return response

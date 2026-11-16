@@ -6,13 +6,14 @@ from time import monotonic
 
 
 REQUEST_LIMIT = 4 * 1024
+UPLOAD_LIMIT = 8 * 1024**2
 RESPONSE_LIMIT = 1024 * 1024
 REQUEST_TIMEOUT = 5
 WORKER_TIMEOUT = 3
 APPROVAL_TIMEOUT = 60
-CLIENT_TIMEOUT = APPROVAL_TIMEOUT + 20
+CLIENT_TIMEOUT = APPROVAL_TIMEOUT + 35
 _MAX_ARGS = 8
-_MAX_ARG_BYTES = 128
+_MAX_ARG_BYTES = 512
 LIST_REQUEST = {"version": 1, "operation": "list_entries"}
 ERRORS = {
     "unavailable": "Agent access is unavailable. Ask the vault owner to check broker access.",
@@ -45,9 +46,17 @@ def validate_command(command):
             or any(not isinstance(arg, str) or "\0" in arg or len(arg.encode("utf-8")) > _MAX_ARG_BYTES
                    or arg and not arg.isprintable() for arg in command)
             or not re.fullmatch(r"/usr/bin/[A-Za-z0-9._+-]+", command[0])
-            or command[0].endswith(("/.", "/.."))):
+            or command[0].endswith(("/.", "/..")) or len(encode(command)) > 2400):
         raise ValueError("Choose an executable in /usr/bin and a short list of literal arguments.")
     return tuple(command)
+
+
+def validate_upload(info):
+    if (not isinstance(info, dict) or set(info) != {"size", "sha256"}
+            or type(info["size"]) is not int or not 0 < info["size"] <= UPLOAD_LIMIT
+            or not isinstance(info["sha256"], str) or not re.fullmatch(r"[a-f0-9]{64}", info["sha256"])):
+        raise ValueError("Invalid input file description.")
+    return info
 
 
 def encode(message):

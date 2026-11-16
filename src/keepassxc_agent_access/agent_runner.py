@@ -1,6 +1,7 @@
 """Expose Keeper's scoped CLI operations over a trusted stdio MCP runner."""
 
 import argparse
+from base64 import b64decode
 import os
 from pathlib import Path
 import stat
@@ -9,12 +10,12 @@ import sys
 from uuid import UUID
 
 from .agent_cli import EDIT_OPERATIONS, ENTRY_FIELDS, edit_request, edit_uuid
-from .protocol import CLIENT_TIMEOUT, ERRORS, ListingError, REQUEST_LIMIT, decode, encode, validate_command
+from .protocol import CLIENT_TIMEOUT, ERRORS, ListingError, REQUEST_LIMIT, UPLOAD_LIMIT, decode, encode, validate_command
 from .runner_token import UninitializedProfile, open_profile
 
 
 CLI = Path(__file__).resolve().parents[2] / "keepassxc-agent"
-MAX_MESSAGE = REQUEST_LIMIT * 4
+MAX_MESSAGE = 4 * ((UPLOAD_LIMIT + 2) // 3) + REQUEST_LIMIT * 4
 PROTOCOLS = ("2025-06-18", "2025-03-26", "2024-11-05")
 
 
@@ -107,7 +108,8 @@ OPERATIONS = {
         "use_password", "Use a credential through an owner-configured action. Return the action result.",
         {"vault": REFERENCE, "entry": REFERENCE, "action": {"type": "string"},
          "command": {"type": "array", "items": {"type": "string"}, "minItems": 1, "maxItems": 9,
-                     "description": "The exact approved executable and arguments for an isolated stdin action."}},
+                     "description": "The exact approved executable and arguments for an isolated command."},
+         "input_base64": {"type": "string", "description": "Optional base64 input file for a command that permits it."}},
         required=("entry", "action"), read_only=False,
     )),
 }
@@ -151,11 +153,18 @@ def invocation(name, arguments):
         raise ValueError
     if name == "request_edit":
         request = edit_request(request)
+    data = encode(request) if request is not None else b""
+    if "input_base64" in arguments:
+        if local_command is None or not isinstance(arguments["input_base64"], str):
+            raise ValueError
+        data = b64decode(arguments["input_base64"], validate=True)
+        if not 0 < len(data) <= UPLOAD_LIMIT:
+            raise ValueError
+        command.append("--input")
+    elif len(data) >= REQUEST_LIMIT:
+        raise ValueError
     if local_command is not None:
         command.extend(("--", *local_command))
-    data = encode(request) if request is not None else b""
-    if len(data) >= REQUEST_LIMIT:
-        raise ValueError
     return command, data
 
 

@@ -1,6 +1,7 @@
 """Agent-side command. This module needs only the Python standard library."""
 
 import argparse
+from hashlib import sha256
 import os
 import socket
 import sys
@@ -9,7 +10,7 @@ from uuid import UUID
 
 from .runner_token import UninitializedProfile, credential
 from .protocol import (
-    CLIENT_TIMEOUT, ERRORS, LIST_REQUEST, ListingError, REQUEST_LIMIT, REQUEST_TIMEOUT, RESPONSE_LIMIT,
+    CLIENT_TIMEOUT, ERRORS, LIST_REQUEST, ListingError, REQUEST_LIMIT, REQUEST_TIMEOUT, RESPONSE_LIMIT, UPLOAD_LIMIT,
     decode, encode, receive, remaining, validate_command,
 )
 
@@ -107,7 +108,7 @@ def _validate(reply, payload):
         return reply
     if operation == "use_password":
         if "command" in payload:
-            if set(reply) != {"outcome"} or reply["outcome"] not in ("succeeded", "failed"):
+            if set(reply) != {"outcome"} or reply["outcome"] not in ("succeeded", "failed", "uncertain"):
                 raise ListingError("invalid_response")
             return reply
         status = reply.get("http_status")
@@ -143,7 +144,7 @@ def _validate(reply, payload):
     return reply
 
 
-def request(endpoint, payload):
+def request(endpoint, payload, *, input_data=None):
     if not endpoint or not os.path.isabs(endpoint):
         raise ListingError()
 
@@ -155,9 +156,13 @@ def request(endpoint, payload):
             connection.settimeout(remaining(deadline))
             connection.sendall(encode(payload))
             response = receive(connection, RESPONSE_LIMIT, deadline)
+            if input_data is not None and decode(response) == {"upload": True}:
+                connection.settimeout(remaining(deadline))
+                connection.sendall(input_data)
+                response = receive(connection, RESPONSE_LIMIT, deadline)
     except (OSError, EOFError):
         raise ListingError() from None
-    except ValueError:
+    except (ValueError, RecursionError):
         raise ListingError("invalid_response") from None
     try:
         return _validate(decode(response), payload)
@@ -208,10 +213,11 @@ def main(argv=None):
     use.add_argument("--action", required=True, help="Owner-configured action ID")
     use.add_argument("--json", action="store_true", required=True, help="Emit JSON")
     use.set_defaults(operation="use_password")
-    run = topics.add_parser("run", help="Supply a Keeper credential over stdin to an approved isolated command")
+    run = topics.add_parser("run", help="Use a Keeper credential with an approved isolated command")
     run.add_argument("--vault", help="Scoped vault ID")
     run.add_argument("--entry", required=True, help="Entry UUID")
     run.add_argument("--action", required=True, help="Approved command action ID")
+    run.add_argument("--input", action="store_true", help="Read an approved input file from stdin")
     run.add_argument("--json", action="store_true", required=True, help="Emit JSON")
     run.add_argument("command", nargs=argparse.REMAINDER, help="The exact approved executable and arguments")
     run.set_defaults(operation="use_password")
@@ -245,6 +251,12 @@ def main(argv=None):
         payload["context"] = context
 
     try:
+        input_data = None
+        if getattr(options, "input", False):
+            input_data = sys.stdin.buffer.read(UPLOAD_LIMIT + 1)
+            if not 0 < len(input_data) <= UPLOAD_LIMIT:
+                raise ListingError("too_large")
+            payload["upload"] = {"size": len(input_data), "sha256": sha256(input_data).hexdigest()}
         token_file = os.environ.get("KEEPASSXC_AGENT_TOKEN_FILE")
         if options.operation in ("request_access", "request_edit"):
             try:
@@ -263,7 +275,7 @@ def main(argv=None):
             payload["credential"] = credential(token_file, create=create)
         if len(encode(payload)) > REQUEST_LIMIT:
             raise ListingError("too_large")
-        result = request(os.environ.get("KEEPASSXC_AGENT_SOCKET"), payload)
+        result = request(os.environ.get("KEEPASSXC_AGENT_SOCKET"), payload, input_data=input_data)
         sys.stdout.buffer.write(encode(result))
     except UninitializedProfile as error:
         if options.operation == "access_status":
@@ -274,7 +286,7 @@ def main(argv=None):
     except ListingError as error:
         print(error, file=sys.stderr)
         return 1
-    return int(result.get("outcome") == "failed")
+    return int(result.get("outcome") in ("failed", "uncertain"))
 
 
 if __name__ == "__main__":

@@ -51,7 +51,7 @@ For an approved isolated command, use the entry and action as the credential ref
 
     keepassxc-agent run --vault VAULT_UUID --entry ENTRY_UUID --action ACTION_ID --json -- /usr/bin/example --read-stdin
 
-With stdio, call use_password with entry, action, optional vault, and command as an array of literal strings. The command receives the secret on its private stdin followed by EOF. It runs without network or host workspace access. The tool returns success or failure. Networked Git, API, and browser commands require other enabled delivery policies.
+With stdio, call use_password with entry, action, optional vault, and command as an array of literal strings. The command receives the secret on its private stdin followed by EOF. It runs without network or host workspace access. The tool returns success or failure. A networked command uses the same references and exact argv. Keeper answers the trusted program's configured password prompt and permits its approved origin. Provide a binary artifact only if the binding allows it. Use `--input` with redirected stdin, or pass an `input_base64` string to the stdio tool. The file becomes read-only `/input` inside the sandbox. Do not automatically retry an `uncertain` outcome. Check the destination first. Generic browser sessions require a separate delivery policy.
 
 ## Request a vault edit
 

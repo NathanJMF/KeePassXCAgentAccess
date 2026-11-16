@@ -1262,10 +1262,30 @@ def edit_binding(app, vault, entry, previous):
     body.pack_start(target, False, False, 0)
     fields.append(target)
 
+    network = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=7)
+    network.set_no_show_all(True)
+    add_label(network, "Approved HTTPS Origin")
+    network_url = Gtk.Entry(placeholder_text="https://example.com")
+    network.pack_start(network_url, False, False, 0)
+    add_label(network, "The command controls the path and verifies TLS.")
+    add_label(network, "Credential Prompt Variable")
+    prompt = Gtk.Entry(placeholder_text="GIT_ASKPASS")
+    network.pack_start(prompt, False, False, 0)
+    accepts_input = Gtk.CheckButton(label="Allow an input file at /input")
+    network.pack_start(accepts_input, False, False, 0)
+    body.pack_start(network, False, False, 0)
+
     def update_target(*_):
-        local = kind.get_active_id() == ActionType.STDIN
-        target_label.set_text("Executable and Arguments" if local else "Destination")
-        target.set_placeholder_text("/usr/bin/example --read-stdin" if local else "https://example.com/status")
+        selected = ActionType(kind.get_active_id())
+        command = selected in (ActionType.STDIN, ActionType.NETWORK_PROMPT)
+        target_label.set_text("Executable and Arguments" if command else "Destination")
+        target.set_placeholder_text("/usr/bin/example" if command else "https://example.com/status")
+        if selected == ActionType.NETWORK_PROMPT:
+            for child in network.get_children():
+                child.show_all()
+            network.show()
+        else:
+            network.hide()
 
     kind.connect("changed", update_target)
     update_target()
@@ -1276,15 +1296,22 @@ def edit_binding(app, vault, entry, previous):
         for field, value in zip(fields, (action.id, action.name, join(action.command) if action.command else action.url)):
             field.set_text(value)
         enabled.set_active(action.enabled)
+        network_url.set_text(action.url if action.kind == ActionType.NETWORK_PROMPT else "")
+        prompt.set_text(action.prompt_variable)
+        accepts_input.set_active(action.accepts_input)
     response = app.run_dialog(dialog)
     if response == Gtk.ResponseType.OK:
         def save():
             identifier, name, url = (field.get_text() for field in fields)
             chosen_kind = ActionType(kind.get_active_id())
-            if chosen_kind == ActionType.STDIN:
+            if chosen_kind in (ActionType.STDIN, ActionType.NETWORK_PROMPT):
                 command = tuple(split(url))
-                action = Action(identifier, name, entry, "", enabled.get_active(), kind=chosen_kind,
-                                command=command, executable_sha256=executable_digest(command))
+                routed = chosen_kind == ActionType.NETWORK_PROMPT
+                action = Action(identifier, name, entry, network_url.get_text() if routed else "",
+                                enabled.get_active(), kind=chosen_kind,
+                                command=command, executable_sha256=executable_digest(command),
+                                prompt_variable=prompt.get_text() if routed else "",
+                                accepts_input=routed and accepts_input.get_active())
             else:
                 action = Action(identifier, name, entry, url, enabled.get_active(), kind=chosen_kind)
             app.workspace.save_binding(vault, action, previous.action.id if previous else None)

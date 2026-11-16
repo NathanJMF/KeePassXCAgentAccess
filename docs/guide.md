@@ -92,7 +92,21 @@ Open the entry and add an **Isolated command stdin** action. Enter the executabl
 
 The CLI uses the same vault, entry and action references as HTTPS actions. Use `keepassxc-agent run --vault VAULT_UUID --entry ENTRY_UUID --action ACTION_ID --json -- /usr/bin/example --read-stdin`. The MCP client can pass the arguments as a `command` array on `use_password`. Keeper writes the entry's password to stdin as UTF-8 bytes and closes the pipe. Activity records the command binding and outcome. Keep private values out of the configured argument list.
 
-This profile requires Bubblewrap, libseccomp, and the systemd user manager. Keeper gives the command a private filesystem and process environment with networking disabled and returns success or failure. Use a trusted system executable that accepts stdin. Networked CLI operations, including Git push, and browser sessions need separate delivery policies.
+This profile requires Bubblewrap, libseccomp, and the systemd user manager. Keeper gives the command a private filesystem and process environment with networking disabled and returns success or failure. Use a trusted system executable that accepts stdin. Use the networked command profile for tools that need an approved HTTPS origin.
+
+## Use a credential with a networked command
+
+Add a **Networked command prompt** action on the credential entry. Set the exact trusted executable and arguments, the approved HTTPS origin, and the program's password prompt variable. The variable must end in `_ASKPASS`. Configure any username in the command. Keeper answers one password prompt per run and keeps the answer inside that job. Keep credentials out of the arguments and input file.
+
+The sandbox supplies an origin-bound SOCKS5 Unix-socket proxy to programs that support it. It verifies the requested host and port. The approved command is responsible for TLS verification and for restricting HTTPS paths, repositories, and branches. Use the system trust bundle or a CA file selected through the trusted desktop startup environment. The command can use the mounted bundle at `/keeper/trust.pem`. Keeper discards subprocess output. Once a command receives the credential, work already dispatched to the remote can complete. Activity reports an uncertain result if Keeper cannot confirm it. Check the remote before retrying an uncertain mutation.
+
+For a Git action, an owner can approve a command like the following. Replace the repository and username once before granting access, and enable the input file option.
+
+```sh
+/usr/bin/sh -c '/usr/bin/git clone --bare /input /tmp/repository && /usr/bin/git -C /tmp/repository -c credential.helper= -c credential.username=YOUR_USERNAME -c core.hooksPath=/dev/null -c http.sslCAInfo=/keeper/trust.pem -c http.followRedirects=false -c push.recurseSubmodules=no push "$1" refs/heads/main:refs/heads/main' keeper https://github.com/OWNER/REPOSITORY.git
+```
+
+Enter the command on one line in the editor. Set the origin to `https://github.com` and the prompt variable to `GIT_ASKPASS`. The agent supplies a Git bundle of the branch it needs to push using `keepassxc-agent run --input ... < bundle`. With stdio, the agent sends the artifact as `input_base64` on `use_password`. Keeper checks the file size and digest before delivery and mounts only that file as read-only at `/input`. The limit is 8 MiB. The fixture uses a fresh bare repo and a fixed non-force refspec.
 
 ## Review agent edit requests
 

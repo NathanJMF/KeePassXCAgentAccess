@@ -10,7 +10,8 @@ from pykeepass import create_database
 
 from keepassxc_agent_access.access_settings import Action, ActionType
 from keepassxc_agent_access.command_action import deliver_credential, executable_digest, prepare_command, verify_scope_limits
-from keepassxc_agent_access.protocol import ListingError, validate_command
+from keepassxc_agent_access.command_prompt import askpass
+from keepassxc_agent_access.protocol import ListingError, UPLOAD_LIMIT, validate_command, validate_upload
 from keepassxc_agent_access.vault import VaultTarget, open_vault
 
 
@@ -21,6 +22,29 @@ class LocalCommandTests(TestCase):
         for invalid in (("cat",), ("/tmp/tool",), ("/usr/bin/../tool",), ("/usr/bin/cat", "x\ny")):
             with self.subTest(invalid=invalid), self.assertRaises(ValueError):
                 validate_command(invalid)
+
+    def test_network_scope_accepts_an_origin_and_pins_the_prompt_and_input_policy(self):
+        entry = "229b7a79-bcb0-450c-a320-bfccdd672f75"
+        details = {"kind": ActionType.NETWORK_PROMPT, "command": ("/usr/bin/true",),
+                   "executable_sha256": "0" * 64, "prompt_variable": "TOOL_ASKPASS"}
+        action = Action("network", "Network check", entry, "https://example.invalid", **details)
+        attached = Action("network", "Network check", entry, "https://example.invalid", accepts_input=True, **details)
+        self.assertNotEqual(action.scope, attached.scope)
+        with self.assertRaisesRegex(ValueError, "HTTPS origin"):
+            Action("network", "Network check", entry, "https://example.invalid/repository", **details)
+
+    def test_prompt_cannot_supply_a_password_for_a_username_role(self):
+        with patch("keepassxc_agent_access.command_prompt.socket.socket") as connect:
+            self.assertEqual(askpass("Username for the fixture:"), 1)
+            connect.assert_not_called()
+
+    def test_upload_descriptor_bounds_input_and_rejects_paths(self):
+        description = {"size": UPLOAD_LIMIT, "sha256": "a" * 64}
+        self.assertEqual(validate_upload(description), description)
+        for invalid in ({**description, "size": UPLOAD_LIMIT + 1}, {**description, "path": "/tmp/fixture"},
+                        {**description, "sha256": "unknown"}):
+            with self.subTest(invalid=invalid), self.assertRaises(ValueError):
+                validate_upload(invalid)
 
     def test_changed_executable_fails_before_starting_sandbox(self):
         with patch("keepassxc_agent_access.command_action.executable_digest", return_value="a" * 64), \

@@ -1,12 +1,15 @@
 """Serve metadata to one authorized OS account over a local pathname socket."""
 
+from contextlib import contextmanager
 from dataclasses import dataclass, field
+from hashlib import sha256
 import os
 from pathlib import Path
 from select import select
 import socket
 import stat
 import struct
+from tempfile import TemporaryDirectory
 from threading import Lock, Thread
 from time import monotonic
 
@@ -193,7 +196,7 @@ class ListingBroker:
 
         sent_response = False
 
-        def deliver(reply, scope=None):
+        def deliver(reply, scope=None, *, progress=False):
             nonlocal sent_response
             try:
                 connection.setblocking(False)
@@ -215,11 +218,41 @@ class ListingBroker:
                     if not permitted or sent == 0:
                         return False
                     if sent:
-                        sent_response = True
+                        if not progress:
+                            sent_response = True
                         payload = payload[sent:]
                 return True
             except (OSError, ValueError):
                 return False
+
+        @contextmanager
+        def upload(info, guard):
+            if not deliver(encode({"upload": True}), guard, progress=True):
+                raise ListingError("revoked")
+            upload_deadline = min(deadline, monotonic() + REQUEST_TIMEOUT)
+            try:
+                with TemporaryDirectory(prefix="keeper-command-input-") as directory:
+                    path = Path(directory) / "data"
+                    left = info["size"]
+                    digest = sha256()
+                    with path.open("xb") as stream:
+                        while left:
+                            readable, _, _ = select([connection], [], [], remaining(upload_deadline))
+                            if not readable:
+                                raise TimeoutError
+                            chunk = connection.recv(min(65536, left))
+                            if not chunk:
+                                raise EOFError
+                            stream.write(chunk)
+                            left -= len(chunk)
+                            digest.update(chunk)
+                    if digest.hexdigest() != info["sha256"]:
+                        raise ListingError("invalid_request")
+                    if not guard(guarded):
+                        raise ListingError("revoked")
+                    yield path
+            except (EOFError, OSError):
+                raise ListingError("invalid_request") from None
 
         with connection:
             try:
@@ -228,7 +261,13 @@ class ListingBroker:
                 except (EOFError, ValueError, RecursionError, TimeoutError):
                     raise ListingError("invalid_request") from None
                 if guarded():
-                    response = self.handler(request, listener.uid, listener.session, guarded, guarded, deliver)
+                    if isinstance(request, dict) and "upload" in request:
+                        if not getattr(self.handler, "accepts_upload", False):
+                            raise ListingError("invalid_request")
+                        response = self.handler(request, listener.uid, listener.session, guarded, guarded, deliver,
+                                                upload=upload)
+                    else:
+                        response = self.handler(request, listener.uid, listener.session, guarded, guarded, deliver)
                     if response is not None:
                         deliver(response)
             except ListingError as error:

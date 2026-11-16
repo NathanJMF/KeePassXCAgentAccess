@@ -40,6 +40,7 @@ class ActionType(str, Enum):
     BASIC = "https_basic_get"
     BEARER = "https_bearer_get"
     STDIN = "local_command_stdin"
+    NETWORK_PROMPT = "network_command_prompt"
 
     @property
     def label(self):
@@ -47,6 +48,7 @@ class ActionType(str, Enum):
             self.BASIC: "HTTPS Basic-auth GET",
             self.BEARER: "HTTPS Bearer token GET",
             self.STDIN: "Isolated command stdin",
+            self.NETWORK_PROMPT: "Networked command prompt",
         }[self]
 
 
@@ -112,14 +114,26 @@ class Action:
     kind: ActionType = ActionType.BASIC
     command: tuple[str, ...] = ()
     executable_sha256: str = ""
+    prompt_variable: str = ""
+    accepts_input: bool = False
+
+    @property
+    def is_command(self):
+        return self.kind in (ActionType.STDIN, ActionType.NETWORK_PROMPT)
 
     @property
     def destination(self):
-        return f"Local stdin · {join(self.command)}" if self.kind == ActionType.STDIN else self.url
+        if self.kind == ActionType.STDIN:
+            return f"Local stdin · {join(self.command)}"
+        if self.kind == ActionType.NETWORK_PROMPT:
+            return (f"{self.url} · {self.prompt_variable} · {join(self.command)}"
+                    + (" · read-only input" if self.accepts_input else ""))
+        return self.url
 
     @property
     def scope(self):
-        return self.kind, self.url, self.id, self.command, self.executable_sha256
+        return (self.kind, self.url, self.id, self.command, self.executable_sha256,
+                self.prompt_variable, self.accepts_input)
 
     def __post_init__(self):
         action_id(self.id)
@@ -131,13 +145,26 @@ class Action:
         except ValueError:
             raise ValueError("Choose a supported credential action.") from None
         object.__setattr__(self, "entry", uuid_text(self.entry))
-        if kind == ActionType.STDIN:
-            if self.url != "" or not re.fullmatch(r"[a-f0-9]{64}", self.executable_sha256):
-                raise ValueError("Choose a pinned local command without a network destination.")
+        if type(self.accepts_input) is not bool:
+            raise ValueError("Invalid input file setting.")
+        if kind in (ActionType.STDIN, ActionType.NETWORK_PROMPT):
+            if not isinstance(self.executable_sha256, str) or not re.fullmatch(r"[a-f0-9]{64}", self.executable_sha256):
+                raise ValueError("Choose a pinned system executable.")
             object.__setattr__(self, "command", validate_command(self.command))
+            if kind == ActionType.NETWORK_PROMPT:
+                if not isinstance(self.prompt_variable, str) or not re.fullmatch(
+                    r"[A-Z][A-Z0-9_]{0,39}_ASKPASS", self.prompt_variable
+                ):
+                    raise ValueError("Choose a credential prompt variable ending in _ASKPASS.")
+                destination = Destination.parse(self.url)
+                if destination.path != "/":
+                    raise ValueError("Enter the approved HTTPS origin. Put the exact resource in the command.")
+                object.__setattr__(self, "url", destination.url)
+            elif self.url or self.prompt_variable or self.accepts_input:
+                raise ValueError("Local stdin actions do not accept network or input settings.")
         else:
-            if self.command or self.executable_sha256:
-                raise ValueError("HTTPS actions do not accept local command settings.")
+            if self.command or self.executable_sha256 or self.prompt_variable or self.accepts_input:
+                raise ValueError("HTTPS actions do not accept command settings.")
             object.__setattr__(self, "command", ())
             object.__setattr__(self, "url", Destination.parse(self.url).url)
         object.__setattr__(self, "kind", kind)

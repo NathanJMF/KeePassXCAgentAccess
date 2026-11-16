@@ -6,10 +6,10 @@ from threading import BoundedSemaphore
 from time import monotonic, time
 
 from .approvals import Approval, ApprovalQueue
-from .access_settings import ActionType, action_id, uuid_text
+from .access_settings import action_id, uuid_text
 from .activity import ActivityError, Attribution, entry_label, entry_target_labels
 from .grants import OPTIONAL_METADATA_FIELDS, verifier
-from .protocol import RESPONSE_LIMIT, ListingError, encode, validate_command
+from .protocol import RESPONSE_LIMIT, ListingError, encode, validate_command, validate_upload
 from .settings import SettingsError
 
 
@@ -19,6 +19,8 @@ BROKER_REQUESTS = 240
 
 
 class ScopedBroker:
+    accepts_upload = True
+
     def __init__(self, workspace, grants, activity, edits=None, approvals=None):
         self.workspace = workspace
         self.grants = grants
@@ -61,13 +63,13 @@ class ScopedBroker:
         self.request_counts[key] += 1
         self.request_classes[active] += 1
 
-    def __call__(self, payload, uid, _engine, live, dispatch, deliver):
+    def __call__(self, payload, uid, _engine, live, dispatch, deliver, *, upload=None):
         try:
-            return self.handle(payload, uid, live, dispatch, deliver)
+            return self.handle(payload, uid, live, dispatch, deliver, upload=upload)
         except (ActivityError, SettingsError):
             raise ListingError("audit_unavailable") from None
 
-    def handle(self, payload, uid, live, dispatch, deliver):
+    def handle(self, payload, uid, live, dispatch, deliver, *, upload=None):
         try:
             if not isinstance(payload, dict) or type(payload.get("version")) is not int or payload["version"] != 1:
                 raise ValueError
@@ -77,6 +79,7 @@ class ScopedBroker:
             entry, binding_id, vault = None, None, None
             fields = ()
             command = None
+            input_info = None
             if operation in ("request_access", "request_edit") and keys == {"request"}:
                 pass
             elif operation == "edit_status" and keys == {"id"}:
@@ -90,12 +93,16 @@ class ScopedBroker:
                         or any(field not in OPTIONAL_METADATA_FIELDS for field in fields)
                         or len(set(fields)) != len(fields)):
                     raise ValueError
-            elif operation == "use_password" and {"entry", "action"} <= keys <= {"entry", "action", "vault", "command"}:
+            elif operation == "use_password" and {"entry", "action"} <= keys <= {"entry", "action", "vault", "command", "upload"}:
                 entry = uuid_text(payload["entry"])
                 binding_id = action_id(payload["action"])
                 vault = uuid_text(payload["vault"]) if "vault" in keys else None
                 if "command" in keys:
                     command = validate_command(payload["command"])
+                if "upload" in keys:
+                    if command is None or upload is None:
+                        raise ValueError
+                    input_info = validate_upload(payload["upload"])
             else:
                 raise ValueError
         except (ValueError, TypeError, KeyError, AttributeError):
@@ -151,12 +158,15 @@ class ScopedBroker:
                     for s in token.scope)
             )
             folder, title = entry_target_labels(session.entries, entry) if permitted and session else (None, None)
+            scope_summary = f"Requested entry fields · {', '.join(fields)}" if fields else None
+            if input_info is not None:
+                scope_summary = f"Input file · {input_info['size']} bytes · SHA-256 {input_info['sha256']}"
             event = self.activity.begin(
                 uid, context, name + (f" · {binding.action.name}" if permitted else ""),
                 binding.action.destination if permitted else None, entry if permitted else None,
                 vault=registration.name if registration else None, vault_id=chosen if registration else None,
                 token=token.id, agent=token.identity, project=token.project, folder=folder, entry_title=title,
-                scope=f"Requested entry fields · {', '.join(fields)}" if fields else None,
+                scope=scope_summary,
             )
 
         def guard(effect):
@@ -193,8 +203,8 @@ class ScopedBroker:
                 if session is None or (operation == "use_password" and not permitted):
                     raise ListingError("ineligible")
             if operation == "use_password":
-                expected = binding.action.command if binding.action.kind == ActionType.STDIN else None
-                if command != expected:
+                expected = binding.action.command if binding.action.is_command else None
+                if command != expected or binding.action.accepts_input != (input_info is not None):
                     raise ListingError("ineligible")
                 if session.worker.entry(entry) is None:
                     raise ListingError("ineligible")
@@ -215,6 +225,8 @@ class ScopedBroker:
                              "Visible fields: " + ", ".join(columns))
                 else:
                     scope = (" › ".join(part for part in (registration.name, folder, title) if part),)
+                    if input_info is not None:
+                        scope += (scope_summary,)
                 ticket = Approval(event, uid, context, name + (f" · {binding.action.name}" if binding else ""),
                                   scope, binding.action.destination if binding else None, monotonic() + self.approvals.timeout,
                                   identity=token.identity, project=token.project, requested=time())
@@ -237,19 +249,25 @@ class ScopedBroker:
                         send()
                     return guard(lambda: dispatch(audit_and_send))
 
-                if binding.action.kind == ActionType.STDIN:
+                if binding.action.is_command:
                     with self._command_slot():
-                        result = session.worker.use(binding.action, gate)
+                        if input_info is None:
+                            result = session.worker.use(binding.action, gate)
+                        else:
+                            with upload(input_info, guard) as input_path:
+                                result = session.worker.use(binding.action, gate, input_path=input_path)
                 else:
                     result = session.worker.use(binding.action, gate)
-            succeeded = result.get("outcome") != "failed"
+            succeeded = result.get("outcome", "succeeded") == "succeeded"
             frame = encode(result)
             if len(frame) > RESPONSE_LIMIT:
                 raise ListingError("too_large")
             delivered = deliver(frame, guard)
             if operation == "use_password":
-                # An HTTP request dispatched before revocation may still complete on its fixed endpoint.
-                self.activity.finish(event, "Succeeded" if succeeded else "Failed", result.get("http_status"))
+                # Already-dispatched remote work can still complete after revocation.
+                outcome = {"succeeded": "Succeeded", "failed": "Failed",
+                           "uncertain": "Interrupted · outcome unknown"}[result["outcome"]]
+                self.activity.finish(event, outcome, result.get("http_status"))
             elif not delivered:
                 raise ListingError("revoked")
             else:
