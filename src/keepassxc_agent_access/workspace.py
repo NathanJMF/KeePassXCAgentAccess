@@ -391,7 +391,7 @@ class Workspace:
                 self.generation += 1
 
     def token_auto_approval_enabled(self, setting):
-        return self.token_auto_approval_acknowledged and getattr(self, setting)
+        return not self.review_usage and self.token_auto_approval_acknowledged and getattr(self, setting)
 
     def acknowledge_token_auto_approval(self, acknowledged):
         with self.mutex:

@@ -64,11 +64,15 @@ The exported tray menu SHALL allow opening the Keeper window only. Access policy
 
 ### Requirement: Require acknowledgement for automatic token grants
 
-Keeper SHALL require a persisted owner acknowledgement before revealing or applying token auto-approval settings. Fresh acknowledgements SHALL start both token switches off. Withdrawing acknowledgement SHALL turn both switches off for future requests. Per-use approval and the global pause SHALL retain their independent behavior.
+Keeper SHALL require a persisted owner acknowledgement before revealing or applying token auto-approval settings. Fresh acknowledgements SHALL start both token switches off. Withdrawing acknowledgement SHALL turn both switches off for future requests. The main Auto Approve setting SHALL also be on for token auto-approval. The global pause SHALL retain its independent behavior.
 
 #### Scenario: Upgrade from a version with an enabled token switch
 - **WHEN** Keeper reads token auto-approval settings without a saved acknowledgement
 - **THEN** require owner review until the owner acknowledges the warning and enables a switch
+
+#### Scenario: The owner turns off the main Auto Approve setting
+- **WHEN** a new token or permission-change request arrives with main Auto Approve off
+- **THEN** the request awaits owner review even if its token switch is on
 
 ### Requirement: Review Keeper's owner boundary across surfaces
 

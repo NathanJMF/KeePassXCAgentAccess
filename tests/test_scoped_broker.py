@@ -172,6 +172,33 @@ class ScopedBrokerTests(unittest.TestCase):
         reopened.acknowledge_token_auto_approval(True)
         self.assertEqual(self.enroll([item], 2), {"status": "pending"})
 
+    def test_main_auto_approve_must_be_on_for_both_token_switches(self):
+        vault, other = self.vaults
+        item = {"metadata": True, "entry": self.entry, "vault": vault}
+        identifier = self.approve([item])
+        self.workspace.acknowledge_token_auto_approval(True)
+        self.workspace.set_token_auto_approval("auto_approve_tokens", True)
+        self.workspace.set_token_auto_approval("auto_approve_token_changes", True)
+        self.workspace.set_review_usage(True)
+
+        self.assertEqual(self.enroll([item], 1), {"status": "pending"})
+        change = {"change_id": str(uuid4()), "identity": "Fixture agent 0", "project": "Fixture",
+                  "items": [{**item, "vault": other}]}
+        self.assertEqual(self.invoke("request_access", request=change), {"status": "pending"})
+        scope, = self.grants.records[identifier].scope
+        self.assertEqual(scope.vault, vault)
+        self.assertEqual(self.activity.rows(action="Approve token permissions"), [])
+
+        self.workspace.set_review_usage(False)
+        self.assertEqual(self.enroll([item], 1), {"status": "pending"})
+        self.assertEqual(self.invoke("request_access", request=change), {"status": "pending"})
+        self.assertEqual(self.enroll([item], 2), {"status": "active"})
+        self.grants.decide(identifier, None, change_id=change["change_id"])
+        fresh_change = {**change, "change_id": str(uuid4())}
+        self.assertEqual(self.invoke("request_access", request=fresh_change), {"status": "active"})
+        scope, = self.grants.records[identifier].scope
+        self.assertEqual(scope.vault, other)
+
     def test_auto_enrollment_keeps_usage_paused_and_enforces_resolved_scope(self):
         self.workspace.acknowledge_token_auto_approval(True)
         self.workspace.set_token_auto_approval("auto_approve_tokens", True)

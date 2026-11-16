@@ -1029,9 +1029,11 @@ class WorkspaceApplication(Gtk.Application):
                               self._set_request_popups, "request-popups",
                               "Open the review window when a request arrives.")
         approvals = page("auto-approve", "Auto Approve", "changes-prevent-symbolic")
-        self._settings_switch(self._settings_card(approvals), "Auto Approve Agent Actions", not self.workspace.review_usage,
-                              self._set_usage_policy, "auto-approve-usage",
-                              "Skip prompts for enabled actions within each token’s approved permissions.")
+        self._settings_switch(
+            self._settings_card(approvals), "Enable Auto Approve", not self.workspace.review_usage,
+            self._set_usage_policy, "auto-approve-usage",
+            "Apply the automatic approval switches below.",
+        )
         actions = self._settings_card(approvals)
         actions.set_spacing(7)
         actions.pack_start(styled(_label("Auto Approve These Requests"), "keeper-settings-caption"), False, False, 0)
@@ -1094,7 +1096,7 @@ class WorkspaceApplication(Gtk.Application):
             card, "I Understand", self.workspace.token_auto_approval_acknowledged, acknowledge,
             "token-auto-approval-acknowledged",
             "These settings can automatically give agents access to more secrets or edits without individual "
-            "review.\nThey work even when the toolbar’s Auto Approve is off.", danger=True,
+            "review.\nThey apply only when the toolbar’s Auto Approve is on.", danger=True,
         )
         card.pack_start(suspended, False, False, 0)
         card.pack_start(revealer, False, False, 0)

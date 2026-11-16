@@ -1676,6 +1676,11 @@ def main(root):
                 assert settings_switch("auto-approve", "auto_approve_tokens", True,
                                        label="Access Tokens - Create")
                 assert old_access.read().auto_approve_tokens
+                assert not settings_switch("auto-approve", "auto-approve-usage", False)
+                assert settings_switch("auto-approve", "auto_approve_tokens")
+                assert not settings_switch("auto-approve", "auto_approve_tokens", False)
+                assert settings_switch("auto-approve", "auto_approve_tokens", True)
+                assert settings_switch("auto-approve", "auto-approve-usage", True)
                 initial_item = {"vault": first, "entry": first_entry, "metadata": True}
                 assert enroll("auto-token", [initial_item]) == {"status": "active"}
                 token = token_ids["auto-token"]
