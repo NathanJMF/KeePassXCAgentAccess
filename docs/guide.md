@@ -50,6 +50,20 @@ Keeper checks for external changes before replacing the encrypted file. If Keepe
 
 Keep Keeper’s installation, update files, desktop and keyring sockets, startup configuration, and owner settings outside the agent’s writable or controllable environment. Expose only the scoped Keeper tools, or isolate every other agent capability using a separate unprivileged OS account or an independently enforced sandbox. This includes shell execution, filesystem access, desktop and accessibility automation, and any escalation path. An agent that can act as the desktop owner has authority over Keeper’s settings, approvals, and installed code. The runner isolates its own MCP subprocess. The MCP host must control the runner command, profile, and startup environment. Approve installs and software updates from a trusted owner session.
 
+### Offline agent execution host
+
+`keeper-run-isolated` confines a complete local agent tool process and its descendants in a separate Linux identity, filesystem, PID namespace, and network namespace. It runs with bounded temporary storage and a verified resource scope. The tool host receives its own temporary home, workspace and token profile. Keeper mounts one dedicated broker socket and supplies its CLI there.
+
+From the owner session, `keeper-run-isolated --prepare` creates a dedicated directory. In Keeper’s **Broker Settings**, the owner can configure its `broker/broker.sock` path and the first subordinate UID for the desktop owner, as shown by `getsubids "$(id -un)"`. This prepares a separate deployment and does not enable agent access. The existing desktop runner configuration can be kept while testing against a disposable broker.
+
+Start the whole offline tool host from a trusted frontend with three separate stdio pipes. Pass `keeper-run-isolated --directory DIRECTORY -- /usr/bin/PROGRAM ...` as the process command. Inside the host, `keepassxc-agent` already points to the dedicated socket. The temporary profile lasts for the lifetime of that host. The frontend must treat its output as untrusted and restrict all capabilities to the isolated process. A client that needs model network access needs a separately isolated runtime with deliberately configured outbound connectivity.
+
+### Verify the whole deployment before resuming
+
+Keep Keeper paused until the exact agent deployment passes verification. Inventory shell and filesystem access, execution sessions, desktop and browser control, keyring and credential helpers, MCP and application bridges, automation, and escalation. Verify the owner boundary separately from every enabled backend with synthetic owner files, sockets and approvals. Check restarts and persistent jobs, and repeat the verification when a capability or policy changes. Keep the installed app and update source under owner control, and review updates from the trusted session.
+
+The offline-host integration test is `PYTHONPATH=src /usr/bin/python3 tests/isolated_host_scenarios.py`. It runs Python, shell and available Node tools against disposable desktop-like sockets and owner data, checks inherited authority and cancellation, and verifies that its isolated UID still reaches the intended synthetic Keeper broker. Use a fresh client to attach to the isolated runtime. Existing Codex Desktop chats and persistent tool sessions retain their original execution environment. A client that hosts tools outside the isolated process needs separate enforcement and verification for each of those tools.
+
 ## Configure a custom agent runtime
 
 For a separately managed runner, run the tray under the desktop owner's account and start the agent in a separate, unprivileged OS account. Keep the vault, key file, settings, keyring, desktop session, and process memory inaccessible to the runner. Install the CLI and source in a location the runner can read but cannot change.

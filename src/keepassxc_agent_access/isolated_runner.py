@@ -16,13 +16,15 @@ MODULES = ("__init__.py", "agent_cli.py", "agent_runner.py", "protocol.py", "run
 ATTRIBUTION = ("KEEPASSXC_AGENT_MODEL", "KEEPASSXC_AGENT_CHAT", "KEEPASSXC_AGENT_CHAT_ID")
 
 
-def namespace(uid, gid):
-    return [
+def namespace(uid, gid, *, confined=True):
+    arguments = [
         "/usr/bin/unshare", "--user", f"--map-users=0:{uid}:1", f"--map-groups=0:{gid}:1",
         "--setuid", "0", "--setgid", "0",
-        "/usr/bin/setpriv", "--clear-groups", "--no-new-privs", "--bounding-set=-all",
-        "--inh-caps=-all", "--ambient-caps=-all",
     ]
+    if confined:
+        arguments.extend(("/usr/bin/setpriv", "--clear-groups", "--no-new-privs", "--bounding-set=-all",
+                          "--inh-caps=-all", "--ambient-caps=-all"))
+    return arguments
 
 
 def subordinate_ids():
