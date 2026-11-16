@@ -15,7 +15,7 @@ gi.require_version("Gtk", "3.0")
 gi.require_version("Gdk", "3.0")
 from gi.repository import Gdk, Gio, GLib, Gtk, Pango
 
-from .access_settings import REVIEW_ACTIONS
+from .access_settings import REVIEW_ACTIONS, TOKEN_AUTO_APPROVAL_OPTIONS
 from .activity import ActivityError, ActivityStore
 from .approvals import ApprovalQueue
 from .broker import BrokerConfig, ListingBroker
@@ -1035,21 +1035,14 @@ class WorkspaceApplication(Gtk.Application):
         actions = self._settings_card(approvals)
         actions.set_spacing(7)
         actions.pack_start(styled(_label("Auto Approve These Requests"), "keeper-settings-caption"), False, False, 0)
-        actions.pack_start(styled(_label("Action switches apply when Auto Approve is on. Token switches work independently."),
+        actions.pack_start(styled(_label("These switches apply to actions within approved permissions."),
                                  "keeper-settings-description"), False, False, 0)
         for operation, caption in REVIEW_ACTIONS.items():
             actions.pack_start(Gtk.Separator(), False, False, 0)
             self._settings_switch(actions, caption, operation not in self.workspace.review_actions,
                                   lambda control, operation=operation: self._set_action_auto_approval(control, operation),
                                   operation)
-        for setting, caption in (
-            ("auto_approve_tokens", "Access Tokens - Create"),
-            ("auto_approve_token_changes", "Access Tokens - Update Permissions"),
-        ):
-            actions.pack_start(Gtk.Separator(), False, False, 0)
-            self._settings_switch(actions, caption, getattr(self.workspace, setting),
-                                  lambda control, setting=setting: self._set_token_auto_approval(control, setting),
-                                  setting)
+        self._token_auto_approval_settings(approvals)
         vaults = page("vaults", "Vaults", "drive-harddisk-symbolic")
         self._settings_switch(self._settings_card(vaults), "Start Unlocked", self.start_unlocked, self._set_start_unlocked,
                               "start-unlocked", "Use saved keyring passwords to unlock vaults when Keeper starts.")
@@ -1060,6 +1053,52 @@ class WorkspaceApplication(Gtk.Application):
         stack.set_visible_child_name("notifications")
         return dialog
 
+    def _token_auto_approval_settings(self, page):
+        card = self._settings_card(page)
+        card.pack_start(styled(_label("Token Auto-Approval"), "keeper-settings-caption"), False, False, 0)
+        suspended = styled(_label("Previous token settings are suspended until you acknowledge this warning "
+                                  "and choose which switches to enable."), "keeper-settings-description")
+        suspended.set_no_show_all(True)
+        suspended.set_visible(not self.workspace.token_auto_approval_acknowledged
+                              and (self.workspace.auto_approve_tokens or self.workspace.auto_approve_token_changes))
+
+        revealer = Gtk.Revealer(transition_type=Gtk.RevealerTransitionType.NONE,
+                                reveal_child=self.workspace.token_auto_approval_acknowledged)
+        revealer.set_name("token-auto-approval-options")
+        options = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=7)
+        options.pack_start(styled(_label("Danger"), "keeper-settings-caption", "keeper-settings-danger"),
+                           False, False, 0)
+        switches = {}
+        for setting, caption in TOKEN_AUTO_APPROVAL_OPTIONS.items():
+            options.pack_start(Gtk.Separator(), False, False, 0)
+            switches[setting] = self._settings_switch(
+                options, caption, getattr(self.workspace, setting),
+                lambda control, setting=setting: self._set_token_auto_approval(control, setting),
+                setting, danger=True,
+            )
+        revealer.add(options)
+
+        def acknowledge(control):
+            requested = control.get_active()
+            if requested != self.workspace.token_auto_approval_acknowledged:
+                self.owner_operation(lambda: self.workspace.acknowledge_token_auto_approval(requested))
+            acknowledged = self.workspace.token_auto_approval_acknowledged
+            control.set_active(acknowledged)
+            for setting, switch in switches.items():
+                switch.set_active(getattr(self.workspace, setting))
+            revealer.set_reveal_child(acknowledged)
+            suspended.set_visible(not acknowledged
+                                  and (self.workspace.auto_approve_tokens or self.workspace.auto_approve_token_changes))
+
+        self._settings_switch(
+            card, "I Understand", self.workspace.token_auto_approval_acknowledged, acknowledge,
+            "token-auto-approval-acknowledged",
+            "These settings can automatically give agents access to more secrets or edits without individual "
+            "review. They work even when the toolbar’s Auto Approve is off.", danger=True,
+        )
+        card.pack_start(suspended, False, False, 0)
+        card.pack_start(revealer, False, False, 0)
+
     @staticmethod
     def _settings_card(page):
         card = styled(Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=9), "keeper-settings-card")
@@ -1067,12 +1106,14 @@ class WorkspaceApplication(Gtk.Application):
         return card
 
     @staticmethod
-    def _settings_switch(page, caption, enabled, changed, name, detail=None):
+    def _settings_switch(page, caption, enabled, changed, name, detail=None, *, danger=False):
         row = Gtk.Box(spacing=16)
         labels = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=3)
         title = _label(caption)
         if detail:
             styled(title, "keeper-settings-caption")
+        if danger:
+            styled(title, "keeper-settings-danger")
         labels.pack_start(title, False, False, 0)
         if detail:
             labels.pack_start(styled(_label(detail), "keeper-settings-description"), False, False, 0)
@@ -1083,6 +1124,7 @@ class WorkspaceApplication(Gtk.Application):
         row.pack_start(labels, True, True, 0)
         row.pack_end(toggle, False, False, 0)
         page.pack_start(row, False, False, 0)
+        return toggle
 
     def _updates_settings_page(self, card):
         installation = Installation()
@@ -1181,13 +1223,8 @@ class WorkspaceApplication(Gtk.Application):
         enabled = control.get_active()
         if enabled == previous:
             return
-        try:
-            self.workspace.set_token_auto_approval(setting, enabled)
-            self.message = ""
-        except OWNER_ERRORS as error:
-            self.message = str(error) or "Could not save the token auto approval setting."
-            control.set_active(previous)
-        self._refresh()
+        self.owner_operation(lambda: self.workspace.set_token_auto_approval(setting, enabled))
+        control.set_active(getattr(self.workspace, setting))
 
     def _set_start_unlocked(self, control):
         enabled = control.get_active()

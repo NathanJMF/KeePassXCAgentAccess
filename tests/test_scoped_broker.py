@@ -136,7 +136,44 @@ class ScopedBrokerTests(unittest.TestCase):
         with patch("keepassxc_agent_access.scoped_broker.monotonic", return_value=120):
             self.assert_code("ineligible", "list_vaults")
 
+    def test_legacy_token_auto_approval_waits_for_acknowledgement_and_a_fresh_opt_in(self):
+        vault, other = self.vaults
+        item = {"metadata": True, "entry": self.entry, "vault": vault}
+        self.approve([item])
+        store = self.workspace.legacy_access
+        store.write(replace(store.read(), auto_approve_tokens=True, auto_approve_token_changes=True))
+        settings = json.loads(store.path.read_text())
+        del settings["token_auto_approval_acknowledged"]
+        store.path.write_text(json.dumps(settings))
+        reopened = Workspace(self.workspace.directory, None)
+        reopened.sessions = self.workspace.sessions
+        self.workspace = self.engine.workspace = self.grants.workspace = reopened
+
+        self.assertFalse(reopened.token_auto_approval_acknowledged)
+        with self.assertRaisesRegex(ValueError, "Accept the warning"):
+            reopened.set_token_auto_approval("auto_approve_tokens", True)
+        self.assertEqual(self.enroll([item], 1), {"status": "pending"})
+        change = {"change_id": str(uuid4()), "identity": "Fixture agent 0", "project": "Fixture",
+                  "items": [{**item, "vault": other}]}
+        self.assertEqual(self.invoke("request_access", request=change), {"status": "pending"})
+        self.assertTrue(reopened.paused)
+
+        reopened.acknowledge_token_auto_approval(True)
+        self.assertTrue(store.read().token_auto_approval_acknowledged)
+        self.assertFalse(store.read().auto_approve_tokens)
+        self.assertFalse(store.read().auto_approve_token_changes)
+        reopened.set_token_auto_approval("auto_approve_tokens", True)
+        reopened.set_token_auto_approval("auto_approve_token_changes", True)
+        reopened.acknowledge_token_auto_approval(False)
+        reset = Workspace(reopened.directory, None)
+        self.assertFalse(reset.token_auto_approval_acknowledged)
+        self.assertFalse(reset.auto_approve_tokens)
+        self.assertFalse(reset.auto_approve_token_changes)
+        reopened.acknowledge_token_auto_approval(True)
+        self.assertEqual(self.enroll([item], 2), {"status": "pending"})
+
     def test_auto_enrollment_keeps_usage_paused_and_enforces_resolved_scope(self):
+        self.workspace.acknowledge_token_auto_approval(True)
         self.workspace.set_token_auto_approval("auto_approve_tokens", True)
         self.workspace.pause()
         vault, other = self.vaults
@@ -152,6 +189,7 @@ class ScopedBrokerTests(unittest.TestCase):
         self.assertEqual((approved["decision"], approved["outcome"]), ("Auto approved", "Approved"))
 
     def test_auto_approval_preserves_manual_review_for_unresolved_requests(self):
+        self.workspace.acknowledge_token_auto_approval(True)
         self.workspace.set_token_auto_approval("auto_approve_tokens", True)
         label = {"metadata": True, "label": "Example entry"}
         self.assertEqual(self.enroll([label]), {"status": "pending"})
@@ -162,6 +200,7 @@ class ScopedBrokerTests(unittest.TestCase):
         self.assertEqual(self.activity.rows(action="Approve token"), [])
 
     def test_token_scope_replacement_preserves_current_access_until_decided(self):
+        self.workspace.acknowledge_token_auto_approval(True)
         self.workspace.set_token_auto_approval("auto_approve_tokens", True)
         vault, other = self.vaults
         initial = {"metadata": True, "entry": self.entry, "vault": vault}
@@ -198,6 +237,7 @@ class ScopedBrokerTests(unittest.TestCase):
         vault, other = self.vaults
         initial = {"metadata": True, "entry": self.entry, "vault": vault}
         identifier = self.approve([initial])
+        self.workspace.acknowledge_token_auto_approval(True)
         self.workspace.set_token_auto_approval("auto_approve_token_changes", True)
         saved = Workspace(self.workspace.directory, None)
         self.assertTrue(saved.auto_approve_token_changes)

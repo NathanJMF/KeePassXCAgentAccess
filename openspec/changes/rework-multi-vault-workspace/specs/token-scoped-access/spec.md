@@ -62,6 +62,14 @@ The exported tray menu SHALL allow opening the Keeper window only. Access policy
 - **WHEN** the caller invokes the exported tray menu item
 - **THEN** Keeper opens its window and preserves the current access state, settings, and approvals
 
+### Requirement: Require acknowledgement for automatic token grants
+
+Keeper SHALL require a persisted owner acknowledgement before revealing or applying token auto-approval settings. Fresh acknowledgements SHALL start both token switches off. Withdrawing acknowledgement SHALL turn both switches off for future requests. Per-use approval and the global pause SHALL retain their independent behavior.
+
+#### Scenario: Upgrade from a version with an enabled token switch
+- **WHEN** Keeper reads token auto-approval settings without a saved acknowledgement
+- **THEN** require owner review until the owner acknowledges the warning and enables a switch
+
 ### Requirement: Review Keeper's owner boundary across surfaces
 
 Changes to Keeper's agent-facing tools, desktop and tray interfaces, installation, and update paths SHALL be reviewed together for exposure of owner controls. Verify the supported boundaries with synthetic state and include each affected interface in the regression checks.

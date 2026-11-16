@@ -170,6 +170,7 @@ def check_tools(runner, anchor, target, endpoint, private, expected, url, calls,
 
         change = {**request, "change_id": str(uuid4()),
                   "items": [{"metadata": True, "vault": vault, "entry": unapproved["id"]}]}
+        workspace.acknowledge_token_auto_approval(True)
         workspace.set_token_auto_approval("auto_approve_token_changes", True)
         assert invoke("request_access", {"request": change}) == {"status": "active"}
         assert invoke("list_entries", {"vault": vault}) == {"entries": [unapproved]}

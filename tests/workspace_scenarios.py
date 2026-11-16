@@ -157,14 +157,25 @@ def main(root):
                 toggles = [widget for widget in descendants(pages.get_visible_child()) if isinstance(widget, Gtk.Switch)]
                 if page == "auto-approve":
                     assert [widget.get_name() for widget in toggles] == [
-                        "auto-approve-usage", *REVIEW_ACTIONS, "auto_approve_tokens", "auto_approve_token_changes",
+                        "auto-approve-usage", *REVIEW_ACTIONS, "token-auto-approval-acknowledged",
+                        "auto_approve_tokens", "auto_approve_token_changes",
                     ]
-                    assert toggles[-2].get_parent().get_parent() is toggles[-3].get_parent().get_parent()
+                    acknowledgement = toggles[-3]
+                    reveal = next(widget for widget in descendants(pages.get_visible_child())
+                                  if widget.get_name() == "token-auto-approval-options")
+                    assert reveal.get_reveal_child() == acknowledgement.get_active()
+                    danger = [widget.get_text() for widget in descendants(pages.get_visible_child())
+                              if isinstance(widget, Gtk.Label)
+                              and widget.get_style_context().has_class("keeper-settings-danger")]
+                    assert danger == ["I Understand", "Danger", "Access Tokens - Create",
+                                      "Access Tokens - Update Permissions"]
                 toggle = next(widget for widget in toggles if widget.get_name() == name)
                 if label is not None:
                     assert toggle.get_accessible().get_name() == label
                 if enabled is not None:
                     toggle.set_active(enabled)
+                if page == "auto-approve":
+                    assert reveal.get_reveal_child() == acknowledgement.get_active()
                 active.append(toggle.get_active())
                 dialog.close()
 
@@ -1658,6 +1669,8 @@ def main(root):
                 activity_group(same_scope, "Paused")
                 app.pause_button.clicked()
                 assert app.indicator.get_icon() == "keeper-agent-access-active"
+                assert not settings_switch("auto-approve", "token-auto-approval-acknowledged")
+                assert settings_switch("auto-approve", "token-auto-approval-acknowledged", True, label="I Understand")
                 assert not settings_switch("auto-approve", "auto_approve_token_changes",
                                            label="Access Tokens - Update Permissions")
                 assert settings_switch("auto-approve", "auto_approve_tokens", True,
@@ -1700,6 +1713,9 @@ def main(root):
                 assert ("grant-change", f"{token}/{change['change_id']}") not in app._review_requests()
                 decisions = old_activity.rows(action="Approve token permissions", agent="Agent auto-token")
                 assert [row["decision"] for row in decisions] == ["Auto approved", "Approved in Access"]
+                assert invoke("auto-token", "entries", "list", "--vault", first)["entries"][0]["id"] == first_entry
+                assert not settings_switch("auto-approve", "token-auto-approval-acknowledged", False)
+                assert not old_access.read().auto_approve_token_changes
                 assert invoke("auto-token", "entries", "list", "--vault", first)["entries"][0]["id"] == first_entry
 
                 set_screen_active(True)

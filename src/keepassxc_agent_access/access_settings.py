@@ -28,6 +28,11 @@ CREDENTIAL_REVIEW_ACTIONS = {
     "use_browser": "Passwords - Browser Sign-ins",
 }
 
+TOKEN_AUTO_APPROVAL_OPTIONS = {
+    "auto_approve_tokens": "Access Tokens - Create",
+    "auto_approve_token_changes": "Access Tokens - Update Permissions",
+}
+
 REVIEW_ACTIONS = {
     "list_vaults": "Vaults - List",
     "create_group": "Groups - Create",
@@ -327,6 +332,7 @@ class AccessSettings:
     start_unlocked: bool = True
     auto_approve_tokens: bool = False
     auto_approve_token_changes: bool = False
+    token_auto_approval_acknowledged: bool = False
 
     def for_vault(self, identity):
         return dict(self.vaults).get(identity, VaultPolicy())
@@ -357,9 +363,11 @@ class AccessStore:
             start_unlocked = data.get("start_unlocked", True)
             auto_approve_tokens = data.get("auto_approve_tokens", False)
             auto_approve_token_changes = data.get("auto_approve_token_changes", False)
+            token_auto_approval_acknowledged = data.get("token_auto_approval_acknowledged", False)
             if (type(retention) is not int or not 1 <= retention <= 365 or type(review_usage) is not bool
                     or type(start_unlocked) is not bool or type(auto_approve_tokens) is not bool
-                    or type(auto_approve_token_changes) is not bool or not isinstance(review_actions, list)
+                    or type(auto_approve_token_changes) is not bool or type(token_auto_approval_acknowledged) is not bool
+                    or not isinstance(review_actions, list)
                     or any(not isinstance(action, str) for action in review_actions)):
                 raise ValueError
             vaults = tuple(
@@ -371,7 +379,7 @@ class AccessStore:
             )
             return AccessSettings(AccessMode(data["mode"]), endpoint, uid, retention, vaults, review_usage,
                                   normalize_review_actions(review_actions), start_unlocked,
-                                  auto_approve_tokens, auto_approve_token_changes)
+                                  auto_approve_tokens, auto_approve_token_changes, token_auto_approval_acknowledged)
         except FileNotFoundError:
             return AccessSettings()
         except (OSError, AttributeError, ValueError, TypeError, KeyError):
@@ -391,6 +399,7 @@ class AccessStore:
             "start_unlocked": settings.start_unlocked,
             "auto_approve_tokens": settings.auto_approve_tokens,
             "auto_approve_token_changes": settings.auto_approve_token_changes,
+            "token_auto_approval_acknowledged": settings.token_auto_approval_acknowledged,
             "endpoint": settings.endpoint,
             "uid": settings.uid,
             "retention_days": settings.retention_days,

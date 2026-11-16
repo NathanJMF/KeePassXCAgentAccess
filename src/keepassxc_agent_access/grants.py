@@ -248,7 +248,9 @@ class Grants:
             self._check_request_capacity()
             record = Grant(new_id(), digest, uid, time(), identity, project, attribution, items)
             self._change(record, "Request token", "Pending approval")
-            choices = self._automatic_choices(items) if self.workspace.auto_approve_tokens else None
+            choices = None
+            if self.workspace.token_auto_approval_enabled("auto_approve_tokens"):
+                choices = self._automatic_choices(items)
             if choices:
                 self._decide(record, choices, automatic=True)
                 return "active"
@@ -270,7 +272,9 @@ class Grants:
         change = PermissionChange(change_id, time(), attribution, items)
         superseded = (*record.superseded_changes, previous.id) if previous else record.superseded_changes
         row = replace(record, change=change, superseded_changes=superseded)
-        choices = self._automatic_choices(items) if self.workspace.auto_approve_token_changes else None
+        choices = None
+        if self.workspace.token_auto_approval_enabled("auto_approve_token_changes"):
+            choices = self._automatic_choices(items)
         self._change(row, "Request token permissions", "Pending approval", context=attribution,
                      target_scope=tuple(choice.scope for choice in choices) if choices else ())
         if choices:

@@ -9,7 +9,7 @@ from pathlib import Path
 from threading import Event, RLock
 from uuid import uuid4
 
-from .access_settings import Action, AccessStore, label, uuid_text
+from .access_settings import Action, AccessStore, TOKEN_AUTO_APPROVAL_OPTIONS, label, uuid_text
 from .keyring import KeyringError
 from .settings import SettingsError, SettingsStore, write_private_json
 from .vault import UnlockCancelled, VaultChanged, VaultError, VaultTarget, open_vault
@@ -81,6 +81,7 @@ class Workspace:
         self.review_actions = preferences.review_actions
         self.auto_approve_tokens = preferences.auto_approve_tokens
         self.auto_approve_token_changes = preferences.auto_approve_token_changes
+        self.token_auto_approval_acknowledged = preferences.token_auto_approval_acknowledged
         self.generation = 0
         self._load()
 
@@ -389,8 +390,27 @@ class Workspace:
                 self.review_actions = actions
                 self.generation += 1
 
+    def token_auto_approval_enabled(self, setting):
+        return self.token_auto_approval_acknowledged and getattr(self, setting)
+
+    def acknowledge_token_auto_approval(self, acknowledged):
+        with self.mutex:
+            if self.token_auto_approval_acknowledged == acknowledged:
+                return
+            settings = self.legacy_access.read()
+            # A fresh opt-in must not silently enable a legacy or previously disabled policy.
+            self.legacy_access.write(replace(settings, token_auto_approval_acknowledged=acknowledged,
+                                             auto_approve_tokens=False, auto_approve_token_changes=False))
+            self.token_auto_approval_acknowledged = acknowledged
+            self.auto_approve_tokens = False
+            self.auto_approve_token_changes = False
+
     def set_token_auto_approval(self, setting, enabled):
         with self.mutex:
+            if setting not in TOKEN_AUTO_APPROVAL_OPTIONS:
+                raise ValueError("Choose a token auto-approval setting.")
+            if enabled and not self.token_auto_approval_acknowledged:
+                raise ValueError("Accept the warning before enabling token auto-approval.")
             self.legacy_access.write(replace(self.legacy_access.read(), **{setting: enabled}))
             setattr(self, setting, enabled)
 

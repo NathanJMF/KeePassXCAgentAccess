@@ -303,6 +303,9 @@ button.keeper-delete {
 #keeper-settings .keeper-settings-description {
     color: @keeper_muted;
 }
+#keeper-settings .keeper-settings-danger {
+    color: @keeper_failure;
+}
 #keeper-settings switch:checked {
     background-image: none;
     background-color: #3f63d4;
