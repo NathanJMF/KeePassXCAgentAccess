@@ -312,7 +312,7 @@ class VaultApplication(Gtk.Application):
             self._present()
 
     def _present(self, *_):
-        if not self.desktop.locked:
+        if not self.desktop.locked or not getattr(self.desktop, "available", True):
             self.window.present()
             self._refresh()
 
