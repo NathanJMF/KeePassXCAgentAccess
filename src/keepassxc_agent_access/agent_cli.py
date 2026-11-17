@@ -1,12 +1,15 @@
 """Agent-side command. This module needs only the Python standard library."""
 
 import argparse
+import ipaddress
+import re
 from hashlib import sha256
 import os
 import socket
 import sys
 from time import monotonic
 from uuid import UUID
+from urllib.parse import urlsplit
 
 from .runner_token import UninitializedProfile, credential
 from .protocol import (
@@ -16,6 +19,8 @@ from .protocol import (
 
 
 ENTRY_FIELDS = ("username", "url")
+USE_TYPES = frozenset(("local_command", "networked_command", "https", "browser"))
+CREDENTIAL_USE_TYPES = USE_TYPES | {"https_body"}
 EDIT_STATUSES = ("pending", "applying", "applied", "denied", "stale", "interrupted", "failed")
 EDIT_OPERATIONS = {
     "create_entry": (("parent",), {"title"}, {"username", "url"}),
@@ -70,6 +75,88 @@ def edit_request(data):
     return {**data, **normalized}
 
 
+def https_target(value, *, origin=False):
+    """Validate agent-side HTTPS syntax without importing owner-side modules."""
+    if (not isinstance(value, str) or not re.fullmatch(r"[!-~]{1,2048}", value)
+            or any(char in value for char in "?#\\")):
+        raise ValueError
+    parts = urlsplit(value)
+    if parts.scheme != "https" or not parts.hostname or "@" in parts.netloc or "%" in parts.netloc:
+        raise ValueError
+    host = parts.hostname
+    authority = r"\[[0-9a-fA-F:.]+\](?::[0-9]+)?" if ":" in host else r"[A-Za-z0-9.-]+(?::[0-9]+)?"
+    if not re.fullmatch(authority, parts.netloc):
+        raise ValueError
+    port = 443 if parts.port is None else parts.port
+    if not 0 < port <= 65535:
+        raise ValueError
+    if ":" in host:
+        host = str(ipaddress.IPv6Address(host))
+    elif not re.fullmatch(r"[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?", host):
+        raise ValueError
+    path = parts.path or "/"
+    if path.startswith("//") or origin and path != "/":
+        raise ValueError
+    authority = f"[{host}]" if ":" in host else host
+    return f"https://{authority}:{port}{path}"
+
+
+def usage_request(data):
+    """Check descriptor shape; the owner broker independently compiles and authorizes it."""
+    if not isinstance(data, dict) or data.get("type") not in USE_TYPES:
+        raise ValueError
+    kind = data["type"]
+    if kind in ("local_command", "networked_command"):
+        keys = {"type", "command"}
+        if kind == "networked_command":
+            keys |= {"origin", "prompt_variable"}
+        optional = {"environment", "prompt_contains"} if kind == "networked_command" else set()
+        if not keys <= data.keys() <= keys | optional:
+            raise ValueError
+        command = validate_command(data["command"])
+        if kind == "networked_command":
+            https_target(data["origin"], origin=True)
+            expected_prompt = data.get("prompt_contains", "password")
+            if (not isinstance(expected_prompt, str) or not expected_prompt.strip()
+                    or not expected_prompt.isprintable() or len(expected_prompt) > 80):
+                raise ValueError
+            environment = data.get("environment", {})
+            if (not isinstance(environment, dict) or len(environment) > 16
+                    or any(not isinstance(name, str) or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]{0,63}", name)
+                           or not isinstance(value, str) or len(value) > 1024 or value and not value.isprintable()
+                           for name, value in environment.items())
+                    or sum(len(name) + len(value) for name, value in environment.items()) > 4096):
+                raise ValueError
+            if (not isinstance(data["prompt_variable"], str)
+                    or not re.fullmatch(r"[A-Z][A-Z0-9_]{0,39}_ASKPASS", data["prompt_variable"])):
+                raise ValueError
+        return {**data, "command": list(command)}
+    if kind == "https":
+        if not {"type", "url", "auth"} <= data.keys() <= {"type", "url", "auth", "method", "json", "headers", "query"}:
+            raise ValueError
+        if (data["auth"] not in ("basic", "bearer", "template")
+                or data.get("method", "GET") not in ("GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS")):
+            raise ValueError
+        https_target(data["url"])
+        if "json" in data and not isinstance(data["json"], (dict, str)):
+            raise ValueError
+        for key in ("headers", "query"):
+            if key in data and (not isinstance(data[key], dict) or len(data[key]) > (32 if key == "query" else 16)
+                    or any(not isinstance(name, str) or not name or not isinstance(value, str)
+                           for name, value in data[key].items())):
+                raise ValueError
+    else:
+        keys = {"type", "url", "submit_url", "form_id", "username_field", "password_field", "success_id"}
+        if not keys <= data.keys() <= keys | {"success_url"} or any(not isinstance(value, str) for value in data.values()):
+            raise ValueError
+        for key in ("url", "submit_url", "success_url"):
+            if data.get(key):
+                https_target(data[key])
+    if len(encode(data)) >= REQUEST_LIMIT:
+        raise ValueError
+    return data
+
+
 def _validate_access_details(reply):
     required = {"status", "identity", "project", "model", "chat", "chat_id", "scope", "requested_items", "pending_change"}
     if set(reply) != required:
@@ -88,7 +175,17 @@ def _validate_access_details(reply):
         if not isinstance(values, list) or len(values) > 16:
             raise ValueError
         for value in values:
-            if not isinstance(value, dict) or set(value) != fields:
+            if (not isinstance(value, dict) or not fields <= value.keys() <= fields | {"uses", "origins"}
+                    or bool({"uses", "origins"} & value.keys()) and not {"uses", "origins"} <= value.keys()):
+                raise ValueError
+            uses, origins = value.get("uses", []), value.get("origins", [])
+            if (not isinstance(uses, list) or any(not isinstance(use, str) or use not in CREDENTIAL_USE_TYPES for use in uses)
+                    or len(set(uses)) != len(uses) or "https_body" in uses and "https" not in uses
+                    or not isinstance(origins, list) or len(origins) > 8
+                    or any(https_target(origin, origin=True) != origin for origin in origins)
+                    or len(set(origins)) != len(origins)
+                    or bool(set(uses) - {"local_command"}) != bool(origins)
+                    or value.get("group") is not None and uses):
                 raise ValueError
             for key in ("vault", "entry", "group"):
                 if value[key] is not None and edit_uuid(value[key]) != value[key]:
@@ -189,6 +286,10 @@ def _validate(reply, payload):
                 raise ListingError("invalid_response")
         return reply
     if operation == "use_password":
+        if payload.get("usage", {}).get("type") in ("local_command", "networked_command"):
+            if reply != {"outcome": "dispatched"}:
+                raise ListingError("invalid_response")
+            return reply
         if "command" in payload:
             if set(reply) != {"outcome"} or reply["outcome"] not in ("succeeded", "failed", "uncertain"):
                 raise ListingError("invalid_response")
@@ -296,16 +397,20 @@ def main(argv=None):
                          help="Include an additional approved metadata field")
     listing.add_argument("--include-reviewed", action="store_true", help=argparse.SUPPRESS)
     listing.set_defaults(operation="list_entries")
-    use = topics.add_parser("use", help="Use a credential through a configured action")
+    use = topics.add_parser("use", help="Read a credential-use descriptor from stdin, or run a legacy configured action")
     use.add_argument("--vault", help="Scoped vault ID")
     use.add_argument("--entry", required=True, help="Entry UUID")
-    use.add_argument("--action", required=True, help="Owner-configured action ID")
+    use.add_argument("--action", help="Legacy owner-configured action ID; omit to read a usage descriptor")
     use.add_argument("--json", action="store_true", required=True, help="Emit JSON")
     use.set_defaults(operation="use_password")
     run = topics.add_parser("run", help="Use a Keeper credential with an approved isolated command")
     run.add_argument("--vault", help="Scoped vault ID")
     run.add_argument("--entry", required=True, help="Entry UUID")
-    run.add_argument("--action", required=True, help="Approved command action ID")
+    run.add_argument("--action", help="Legacy approved command action ID")
+    run.add_argument("--origin", help="The exact approved network destination")
+    run.add_argument("--prompt-variable", help="Private credential prompt variable ending in _ASKPASS")
+    run.add_argument("--prompt-contains", help="Literal text identifying the credential prompt; defaults to password")
+    run.add_argument("--environment-json", help="Nonsecret JSON environment for a dynamic networked command")
     run.add_argument("--input", action="store_true", help="Read an approved input file from stdin")
     run.add_argument("--json", action="store_true", required=True, help="Emit JSON")
     run.add_argument("command", nargs=argparse.REMAINDER, help="The exact approved executable and arguments")
@@ -319,9 +424,33 @@ def main(argv=None):
             parser.error(str(error))
     payload = {"version": 1, "operation": options.operation}
     if options.operation == "use_password":
-        payload.update(entry=options.entry, action=options.action)
+        payload["entry"] = options.entry
+        if options.action:
+            payload["action"] = options.action
         if hasattr(options, "command"):
-            payload["command"] = options.command
+            if options.action:
+                if options.origin or options.prompt_variable or options.environment_json or options.prompt_contains:
+                    parser.error("Use either a legacy action ID or a supplied network destination.")
+                payload["command"] = options.command
+            else:
+                if bool(options.origin) != bool(options.prompt_variable):
+                    parser.error("Networked commands need both --origin and --prompt-variable.")
+                if (options.environment_json or options.prompt_contains) and not options.origin:
+                    parser.error("Declared environment requires a dynamic network destination.")
+                if options.input and not options.origin:
+                    parser.error("Only networked commands accept an input artifact.")
+                usage = {"type": "networked_command" if options.origin else "local_command",
+                         "command": list(options.command)}
+                if options.origin:
+                    usage.update(origin=options.origin, prompt_variable=options.prompt_variable)
+                try:
+                    if options.prompt_contains:
+                        usage["prompt_contains"] = options.prompt_contains
+                    if options.environment_json:
+                        usage["environment"] = decode(options.environment_json.encode("utf-8"))
+                    payload["usage"] = usage_request(usage)
+                except ValueError:
+                    parser.error("Invalid credential-use command or destination.")
     elif getattr(options, "include_reviewed", False):
         payload["include_reviewed"] = True
     if options.operation == "edit_status":
@@ -350,6 +479,14 @@ def main(argv=None):
             if not 0 < len(input_data) <= UPLOAD_LIMIT:
                 raise ListingError("too_large")
             payload["upload"] = {"size": len(input_data), "sha256": sha256(input_data).hexdigest()}
+        if options.operation == "use_password" and "action" not in payload and "usage" not in payload:
+            try:
+                raw = sys.stdin.buffer.read(REQUEST_LIMIT)
+                if len(raw) >= REQUEST_LIMIT:
+                    raise ValueError
+                payload["usage"] = usage_request(decode(raw))
+            except (ValueError, TypeError, RecursionError):
+                raise ListingError("invalid_request") from None
         token_file = os.environ.get("KEEPASSXC_AGENT_TOKEN_FILE")
         if options.operation in ("request_access", "request_edit"):
             try:

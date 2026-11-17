@@ -2,15 +2,18 @@
 
 from collections import Counter, deque
 from contextlib import contextmanager
+from hashlib import sha256
+from types import SimpleNamespace
 from threading import BoundedSemaphore
 from time import monotonic, time
 
 from .approvals import Approval, ApprovalQueue
-from .access_settings import action_id, uuid_text
+from .access_settings import ActionType, Destination, action_id, uuid_text
 from .activity import ActivityError, Attribution, entry_label, entry_target_labels
 from .grants import OPTIONAL_METADATA_FIELDS, verifier
-from .protocol import RESPONSE_LIMIT, ListingError, encode, validate_command, validate_upload
+from .protocol import RESPONSE_LIMIT, ListingError, decode, encode, validate_command, validate_upload
 from .settings import SettingsError
+from .usage import requires_body_permission, usage_action, usage_origin
 
 
 REQUEST_WINDOW = 60
@@ -24,6 +27,9 @@ def access_details(token):
         result = {key: getattr(value, key) for key in
                   ("vault", "entry", "group", "metadata", "username", "url", "action")}
         result["edits"] = list(value.edits)
+        if value.uses:
+            result["uses"] = list(value.uses)
+            result["origins"] = list(value.origins)
         if requested:
             result["label"] = value.label
         return result
@@ -101,6 +107,7 @@ class ScopedBroker:
             fields = ()
             command = None
             input_info = None
+            usage = None
             if operation in ("request_access", "request_edit") and keys == {"request"}:
                 pass
             elif operation == "edit_status" and keys == {"id"}:
@@ -121,6 +128,17 @@ class ScopedBroker:
                         or any(field not in OPTIONAL_METADATA_FIELDS for field in fields)
                         or len(set(fields)) != len(fields)):
                     raise ValueError
+            elif operation == "use_password" and {"entry", "usage"} <= keys <= {"entry", "usage", "vault", "upload"}:
+                entry = uuid_text(payload["entry"])
+                vault = uuid_text(payload["vault"]) if "vault" in keys else None
+                if not isinstance(payload["usage"], dict):
+                    raise ValueError
+                # Own a detached descriptor before review or dispatch can wait.
+                usage = decode(encode(payload["usage"]))
+                if "upload" in keys:
+                    if upload is None:
+                        raise ValueError
+                    input_info = validate_upload(payload["upload"])
             elif operation == "use_password" and {"entry", "action"} <= keys <= {"entry", "action", "vault", "command", "upload"}:
                 entry = uuid_text(payload["entry"])
                 binding_id = action_id(payload["action"])
@@ -144,7 +162,7 @@ class ScopedBroker:
             raise ListingError("token_required")
 
         if isinstance(credential, str) and credential and credential in encode(
-            {"context": payload.get("context"), "request": payload.get("request")}
+            {key: value for key, value in payload.items() if key != "credential"}
         ).decode("ascii"):
             raise ListingError("invalid_request")
 
@@ -182,23 +200,52 @@ class ScopedBroker:
                 chosen = next(iter(registered))
             registration = self.workspace.registrations.get(chosen) if chosen in registered else None
             session = self.workspace.session(chosen) if registration else None
-            binding = registration.binding(entry, binding_id) if registration and entry else None
+            binding = registration.binding(entry, binding_id) if registration and entry and usage is None else None
+            if usage is not None:
+                try:
+                    action = usage_action(entry, usage, accepts_input=input_info is not None, pin_executable=False)
+                except (ValueError, TypeError, KeyError):
+                    denied = self.activity.begin(uid, context, "Use password", None,
+                                                 vault=registration.name if registration else None,
+                                                 vault_id=chosen if registration else None,
+                                                 token=token.id, agent=token.identity, project=token.project)
+                    self.activity.finish(denied, "Denied")
+                    raise ListingError("invalid_request") from None
+                binding = SimpleNamespace(action=action)
             review_operation = binding.action.kind.review_operation if binding else operation
             review_usage = self.workspace.requires_review(review_operation)
-            permitted = (
-                binding is not None and binding.action.enabled and
-                any((s.vault, s.entry, s.action, s.revision) == (chosen, entry, binding_id, binding.revision)
-                    for s in token.scope)
-            )
-            folder, title = entry_target_labels(session.entries, entry) if permitted and session else (None, None)
+            if usage is not None:
+                origin = None
+                if binding.action.kind != ActionType.STDIN:
+                    origin = usage_origin(binding.action.url)
+                candidates = tuple(s for s in token.scope
+                                   if (s.vault, s.entry) == (chosen, entry) and usage["type"] in s.uses
+                                   and (origin is None or origin in s.origins)
+                                   and (not requires_body_permission(binding.action) or "https_body" in s.uses))
+                permitted = registration is not None and any(
+                    s.use_revision is not None and s.use_revision == registration.credential_revision(entry)
+                    for s in candidates)
+                credential_changed = bool(candidates) and not permitted
+            else:
+                permitted = (
+                    binding is not None and binding.action.enabled and
+                    any((s.vault, s.entry, s.action, s.revision) == (chosen, entry, binding_id, binding.revision)
+                        for s in token.scope)
+                )
+            recognized = permitted or usage is not None and credential_changed
+            folder, title = entry_target_labels(session.entries, entry) if recognized and session else (None, None)
             scope_summary = f"Requested entry fields · {', '.join(fields)}" if fields else None
-            if permitted and binding.action.request_summary:
+            if usage is not None:
+                scope_summary = f"Agent-supplied {usage.get('type', 'operation')} · SHA-256 {sha256(encode(usage)).hexdigest()}"
+            elif permitted and binding.action.request_summary:
                 scope_summary = binding.action.request_summary
             if input_info is not None:
-                scope_summary = f"Input file · {input_info['size']} bytes · SHA-256 {input_info['sha256']}"
+                artifact_summary = f"Input file · {input_info['size']} bytes · SHA-256 {input_info['sha256']}"
+                scope_summary = f"{scope_summary} · {artifact_summary}" if scope_summary else artifact_summary
             event = self.activity.begin(
-                uid, context, name + (f" · {binding.action.name}" if permitted else ""),
-                binding.action.destination if permitted else None, entry if permitted else None,
+                uid, context, name + (f" · {binding.action.name}" if recognized else ""),
+                (self._usage_destination(binding.action) if usage is not None else binding.action.destination)
+                if recognized else None, entry if recognized else None,
                 vault=registration.name if registration else None, vault_id=chosen if registration else None,
                 token=token.id, agent=token.identity, project=token.project, folder=folder, entry_title=title,
                 scope=scope_summary,
@@ -219,7 +266,11 @@ class ScopedBroker:
                     record = self.workspace.registrations.get(chosen)
                     if record is None:
                         return False
-                    if binding is not None:
+                    if usage is not None and not any(
+                            s.use_revision is not None and s.use_revision == record.credential_revision(entry)
+                            for s in candidates):
+                        return False
+                    if binding is not None and usage is None:
                         saved = record.binding(entry, binding_id)
                         if saved is not binding or not saved.action.enabled:
                             return False
@@ -235,14 +286,24 @@ class ScopedBroker:
             if operation != "list_vaults":
                 if vault is None and len(registered) > 1:
                     raise ListingError("select_vault")
+                if operation == "use_password" and usage is not None and credential_changed:
+                    raise ListingError("credential_changed")
                 if session is None or (operation == "use_password" and not permitted):
                     raise ListingError("ineligible")
             if operation == "use_password":
                 expected = binding.action.command if binding.action.is_command else None
-                if command != expected or binding.action.accepts_input != (input_info is not None):
+                if ((usage is None and command != expected)
+                        or binding.action.accepts_input != (input_info is not None)):
                     raise ListingError("ineligible")
                 if session.worker.entry(entry) is None:
                     raise ListingError("ineligible")
+                if usage is not None and binding.action.is_command:
+                    # Hash only an authorized command, outside the global owner
+                    # mutex. The worker rechecks this pin before execution.
+                    try:
+                        binding.action = usage_action(entry, usage, accepts_input=input_info is not None)
+                    except (ValueError, TypeError, OSError):
+                        raise ListingError("ineligible") from None
             if not guard(live):
                 raise ListingError("revoked")
             if review_usage:
@@ -260,12 +321,21 @@ class ScopedBroker:
                              "Visible fields: " + ", ".join(columns))
                 else:
                     scope = (" › ".join(part for part in (registration.name, folder, title) if part),)
-                    if binding.action.request_json:
+                    if usage is not None:
+                        scope += ("Requested operation · " + encode(usage).decode("ascii").strip(),)
+                        if input_info is not None:
+                            scope += (artifact_summary,)
+                        if binding.action.opaque:
+                            scope += ("Command output and exit status stay private. The agent receives only a dispatch receipt.",)
+                        if binding.action.kind == ActionType.NETWORK_PROMPT:
+                            scope += ("This command may send the credential to the approved TCP peer and port. The relay does not verify the command's application protocol.",)
+                    elif binding.action.request_json:
                         scope += ("Fixed JSON body · " + binding.action.request_json,)
                     elif scope_summary:
                         scope += (scope_summary,)
                 ticket = Approval(event, uid, context, name + (f" · {binding.action.name}" if binding else ""),
-                                  scope, binding.action.destination if binding else None, monotonic() + self.approvals.timeout,
+                                  scope, (self._usage_destination(binding.action) if usage is not None else binding.action.destination)
+                                  if binding else None, monotonic() + self.approvals.timeout,
                                   identity=token.identity, project=token.project, requested=time())
                 result = self.approvals.wait(ticket, lambda: guard(live))
                 if result != "approved":
@@ -295,15 +365,20 @@ class ScopedBroker:
                                 result = session.worker.use(binding.action, gate, input_path=input_path)
                 else:
                     result = session.worker.use(binding.action, gate)
-            succeeded = result.get("outcome", "succeeded") == "succeeded"
+            private_outcome = result.pop("_execution_outcome", None)
+            if binding is not None and binding.action.opaque and dispatch_started:
+                result = {"outcome": "dispatched"}
+            succeeded = result.get("outcome", "succeeded") in ("succeeded", "dispatched")
             frame = encode(result)
             if len(frame) > RESPONSE_LIMIT:
                 raise ListingError("too_large")
             delivered = deliver(frame, guard)
             if operation == "use_password":
                 # Already-dispatched remote work can still complete after revocation.
-                outcome = {"succeeded": "Succeeded", "failed": "Failed",
+                outcome = {"succeeded": "Succeeded", "failed": "Failed", "dispatched": "Dispatched",
                            "uncertain": "Interrupted · outcome unknown"}[result["outcome"]]
+                if result["outcome"] == "dispatched" and private_outcome in ("succeeded", "failed", "uncertain"):
+                    outcome = {"succeeded": "Succeeded", "failed": "Failed", "uncertain": "Interrupted · outcome unknown"}[private_outcome]
                 self.activity.finish(event, outcome, result.get("http_status"))
             elif not delivered:
                 raise ListingError("revoked")
@@ -325,8 +400,20 @@ class ScopedBroker:
                 outcome = "Paused"
             elif error.code == "expired":
                 outcome = "Expired"
+            elif error.code == "credential_changed":
+                outcome = "Stale"
             self.activity.finish(event, outcome)
             raise
+
+    @staticmethod
+    def _usage_destination(action):
+        if action.kind == ActionType.STDIN:
+            return "Isolated local command"
+        if action.kind == ActionType.NETWORK_PROMPT:
+            target = Destination.parse(action.url)
+            return f"TCP peer {target.host}:{target.port}"
+        operation = "Browser form POST" if action.browser else action.method
+        return f"{operation} {usage_origin(action.url)}"
 
     def _discover(self, uid, context, live, deliver, *, vault=None, summary=False):
         with self.workspace.mutex:

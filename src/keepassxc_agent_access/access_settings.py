@@ -8,7 +8,7 @@ import json
 from pathlib import Path
 import re
 from shlex import join
-from urllib.parse import urlsplit
+from urllib.parse import urlsplit, urlencode
 from uuid import UUID
 
 from .protocol import decode, validate_command
@@ -49,8 +49,8 @@ REVIEW_ACTIONS = {
 }
 
 
-HTTPS_METHODS = ("GET", "HEAD", "POST", "PUT", "PATCH")
-HTTPS_WRITE_METHODS = frozenset(("POST", "PUT", "PATCH"))
+HTTPS_METHODS = ("GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS")
+HTTPS_WRITE_METHODS = frozenset(("POST", "PUT", "PATCH", "DELETE"))
 HTTPS_BODY_LIMIT = 2048
 HTTPS_JSON_DEPTH = 16
 
@@ -81,12 +81,104 @@ def canonical_request_json(body):
     raise ValueError("Enter a valid, fixed JSON object up to 2,048 UTF-8 bytes.")
 
 
+def command_environment(values):
+    """Nonsecret declarations only; routing and bootstrap stay owner-controlled."""
+    if isinstance(values, dict):
+        values = tuple(values.items())
+    if not isinstance(values, (list, tuple)) or len(values) > 16:
+        raise ValueError("Use at most sixteen command environment values.")
+    protected = {"PATH", "HOME", "SSL_CERT_FILE", "SSL_CERT_DIR", "HTTPS_PROXY", "HTTP_PROXY", "ALL_PROXY", "NO_PROXY",
+                 "DBUS_SESSION_BUS_ADDRESS", "XDG_RUNTIME_DIR", "SSH_AUTH_SOCK", "GCONV_PATH", "LOCPATH"}
+    result = []
+    seen = set()
+    for pair in values:
+        if not isinstance(pair, (tuple, list)) or len(pair) != 2:
+            raise ValueError("Use environment name/value pairs.")
+        name, value = pair
+        if (not isinstance(name, str) or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]{0,63}", name)
+                or name.upper() in protected or name.upper().startswith(("KEEPER_", "LD_", "DYLD_", "PYTHON"))
+                or name.upper().endswith("_ASKPASS") or name in seen
+                or not isinstance(value, str) or len(value) > 1024 or (value and not value.isprintable())
+                or "{{password}}" in value or "{{username}}" in value):
+            raise ValueError("Use bounded nonsecret environment values without overriding credential delivery or routing.")
+        seen.add(name)
+        result.append((name, value))
+    if sum(len(name) + len(value) for name, value in result) > 4096:
+        raise ValueError("The command environment exceeds the size limit.")
+    return tuple(result)
+
+
+def template_body_references(body):
+    """Collect effective credential references while keeping object keys fixed."""
+    if not body:
+        return frozenset()
+    references = set()
+    def visit(value):
+        if isinstance(value, str):
+            references.update(re.findall(r"\{\{(password|username)\}\}", value))
+        elif isinstance(value, dict):
+            for key, item in value.items():
+                if re.search(r"\{\{(password|username)\}\}", key):
+                    raise ValueError("Credential references belong in JSON values, not object keys.")
+                visit(item)
+        elif isinstance(value, list):
+            for item in value:
+                visit(item)
+    visit(json.loads(body))
+    return frozenset(references)
+
+
+def request_query(values):
+    if isinstance(values, dict):
+        values = tuple(values.items())
+    if not isinstance(values, (tuple, list)) or len(values) > 32:
+        raise ValueError("Use at most thirty-two query parameters.")
+    result = []
+    for pair in values:
+        if not isinstance(pair, (tuple, list)) or len(pair) != 2:
+            raise ValueError("Use query name/value pairs.")
+        name, value = pair
+        if (not isinstance(name, str) or not name or not isinstance(value, str)
+                or any(not part.isprintable() for part in pair)
+                or "{{password}}" in name + value or "{{username}}" in name + value):
+            raise ValueError("Query parameters must be printable text without credential references.")
+        result.append((name, value))
+    if len(urlencode(result).encode("ascii")) > 2048:
+        raise ValueError("The query exceeds the size limit.")
+    return tuple(result)
+
+
+def credential_headers(values):
+    if isinstance(values, dict):
+        values = tuple(values.items())
+    if not isinstance(values, (tuple, list)) or len(values) > 16:
+        raise ValueError("Use at most sixteen credential headers.")
+    headers = []
+    seen = set()
+    for pair in values:
+        if not isinstance(pair, (list, tuple)) or len(pair) != 2:
+            raise ValueError("Use header name/value pairs.")
+        name, value = pair
+        if (not isinstance(name, str) or not re.fullmatch(r"[!#$%&'*+.^_`|~0-9A-Za-z-]{1,64}", name)
+                or name.lower() in seen or name.lower() in {
+                    "host", "connection", "content-length", "transfer-encoding", "proxy-authorization", "proxy-connection", "upgrade", "te", "trailer"}
+                or not isinstance(value, str) or len(value) > 2048
+                or any(ord(char) < 32 or ord(char) > 126 for char in value)):
+            raise ValueError("Use printable header values without routing or framing overrides.")
+        seen.add(name.lower())
+        headers.append((name, value))
+    if sum(len(name) + len(value) for name, value in headers) > 4096:
+        raise ValueError("Credential headers exceed the size limit.")
+    return tuple(headers)
+
+
 class ActionType(str, Enum):
     BASIC = "https_basic_get"
     BEARER = "https_bearer_get"
     STDIN = "local_command_stdin"
     NETWORK_PROMPT = "network_command_prompt"
     BROWSER = "browser_form_post"
+    TEMPLATE = "https_credential_template"
 
     @property
     def review_operation(self):
@@ -106,6 +198,7 @@ class ActionType(str, Enum):
             self.STDIN: "Isolated command stdin",
             self.NETWORK_PROMPT: "Networked command prompt",
             self.BROWSER: "Browser Sign-in",
+            self.TEMPLATE: "HTTPS Credential Template",
         }[self]
 
 
@@ -210,6 +303,11 @@ class Action:
     method: str = "GET"
     request_json: str = ""
     browser: BrowserForm | None = None
+    opaque: bool = False
+    headers: tuple[tuple[str, str], ...] = ()
+    query: tuple[tuple[str, str], ...] = ()
+    environment: tuple[tuple[str, str], ...] = ()
+    prompt_contains: str = ""
 
     @property
     def is_command(self):
@@ -234,7 +332,8 @@ class Action:
         if self.browser:
             result = f"GET {self.url} · POST {self.browser.submit_url}"
             return result + (f" · GET {self.browser.success_url}" if self.browser.success_url else "")
-        return self.url if self.method == "GET" else f"{self.method} {self.url}"
+        url = self.url + ("?" + urlencode(self.query) if self.query else "")
+        return url if self.method == "GET" else f"{self.method} {url}"
 
     @property
     def request_summary(self):
@@ -250,11 +349,13 @@ class Action:
     @property
     def scope(self):
         return (self.kind, self.url, self.id, self.command, self.executable_sha256,
-                self.prompt_variable, self.accepts_input, self.method, self.request_json, self.browser)
+                self.prompt_variable, self.accepts_input, self.method, self.request_json, self.browser, self.opaque, self.headers, self.query, self.environment, self.prompt_contains)
 
     def __post_init__(self):
         action_id(self.id)
         label(self.name)
+        if type(self.opaque) is not bool:
+            raise ValueError("Invalid credential output policy.")
         if type(self.enabled) is not bool:
             raise ValueError("Invalid action setting.")
         try:
@@ -262,6 +363,25 @@ class Action:
         except ValueError:
             raise ValueError("Choose a supported credential action.") from None
         object.__setattr__(self, "entry", uuid_text(self.entry))
+        if self.opaque and kind not in (ActionType.STDIN, ActionType.NETWORK_PROMPT):
+            raise ValueError("Dispatch-only output applies to commands.")
+        headers = credential_headers(self.headers)
+        if headers and kind != ActionType.TEMPLATE:
+            raise ValueError("Choose HTTPS Credential Template for custom headers.")
+        object.__setattr__(self, "headers", headers)
+        query = request_query(self.query)
+        if query and kind in (ActionType.STDIN, ActionType.NETWORK_PROMPT, ActionType.BROWSER):
+            raise ValueError("Query parameters apply to HTTPS requests.")
+        object.__setattr__(self, "query", query)
+        environment = command_environment(self.environment)
+        if environment and (not self.opaque or kind != ActionType.NETWORK_PROMPT):
+            raise ValueError("Declared environment applies to dynamic networked commands.")
+        object.__setattr__(self, "environment", environment)
+        if (not isinstance(self.prompt_contains, str) or len(self.prompt_contains) > 80
+                or self.prompt_contains and (not self.prompt_contains.isprintable()
+                                            or not self.prompt_contains.strip()
+                                            or not self.opaque or kind != ActionType.NETWORK_PROMPT)):
+            raise ValueError("Use a short literal credential prompt match for a dynamic networked command.")
         if type(self.accepts_input) is not bool:
             raise ValueError("Invalid input file setting.")
         if kind == ActionType.BROWSER:
@@ -305,6 +425,12 @@ class Action:
             if body and self.method not in HTTPS_WRITE_METHODS:
                 raise ValueError("Only POST, PUT, and PATCH accept a JSON body.")
             object.__setattr__(self, "request_json", body)
+            if kind == ActionType.TEMPLATE:
+                body_references = template_body_references(body)
+                if body and any(name.lower() == "content-type" for name, _ in headers):
+                    raise ValueError("JSON request bodies set their Content-Type automatically.")
+                if not any("{{password}}" in value for _, value in headers) and "password" not in body_references:
+                    raise ValueError("A credential template must reference {{password}} in a transmitted value.")
             object.__setattr__(self, "command", ())
             object.__setattr__(self, "url", Destination.parse(self.url).url)
         object.__setattr__(self, "kind", kind)

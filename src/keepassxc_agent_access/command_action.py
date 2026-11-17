@@ -3,6 +3,7 @@
 from contextlib import contextmanager, nullcontext
 import ctypes
 import errno
+import json
 from hashlib import file_digest
 import os
 import socket
@@ -120,7 +121,8 @@ def syscall_filter(unix_sockets=False, *, unix_socket_pairs=False):
         seccomp.seccomp_release(context)
 
 
-def sandbox_arguments(command, seccomp, scope, *, relay_path=None, prompt_variable="", input_path=None, ca_file=_CA):
+def sandbox_arguments(command, seccomp, scope, *, relay_path=None, prompt_variable="", input_path=None, ca_file=_CA,
+                      generic_prompt=False, environment=(), prompt_contains=""):
     lifetime = _NETWORK_SCOPE_TIMEOUT if relay_path is not None else _SCOPE_TIMEOUT
     arguments = [
         "/usr/bin/systemd-run", "--user", "--scope", "--collect", "--quiet", "--expand-environment=no",
@@ -148,6 +150,9 @@ def sandbox_arguments(command, seccomp, scope, *, relay_path=None, prompt_variab
     ]
     if input_path is not None:
         arguments += ["--ro-bind", str(input_path), "/input"]
+    if generic_prompt:
+        return [*arguments, "--", "/keeper/prompt", "--launch-generic", prompt_variable,
+                prompt_contains or "password", json.dumps(dict(environment), separators=(",", ":")), *command]
     return [*arguments, "--", "/keeper/prompt", "--launch", prompt_variable, *command]
 
 
@@ -180,7 +185,8 @@ def stop_scope(scope, environment):
 
 
 @contextmanager
-def prepare_command(command, digest, *, destination=None, prompt_variable="", input_path=None, ca_file=None):
+def prepare_command(command, digest, *, destination=None, prompt_variable="", input_path=None, ca_file=None,
+                    generic_prompt=False, environment=(), prompt_contains=""):
     if executable_digest(command) != digest:
         raise ValueError("The configured command executable changed.")
     scope = f"keeper-command-{uuid4().hex}.scope"
@@ -188,15 +194,16 @@ def prepare_command(command, digest, *, destination=None, prompt_variable="", in
     with syscall_filter(unix_sockets=destination is not None) as seccomp, relay_context as (relay_path, relay):
         # The session address is needed only by systemd-run. Bubblewrap drops
         # that environment before the trusted startup code runs.
-        environment = {name: os.environ[name] for name in ("DBUS_SESSION_BUS_ADDRESS", "XDG_RUNTIME_DIR")
+        launcher_environment = {name: os.environ[name] for name in ("DBUS_SESSION_BUS_ADDRESS", "XDG_RUNTIME_DIR")
                        if name in os.environ}
         # A custom CA comes only from trusted owner startup, as for HTTPS actions.
         trust = Path(ca_file or os.environ.get("SSL_CERT_FILE") or _CA)
         arguments = sandbox_arguments(command, seccomp, scope, relay_path=relay_path,
-                                      prompt_variable=prompt_variable, input_path=input_path, ca_file=trust)
+                                      prompt_variable=prompt_variable, input_path=input_path, ca_file=trust,
+                                      generic_prompt=generic_prompt, environment=environment, prompt_contains=prompt_contains)
         process = subprocess.Popen(arguments,
                                    stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                                   stderr=subprocess.DEVNULL, cwd="/", env=environment,
+                                   stderr=subprocess.DEVNULL, cwd="/", env=launcher_environment,
                                    start_new_session=True, pass_fds=(seccomp,))
         readiness = process.stdout
         deadline = monotonic() + _READY_TIMEOUT
@@ -219,10 +226,11 @@ def prepare_command(command, digest, *, destination=None, prompt_variable="", in
             process.stdout = None
             yield process if relay is None else (process, relay)
         finally:
+            # Stop the full cgroup even when its original process already
+            # exited, so a forked descendant cannot outlive this use.
+            stop_scope(scope, launcher_environment)
             if process.poll() is None:
-                stop_scope(scope, environment)
-                if process.poll() is None:
-                    process.kill()
+                process.kill()
             process.wait()
             process.stdin.close()
             readiness.close()

@@ -7,7 +7,7 @@ from pathlib import Path
 import re
 from time import time
 
-from .access_settings import ActionType, action_id, label, uuid_text
+from .access_settings import ActionType, Destination, action_id, label, uuid_text
 from .activity import Attribution, entry_target_labels, folder_label
 from .protocol import ListingError
 from .settings import SettingsError, write_private_json
@@ -18,6 +18,15 @@ MAX_ITEMS = 16
 MAX_PENDING = 64
 LIVE_GRANT_STATES = frozenset(("pending", "active", "disabled"))
 OPTIONAL_METADATA_FIELDS = ("username", "url")
+CREDENTIAL_USES = {
+    "local_command": "Use Password in Local Commands",
+    "networked_command": "Use Password in Networked Commands",
+    "https": "Use Password in HTTPS Requests",
+    "https_body": "API Request Bodies (Credential Disclosure)",
+    "browser": "Use Password in Browser Sign-ins",
+}
+NETWORK_CREDENTIAL_USES = frozenset(("networked_command", "https", "https_body", "browser"))
+MAX_ORIGINS = 8
 ENTRY_EDITS = {
     "update_entry": "Update Entry Details",
     "move_entry": "Move Entry",
@@ -41,6 +50,28 @@ def _edit_permissions(values, allowed):
     if len(set(values)) != len(values):
         raise ValueError
     return tuple(sorted(values))
+
+
+def credential_permissions(uses, origins, *, group=None):
+    """Freeze transport permissions and the destinations explicitly reviewed by the owner."""
+    uses = _edit_permissions(uses, CREDENTIAL_USES)
+    if "https_body" in uses and "https" not in uses:
+        raise ValueError("Credential request bodies also require HTTPS use permission.")
+    if not isinstance(origins, (tuple, list)) or len(origins) > MAX_ORIGINS:
+        raise ValueError("Choose at most eight approved destinations.")
+    normalized = []
+    for value in origins:
+        destination = Destination.parse(value)
+        if destination.path != "/":
+            raise ValueError("Credential destinations must be HTTPS origins without a path.")
+        normalized.append(destination.url)
+    if len(set(normalized)) != len(normalized):
+        raise ValueError("Approved destinations must be unique.")
+    if group is not None and (uses or normalized):
+        raise ValueError("Credential use permissions belong to individual entries.")
+    if bool(set(uses) & NETWORK_CREDENTIAL_USES) != bool(normalized):
+        raise ValueError("Network credential use requires explicit approved destinations.")
+    return uses, tuple(sorted(normalized))
 
 
 def group_location(groups, identifier):
@@ -72,14 +103,19 @@ class Item:
     url: bool = False
     group: str | None = None
     edits: tuple[str, ...] = ()
+    uses: tuple[str, ...] = ()
+    origins: tuple[str, ...] = ()
 
     def __post_init__(self):
         _validate_metadata(self.metadata, self.username, self.url)
         object.__setattr__(self, "edits", _edit_permissions(self.edits, GROUP_EDITS if self.group else ENTRY_EDITS))
+        uses, origins = credential_permissions(self.uses, self.origins, group=self.group)
+        object.__setattr__(self, "uses", uses)
+        object.__setattr__(self, "origins", origins)
 
     @classmethod
     def parse(cls, data):
-        allowed = {"vault", "entry", "label", "group", "metadata", "action", "edits", *OPTIONAL_METADATA_FIELDS}
+        allowed = {"vault", "entry", "label", "group", "metadata", "action", "edits", "uses", "origins", *OPTIONAL_METADATA_FIELDS}
         if not isinstance(data, dict) or set(data) - allowed:
             raise ValueError
         entry, name, group = data.get("entry"), data.get("label"), data.get("group")
@@ -89,7 +125,8 @@ class Item:
         if vault is None and (entry is not None or group is not None):
             raise ValueError
         edits = _edit_permissions(data.get("edits", ()), GROUP_EDITS if group is not None else ENTRY_EDITS)
-        if not metadata and action is None and not edits:
+        uses, origins = credential_permissions(data.get("uses", ()), data.get("origins", ()), group=group)
+        if not metadata and action is None and not edits and not uses:
             raise ValueError
         if group is not None and (metadata or action is not None):
             raise ValueError
@@ -98,7 +135,7 @@ class Item:
                    label(name) if name is not None else None, metadata,
                    action_id(action) if action is not None else None,
                    username=data.get("username", False), url=data.get("url", False),
-                   group=uuid_text(group) if group is not None else None, edits=edits)
+                   group=uuid_text(group) if group is not None else None, edits=edits, uses=uses, origins=origins)
 
 
 @dataclass(frozen=True)
@@ -112,16 +149,28 @@ class Scope:
     url: bool = False
     group: str | None = None
     edits: tuple[str, ...] = ()
+    uses: tuple[str, ...] = ()
+    origins: tuple[str, ...] = ()
+    use_revision: str | None = None
 
     def __post_init__(self):
+        if self.use_revision is not None and (not isinstance(self.use_revision, str)
+                or not re.fullmatch(r"[0-9a-f]{64}", self.use_revision) or not self.uses):
+            raise ValueError("Invalid credential-use approval revision.")
         _validate_metadata(self.metadata, self.username, self.url)
         object.__setattr__(self, "edits", _edit_permissions(self.edits, GROUP_EDITS if self.group else ENTRY_EDITS))
+        uses, origins = credential_permissions(self.uses, self.origins, group=self.group)
+        object.__setattr__(self, "uses", uses)
+        object.__setattr__(self, "origins", origins)
 
     def audit_summary(self):
         operations = [name for name in ("metadata", *OPTIONAL_METADATA_FIELDS) if getattr(self, name)]
         if self.action:
             operations.append(f"action {self.action}")
         operations.extend(self.edits)
+        operations.extend(CREDENTIAL_USES[use] for use in self.uses)
+        if self.origins:
+            operations.append("approved destinations " + "; ".join(self.origins))
         resource = self.entry if self.group is None else f"group {self.group}"
         return f"{self.vault}/{resource} ({', '.join(operations)})"
 
@@ -289,6 +338,11 @@ class Grants:
             raise ListingError("busy")
 
     def _automatic_choices(self, items):
+        # New reusable credential capabilities and recipients need the owner's
+        # explicit review, including when token auto-approval was enabled before
+        # these permissions existed. Per-use auto approval applies after this grant.
+        if any(item.uses for item in items):
+            return None
         # A locked vault can hide another match for an unqualified label.
         for item in items:
             if item.vault is None and any(self.workspace.session(vault) is None
@@ -325,7 +379,9 @@ class Grants:
                     if item.action and (binding is None or not binding.action.enabled):
                         continue
                     scope = Scope(identifier, entry["id"], item.metadata, item.action,
-                                  binding.revision if binding else None, username=item.username, url=item.url, edits=item.edits)
+                                  binding.revision if binding else None, username=item.username, url=item.url, edits=item.edits,
+                                  uses=item.uses, origins=item.origins,
+                                  use_revision=record.credential_revision(entry["id"]) if item.uses else None)
                     result.append(Choice(scope, record.name, (*entry["group_path"], entry["title"]),
                                          binding.action.destination if binding else None,
                                          kind=binding.action.kind if binding else None,

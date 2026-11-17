@@ -12,7 +12,7 @@ REQUEST_TIMEOUT = 5
 WORKER_TIMEOUT = 3
 APPROVAL_TIMEOUT = 60
 CLIENT_TIMEOUT = APPROVAL_TIMEOUT + 35
-_MAX_ARGS = 8
+_MAX_ARGS = 32
 _MAX_ARG_BYTES = 512
 LIST_REQUEST = {"version": 1, "operation": "list_entries"}
 ERRORS = {
@@ -24,6 +24,7 @@ ERRORS = {
     "revoked": "Agent access changed before the request completed.",
     "busy": "The broker is busy.",
     "ineligible": "The requested operation is unavailable for this token.",
+    "credential_changed": "That entry's credential changed after approval. Request a permission change for owner review.",
     "token_change_pending": "This token already has a permission change awaiting review.",
     "identity_in_use": "That identity is already in use. Choose a different identity and retry the request.",
     "token_required": "An approved access token is required. Request access through this runner.",

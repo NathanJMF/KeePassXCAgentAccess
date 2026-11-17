@@ -21,7 +21,7 @@ On Ubuntu GNOME, clone this repository and run one of these commands from the ch
 
 **Security boundary.** Keep every agent tool outside your desktop owner account and session. The bundled runner isolates the Keeper connection. Agents with owner-session shell or desktop privileges can act with the owner’s authority. Use a tools-only agent or isolate its remaining capabilities and escalation paths. See [agent isolation](docs/guide.md#isolate-the-agent-runtime).
 
-Agents can discover vault, group, and entry names before requesting access. Discovery shows names and references, and respects **Pause Agent Access**.
+Agents can discover vault, group, and entry names before requesting access. Discovery shows names and references, and respects **Pause Agent Access**. Approve an entry's required use permissions and network destinations; the agent can then supply commands, HTTPS requests, and browser forms directly, without preconfigured actions.
 
 Expand a token to see which vaults, groups, and entries it covers. Open its details to review requested permissions, or disable or remove a token you previously approved. Use **Pause Agent Access** to stop agents from using their tokens.
 
@@ -29,7 +29,7 @@ Expand a token to see which vaults, groups, and entries it covers. Open its deta
 
 ## Activity
 
-See which agent acted, which resource it used, and what happened. Expand related events for their history or double-click an event for details and its audit note. Approved credential actions can authenticate to an HTTPS endpoint or deliver a secret to an isolated command through stdin or a credential prompt. Keeper records each use and returns a bounded outcome. See the [command setup](docs/guide.md#use-a-credential-with-a-networked-command).
+See which agent acted, which resource it used, and what happened. Expand related events for their history or double-click an event for details and its audit note. Approved credential use can authenticate HTTPS requests and browser forms, or deliver a secret to an isolated command through stdin or a credential prompt. Keeper records each use without returning credential values. Dynamic commands return a dispatch receipt while their output and exit status stay private. See [credential delivery](docs/guide.md#use-approved-credentials-without-preconfigured-actions).
 
 ![Keeper's Activity view showing grouped audit events, affected resources, and outcomes](docs/screenshots/activity-view.png)
 

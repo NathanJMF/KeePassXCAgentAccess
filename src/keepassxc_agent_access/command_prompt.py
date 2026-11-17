@@ -2,6 +2,7 @@
 """Private sandbox prompt and generic command launcher. No Keeper imports."""
 
 import ctypes
+import json
 import os
 import socket
 import struct
@@ -22,7 +23,10 @@ def read_exact(stream, count):
 
 
 def askpass(prompt):
-    if not prompt.startswith("Password") or len(prompt) > _LIMIT:
+    generic = os.environ.get("KEEPER_GENERIC_PROMPT") == "1"
+    if (not isinstance(prompt, str) or not prompt or not prompt.isprintable() or len(prompt) > _LIMIT
+            or (os.environ.get("KEEPER_PROMPT_CONTAINS", "password").casefold() not in prompt.casefold()
+                if generic else not prompt.startswith("Password"))):
         return 1
     with socket.socket(socket.AF_UNIX) as connection:
         connection.settimeout(2)
@@ -49,7 +53,7 @@ def serve(listener, credential):
         listener.close()
 
 
-def launch(prompt_variable, command):
+def launch(prompt_variable, command, *, generic=False, declared=(), prompt_contains="password"):
     # Sandbox setup has finished. Mark this process nondumpable before
     # reading any credential, and establish the private prompt socket first.
     if ctypes.CDLL(None).prctl(4, 0, 0, 0, 0):
@@ -77,6 +81,10 @@ def launch(prompt_variable, command):
             "SSL_CERT_FILE": "/keeper/trust.pem",
             prompt_variable: "/keeper/prompt",
         }
+        if generic:
+            environment.update(dict(declared))
+            environment["KEEPER_GENERIC_PROMPT"] = "1"
+            environment["KEEPER_PROMPT_CONTAINS"] = prompt_contains
         return subprocess.run(command, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
                               stderr=subprocess.DEVNULL, env=environment, cwd="/tmp", close_fds=True,
                               check=False).returncode
@@ -86,6 +94,9 @@ if __name__ == "__main__":
     try:
         if len(sys.argv) == 2:
             raise SystemExit(askpass(sys.argv[1]))
+        if len(sys.argv) >= 6 and sys.argv[1] == "--launch-generic":
+            raise SystemExit(launch(sys.argv[2], sys.argv[5:], generic=True, prompt_contains=sys.argv[3],
+                                   declared=json.loads(sys.argv[4])))
         if len(sys.argv) >= 4 and sys.argv[1] == "--launch":
             raise SystemExit(launch(sys.argv[2], sys.argv[3:]))
     except (OSError, ValueError):

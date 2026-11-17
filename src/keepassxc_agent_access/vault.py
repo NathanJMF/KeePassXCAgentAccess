@@ -9,10 +9,14 @@ from select import select
 import subprocess
 import sys
 from threading import Event, Lock
-from time import monotonic
+from time import monotonic, sleep
 
 from .protocol import ListingError, RESPONSE_LIMIT, WORKER_TIMEOUT, decode, encode, read_frame, remaining
 from .vault_edits import EDIT_LIMIT, EDIT_TIMEOUT
+
+
+DYNAMIC_LOCAL_WINDOW = 12
+DYNAMIC_NETWORK_WINDOW = 28
 
 
 class VaultError(Exception):
@@ -59,9 +63,9 @@ class VaultSession:
 
     @contextmanager
     def _exchange(self, request, timeout):
-        deadline = monotonic() + timeout
         if not self._requests.acquire(timeout=WORKER_TIMEOUT):
             raise ListingError("busy")
+        deadline = monotonic() + timeout
         read_fd = None
         try:
             with self._state:
@@ -185,27 +189,62 @@ class VaultSession:
         request = encode({"operation": "use_password", "entry": action.entry,
                           "url": action.url, "kind": action.kind, "command": action.command,
                           "method": action.method, "request_json": action.request_json,
+                          "headers": action.headers, "query": action.query, "opaque": action.opaque, "environment": action.environment, "prompt_contains": action.prompt_contains,
                           "browser": asdict(action.browser) if action.browser else None,
                           "executable_sha256": action.executable_sha256, "prompt_variable": action.prompt_variable,
                           "input_path": str(input_path) if input_path is not None else None})
         timeout = 33 if action.browser else 25 if action.prompt_variable else 12
+        window = (DYNAMIC_NETWORK_WINDOW if action.prompt_variable else DYNAMIC_LOCAL_WINDOW) if action.opaque else 0
         with self._exchange(request, timeout) as read:
-            response = decode(read())
-            if response != {"ready": True}:
-                return response
-            dispatched = False
+            deadline = monotonic() + window
+            # Keep the serialized vault request occupied for the common window,
+            # including subprocess teardown, so another scoped request cannot
+            # turn the child-controlled runtime into an exit/timing oracle.
             try:
-                dispatched = gate(lambda: self._send(b"dispatch\n"))
-            finally:
+                response = decode(read())
+                if response != {"ready": True}:
+                    return response
+                dispatched = False
+                attempted = False
+
+                def send():
+                    nonlocal attempted
+                    attempted = True
+                    self._send(b"dispatch\n")
+
+                try:
+                    dispatched = gate(send)
+                except (OSError, EOFError, ValueError, ListingError):
+                    if not action.opaque or not attempted:
+                        raise
+                    self.close()
+                    return {"outcome": "dispatched"}
+                finally:
+                    if not dispatched and not attempted:
+                        try:
+                            self._send(b"abort\n")
+                            read()
+                        except (OSError, EOFError, ValueError, ListingError):
+                            self.close()
                 if not dispatched:
-                    try:
-                        self._send(b"abort\n")
-                        read()
-                    except (OSError, EOFError, ValueError, ListingError):
-                        self.close()
-            if not dispatched:
-                raise ListingError("revoked")
-            return decode(read())
+                    raise ListingError("revoked")
+                try:
+                    response = decode(read())
+                except (OSError, EOFError, ValueError, ListingError):
+                    if not action.opaque:
+                        raise
+                    self.close()
+                    return {"outcome": "dispatched"}
+                # Dynamic code can encode the secret in exit status, stdout,
+                # stderr or runtime. None of those become an agent result.
+                if action.opaque:
+                    private = response.get("outcome") if isinstance(response, dict) else None
+                    return {"outcome": "dispatched",
+                            "_execution_outcome": private if private in ("succeeded", "failed", "uncertain") else "unknown"}
+                return response
+            finally:
+                if window:
+                    sleep(max(0, deadline - monotonic()))
 
     def __enter__(self):
         return self

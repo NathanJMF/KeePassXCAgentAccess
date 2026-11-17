@@ -3,6 +3,7 @@
 from contextlib import nullcontext
 from dataclasses import asdict, dataclass, replace
 from functools import partial
+from hashlib import sha256
 import json
 import os
 from pathlib import Path
@@ -48,6 +49,28 @@ class Registration:
     item: str | None
     bindings: tuple[Binding, ...] = ()
     fingerprint: str | None = None
+    credential_epoch: str | None = None
+    credential_nonces: tuple[tuple[str, str], ...] = ()
+
+    def __post_init__(self):
+        if self.credential_epoch is not None:
+            object.__setattr__(self, "credential_epoch", uuid_text(self.credential_epoch))
+        if not isinstance(self.credential_nonces, (list, tuple)):
+            raise ValueError("Invalid credential approval revisions.")
+        nonces = []
+        for pair in self.credential_nonces:
+            if not isinstance(pair, (tuple, list)) or len(pair) != 2:
+                raise ValueError("Invalid credential approval revision.")
+            nonces.append((uuid_text(pair[0]), uuid_text(pair[1])))
+        if len({entry for entry, _ in nonces}) != len(nonces):
+            raise ValueError("Duplicate credential approval revisions.")
+        object.__setattr__(self, "credential_nonces", tuple(sorted(nonces)))
+
+    def credential_revision(self, entry):
+        entry = uuid_text(entry)
+        epoch = self.credential_epoch or self.id
+        nonce = dict(self.credential_nonces).get(entry, "")
+        return sha256(("Keeper credential-use revision v1\0" + epoch + "\0" + entry + "\0" + nonce).encode("ascii")).hexdigest()
 
     def binding(self, entry, action_id):
         return next((b for b in self.bindings if (b.action.entry, b.action.id) == (entry, action_id)), None)
@@ -108,7 +131,8 @@ class Workspace:
                 bindings = tuple(Binding(Action(**b["action"]), uuid_text(b["revision"])) for b in row["bindings"])
                 target = VaultTarget(Path(row["database"]), Path(row["key_file"]) if row["key_file"] else None)
                 record = Registration(uuid_text(row["id"]), label(row["name"]), target,
-                                      uuid_text(row["identity"]) if row["identity"] else None, row["item"], bindings, row.get("fingerprint"))
+                                      uuid_text(row["identity"]) if row["identity"] else None, row["item"], bindings, row.get("fingerprint"),
+                                      row.get("credential_epoch"), row.get("credential_nonces", ()))
                 if record.id in self.registrations:
                     raise ValueError
                 self.registrations[record.id] = record
@@ -123,7 +147,8 @@ class Workspace:
                 "id": r.id, "name": r.name, "database": str(r.target.database),
                 "key_file": str(r.target.key_file) if r.target.key_file else None,
                 "identity": r.identity, "item": r.item, "bindings": [asdict(b) for b in r.bindings],
-                "fingerprint": r.fingerprint,
+                "fingerprint": r.fingerprint, "credential_epoch": r.credential_epoch,
+                "credential_nonces": r.credential_nonces,
             } for r in records.values()],
         })
         self.registrations, self.pending = records, pending
@@ -222,7 +247,8 @@ class Workspace:
                                          bindings=tuple(Binding(action, new_id()) for action in imported))
                     elif record.fingerprint != fingerprint:
                         # An external save can change credentials without changing entry IDs.
-                        record = replace(record, bindings=tuple(replace(b, revision=new_id()) for b in record.bindings))
+                        record = replace(record, bindings=tuple(replace(b, revision=new_id()) for b in record.bindings),
+                                         credential_epoch=new_id(), credential_nonces=())
                     pending = tuple(i for i in self.pending if i != item)
                     if record.item and record.item != item:
                         pending += (record.item,)
@@ -246,6 +272,10 @@ class Workspace:
                 self.cleanup()
             except SettingsError:
                 pass
+
+    def credential_revision(self, identifier, entry):
+        with self.mutex:
+            return self.registrations[identifier].credential_revision(entry)
 
     def session(self, identifier):
         if identifier in self.editing:
@@ -355,19 +385,21 @@ class Workspace:
         record = self.registrations[identifier]
         bindings = tuple(replace(binding, revision=new_id()) if binding.action.entry == entry_id else binding
                          for binding in record.bindings)
-        if bindings != record.bindings:
-            # Invalidate before releasing the worker's commit gate. A crash cannot
-            # reconnect old grants to the new credentials; a failed write may still
-            # require fresh action approval.
-            self._replace(replace(record, bindings=bindings))
+        nonces = dict(record.credential_nonces)
+        nonces[entry_id] = new_id()
+        # Both saved-action and reusable grants must become stale before the
+        # credential commit, including entries without any configured action.
+        # A failed commit can require fresh approval, but cannot silently reuse
+        # an old grant with changed credentials after a crash or restart.
+        self._replace(replace(record, bindings=bindings, credential_nonces=tuple(nonces.items())))
+        try:
+            directory = os.open(self.path.parent, os.O_RDONLY | os.O_DIRECTORY)
             try:
-                directory = os.open(self.path.parent, os.O_RDONLY | os.O_DIRECTORY)
-                try:
-                    os.fsync(directory)
-                finally:
-                    os.close(directory)
-            except OSError:
-                raise SettingsError("Could not save the new credential approval revision safely.") from None
+                os.fsync(directory)
+            finally:
+                os.close(directory)
+        except OSError:
+            raise SettingsError("Could not save the new credential approval revision safely.") from None
 
     def lock(self, identifier):
         with self.mutex:

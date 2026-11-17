@@ -11,7 +11,7 @@ from .activity import ActivityError
 from .activity_grouping import EDIT_STAGES, ActivityResources, activity_groups, activity_matches, event_time
 from .command_action import executable_digest
 from .edit_request_view import review_edit
-from .grants import EDIT_PERMISSIONS, group_location
+from .grants import CREDENTIAL_USES, EDIT_PERMISSIONS, group_location
 from .owner_views import _dialog, _label, _scroll, _table, _time, require_mouse_decisions, table_time
 from .workspace_context import DELETE_LABEL, attach_row_context
 from .workspace_editor import delete_entry, edit_entry
@@ -232,6 +232,7 @@ ACCESS_STATES = {
 ACTIVITY_STATES = {
     "Approved": ("emblem-ok-symbolic", "keeper_success"),
     "Succeeded": ("emblem-ok-symbolic", "keeper_success"),
+    "Dispatched": ("mail-send-symbolic", "keeper_accent"),
     "Pending approval": ("appointment-soon-symbolic", "keeper_warning"),
     "Pending review": ("appointment-soon-symbolic", "keeper_warning"),
     "Expired": ("appointment-soon-symbolic", "keeper_muted"),
@@ -277,11 +278,36 @@ def metadata_labels(permission):
                                        ("url", "Stored URL")) if getattr(permission, field)]
 
 
+def credential_use_labels(permission):
+    result = []
+    for use in permission.uses:
+        if use == "local_command":
+            detail = "Runs isolated with no writable host files or network. Command output and exit status stay private."
+        elif use == "https":
+            detail = ("Can authenticate reads, writes and deletes at these destinations, within the credential’s service permissions.\n"
+                      + "\n".join(permission.origins))
+        elif use == "https_body":
+            detail = ("The credential can be sent in an API request body and may be stored or published by the approved service.\n"
+                      + "\n".join(permission.origins))
+        elif use == "networked_command":
+            detail = ("Can send the credential to these approved TCP peers and ports. The command controls protocol and TLS verification. Shared addresses can host multiple services or tenants. Command output and exit status stay private.\n"
+                      + "\n".join(permission.origins))
+        else:
+            detail = "Approved Destinations:\n" + "\n".join(permission.origins)
+        result.append((CREDENTIAL_USES[use], detail))
+    return tuple(result)
+
+
 def token_permissions(record, scopes):
     labels = []
     for scope in scopes:
         labels.extend(metadata_labels(scope))
         labels.extend(EDIT_PERMISSIONS[operation] for operation in scope.edits)
+        labels.extend(CREDENTIAL_USES[use] for use in scope.uses)
+        if scope.uses and (record is None or scope.use_revision != record.credential_revision(scope.entry)):
+            labels.append("Credential Changed — Owner Review Required")
+        if scope.origins:
+            labels.append("Approved Destinations: " + "; ".join(scope.origins))
         if scope.action:
             binding = record.binding(scope.entry, scope.action) if record else None
             if binding and binding.revision == scope.revision and binding.action.enabled:
@@ -838,6 +864,12 @@ class AccessView(Gtk.Box):
                 access_permission(permissions, "Read Stored URL", (choice.url or "—") if choice else None)
             for operation in item.edits:
                 access_permission(permissions, EDIT_PERMISSIONS[operation])
+            for caption, description in credential_use_labels(item):
+                access_permission(permissions, caption, description)
+            if item.uses:
+                access_permission(permissions, "Owner Review Required for This Permission",
+                                  "These reusable permissions and destinations require your review before use. "
+                                  "After approval, your Auto Approve settings control individual uses.")
             if item.action:
                 binding = vault.binding(entry_id, item.action) if choice else None
                 action = binding.action if binding else None
@@ -1253,7 +1285,8 @@ def edit_binding(app, vault, entry, previous):
     kind = Gtk.ComboBoxText()
     kind.set_name("action-kind")
     for option in ActionType:
-        kind.append(option.value, option.label)
+        if option != ActionType.TEMPLATE:
+            kind.append(option.value, option.label)
     kind.set_active_id(previous.action.kind.value if previous else ActionType.BASIC.value)
     body.pack_start(kind, False, False, 0)
     fields = []

@@ -85,11 +85,13 @@ def load_vault():
             elif data["kind"] == ActionType.NETWORK_PROMPT:
                 use_command(entry, data["command"], data["executable_sha256"],
                             destination=Destination.parse(data["url"]), prompt_variable=data["prompt_variable"],
-                            input_path=data["input_path"])
+                            input_path=data["input_path"], generic_prompt=data.get("opaque", False),
+                            environment=data.get("environment", ()), prompt_contains=data.get("prompt_contains", ""))
             elif data["kind"] == ActionType.BROWSER:
                 use_browser(entry, data["url"], BrowserForm(**data["browser"]))
             else:
-                use(entry, data["url"], ActionType(data["kind"]), data["method"], data["request_json"])
+                use(entry, data["url"], ActionType(data["kind"]), data["method"], data["request_json"],
+                    headers=data.get("headers", ()), query=data.get("query", ()))
         else:
             return
 
@@ -110,17 +112,17 @@ def reply(data):
     sys.stdout.buffer.flush()
 
 
-def use(entry, url, kind, method, request_json):
+def use(entry, url, kind, method, request_json, *, headers=(), query=()):
     if entry is None:
         reply(encode(failure()))
         return
     try:
-        with prepare_https(url) as (connection, path):
+        with prepare_https(url, query=query) as (connection, path):
             reply(encode({"ready": True}))
             decision = sys.stdin.buffer.readline(16)
             result = failure()
             if decision == b"dispatch\n":
-                result = authenticate(connection, path, entry, kind, method=method, request_json=request_json)
+                result = authenticate(connection, path, entry, kind, method=method, request_json=request_json, headers=headers)
             reply(encode(result))
     except (OSError, HTTPException, ValueError):
         reply(encode(failure()))
@@ -143,6 +145,7 @@ def use_command(entry, command, digest, **profile):
     if entry is None:
         reply(encode(failure()))
         return
+    result = failure()
     try:
         with prepare_command(command, digest, **profile) as process:
             reply(encode({"ready": True}))
@@ -151,9 +154,10 @@ def use_command(entry, command, digest, **profile):
                     outcome = deliver_prompt(process, entry.password)
                 else:
                     outcome = "succeeded" if deliver_credential(process, entry.password) else "failed"
-                reply(encode({"outcome": outcome}))
-            else:
-                reply(encode(failure()))
+                result = {"outcome": outcome}
+        # Complete scope/relay cleanup before releasing the serialized worker
+        # request. A child-controlled teardown must not affect the next call.
+        reply(encode(result))
     except (OSError, ValueError):
         reply(encode(failure()))
 
