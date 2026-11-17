@@ -94,11 +94,12 @@ class EditRequestsTests(unittest.TestCase):
 
     def test_explicit_edit_permissions_follow_usage_policy(self):
         credential = "6a" * 32
+        move_destination = self.workspace.put_group(self.vault, self.root_id, name="Approved move destination")
         entries = [
             {"vault": self.vault, "entry": self.entry_id,
              "edits": ["update_entry", "move_entry", "replace_password"]},
             {"vault": self.vault, "group": self.group_id, "edits": ["create_entry"]},
-            {"vault": self.vault, "group": self.root_id, "edits": ["move_into"]},
+            {"vault": self.vault, "group": move_destination, "edits": ["move_into"]},
         ]
         payload = {"identity": "Scoped editor", "project": "Fixture", "items": entries}
         self.assertEqual(self._wire("request_access", credential=credential, request=payload), {"status": "pending"})
@@ -117,7 +118,10 @@ class EditRequestsTests(unittest.TestCase):
         self.assertEqual(submit("create_entry", parent=self.group_id,
                                 fields={"title": "Allowed create"})["status"], "applied")
         self.assertEqual(submit("move_entry", entry=self.entry_id, parent=self.group_id)["status"], "pending")
-        self.assertEqual(submit("move_entry", entry=self.entry_id, parent=self.root_id)["status"], "applied")
+        self.assertEqual(submit("move_entry", entry=self.entry_id, parent=move_destination)["status"], "applied")
+        with self.assertRaises(ListingError) as invalid:
+            submit("move_entry", entry=self.entry_id, parent=self.root_id)
+        self.assertEqual(invalid.exception.code, "choose_entry_group")
         self.assertEqual(submit("replace_password", entry=self.entry_id, password_source="owner")["status"], "pending")
         self.assertEqual(submit("replace_password", entry=self.entry_id, password_source="generate")["status"], "applied")
         self.assertEqual(submit("update_entry", entry=self.unscoped,
@@ -129,7 +133,7 @@ class EditRequestsTests(unittest.TestCase):
         saved = PyKeePass(self.path, password=self.unlock)
         edited = saved.find_entries(uuid=UUID(self.entry_id), first=True)
         self.assertEqual(edited.title, "Allowed update")
-        self.assertEqual(str(edited.group.uuid), self.root_id)
+        self.assertEqual(str(edited.group.uuid), move_destination)
         self.assertNotEqual(edited.password, "Synthetic original entry secret")
         self.assertEqual(saved.find_entries(uuid=UUID(self.unscoped), first=True).title, "Unscoped entry")
         self.assertTrue(saved.find_entries(title="Allowed create", first=True))
@@ -331,16 +335,17 @@ class EditRequestsTests(unittest.TestCase):
         self.assertEqual((updated["edit_request_id"], updated["group_id"]), (request["id"], self.group_id))
         self.assertNotIn("Approved new title", repr(updated))
 
-        _, result = self._apply("create_entry", parent=self.root_id, fields={"title": "Approved creation"})
+        _, result = self._apply("create_entry", parent=self.group_id, fields={"title": "Approved creation"})
         created, = self.activity.rows(action="Apply edit · Create entry", outcome="Succeeded")
         self.assertEqual((created["folder"], created["entry_title"], created["entry"], created["destination"]),
-                         ("Root", "Approved creation", result["result"], "Root"))
-        self.assertEqual((created["edit_request_id"], created["group_id"]), (result["id"], self.root_id))
+                         ("First folder", "Approved creation", result["result"], "First folder"))
+        self.assertEqual((created["edit_request_id"], created["group_id"]), (result["id"], self.group_id))
 
-        self._apply("move_entry", entry=self.entry_id, parent=self.root_id)
+        folder = self.workspace.put_group(self.vault, self.root_id, name="Second folder")
+        self._apply("move_entry", entry=self.entry_id, parent=folder)
         moved, = self.activity.rows(action="Apply edit · Move entry", outcome="Succeeded")
         self.assertEqual((moved["folder"], moved["entry_title"], moved["destination"]),
-                         ("First folder", "Approved new title", "Root"))
+                         ("First folder", "Approved new title", "Second folder"))
         self.assertEqual(moved["group_id"], self.group_id)
 
         request = self._submit("recycle_group", group=self.group_id)
@@ -350,6 +355,38 @@ class EditRequestsTests(unittest.TestCase):
         self.assertEqual((denied["folder"], denied["entry_title"], denied["destination"]),
                          ("First folder", None, "Recycle Bin"))
         self.assertEqual((denied["edit_request_id"], denied["group_id"]), (request["id"], self.group_id))
+
+    def test_root_placement_is_rejected_even_with_cached_catalog_and_top_level_groups_still_work(self):
+        self.workspace.lock(self.vault)
+        for request in (
+            self._request("create_entry", parent=self.root_id, fields={"title": "Root is not a destination"}),
+            self._request("move_entry", parent=self.root_id, entry=self.entry_id),
+        ):
+            with self.assertRaises(ListingError) as rejected:
+                self._wire("request_edit", request=request)
+            self.assertEqual(rejected.exception.code, "choose_entry_group")
+        self.assertEqual(self.edits.rows(), [])
+        self.workspace.unlock(self.vault, self.unlock)
+        _, created = self._apply("create_group", parent=self.root_id, fields={"name": "Service"})
+        self._apply("move_entry", parent=created["result"], entry=self.unscoped)
+        saved = PyKeePass(self.path, password=self.unlock)
+        self.assertEqual(str(saved.find_entries(uuid=UUID(self.unscoped), first=True).group.uuid), created["result"])
+
+    def test_entry_and_password_are_saved_in_one_owner_review(self):
+        secret = "Only the owner enters this synthetic existing password"
+        request = self._submit("create_entry", parent=self.group_id, fields={"title": "Existing login"},
+                               password_source="owner")
+        preview = self.edits.preview(self.token.id, request["id"])
+        self.assertEqual(preview.password_source, "owner")
+        with self.assertRaises(VaultError):
+            self.edits.approve(preview)
+        result = self.edits.approve(preview, secret)
+        _, generated = self._apply("create_entry", parent=self.group_id, fields={"title": "New login"},
+                                   password_source="generate")
+        saved = PyKeePass(self.path, password=self.unlock)
+        self.assertEqual(saved.find_entries(uuid=UUID(result["result"]), first=True).password, secret)
+        self.assertTrue(saved.find_entries(uuid=UUID(generated["result"]), first=True).password)
+        self.assertNotIn(secret.encode(), self.activity.path.read_bytes())
 
     def test_reenabled_token_cannot_apply_an_earlier_pending_edit(self):
         request = self._submit("create_group", parent=self.root_id, fields={"name": "Revoked"})

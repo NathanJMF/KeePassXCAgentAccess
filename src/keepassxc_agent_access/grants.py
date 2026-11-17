@@ -415,7 +415,7 @@ class Grants:
                     continue
                 if item.group is not None:
                     matches = [group for group in session.groups if group["id"] == item.group]
-                    if len(matches) == 1:
+                    if len(matches) == 1 and not (matches[0]["parent"] is None and "create_entry" in item.edits):
                         scope = Scope(identifier, None, False, None, None, group=item.group, edits=item.edits)
                         path = group_location(session.groups, item.group) or (matches[0]["name"] or "Root",)
                         result.append(Choice(scope, record.name, path, None))

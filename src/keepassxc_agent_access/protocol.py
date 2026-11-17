@@ -25,6 +25,7 @@ ERRORS = {
     "revoked": "Agent access changed before the request completed.",
     "busy": "The broker is busy.",
     "ineligible": "The requested operation is unavailable for this token.",
+    "choose_entry_group": "Choose a named group for the entry. Agents cannot create or move entries directly under the vault root.",
     "write_approval_required": "This token allows reads here. Set approve_write_once to true on the protected HTTPS write to request approval for just that operation.",
     "console_closed": "This console is closed or unavailable to this token. Request a new console if you still need it.",
     "console_failed": "Keeper could not complete the console operation. Check the approved endpoint and certificate or reopen the console.",

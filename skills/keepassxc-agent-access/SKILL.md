@@ -232,10 +232,12 @@ Use an active token to submit one exact change and its vault and target referenc
     JSON
     "$keeper" --profile "$profile" edits status --request REQUEST_UUID --json
 
-- create_entry and create_group use parent for the destination group UUID. An entry needs fields.title and can include username and url. A group needs fields.name.
+- For an entry, discover a named group and use its UUID as parent. If the group does not exist, request create_group first and use its returned UUID. The vault root can be the parent of a new group, but never the destination of an agent-created or moved entry.
+- When saving a login, make one create_entry request with its title, username, URL and top-level `"password_source": "owner"`. The owner enters the current password directly in Keeper's **Create Entry** review and saves the complete entry in one step. Use `"password_source": "generate"` only when the user wants a new password generated in Keeper. Without a password source, the entry is metadata only, so don't use that flow for a login that needs a password.
+- For a new account, choose the named group and prepare the Keeper entry before provisioning the service. Confirm the provisioning operation can consume that entry's generated password privately. A generated value in Keeper does not set a remote account's password, and the broker's protected HTTPS workflow currently uses one credential entry per call. Do not generate a replacement for an existing remote account unless the user requested a reset and there is an approved way to apply it.
 - update_entry uses entry and at least one of title, username, or url. rename_group uses group and fields.name.
 - move_entry and move_group use entry or group and the destination parent. recycle_entry and recycle_group use entry or group.
-- replace_password uses entry and password_source set to generate or owner. Enter or generate password values in Keeper's owner dialog.
+- For an existing entry, replace_password with `password_source: "owner"` opens **Save Password in Keeper**. This saves the account's existing password to the vault and does not change the real login. Use it for a saved entry, not as a second step after creating a login. Never put password values in requests, notes, or chat.
 
 A pending request awaits an owner decision. Report the status to the user. With Auto Approve on for the action, an edit can apply immediately when the token includes the exact edit permission. For a move, the destination group also needs `move_into` permission. Create permissions belong to the parent group. Owner-entered replacement passwords always need the review window. A completed create can include the new item's UUID under result.
 

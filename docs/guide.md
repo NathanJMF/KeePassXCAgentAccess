@@ -152,6 +152,8 @@ A networked command can receive one nonsecret artifact with `--input < artifact`
 
 An active runner token can submit one edit request with a new UUID and exact vault, entry or group references. In **Access**, open the pending edit to see its target, destination, and changed fields. Choose **Approve and Apply** or **Deny**. If agent access is paused, you can explicitly resume it from the review first. Keeper requires a fresh request if the reviewed vault state changes.
 
+Agent-created entries must go in a named group. Agents can request a top-level group and can move an existing root entry into a group. To save a login in one review, include the password source in the create-entry request. With the owner source, enter the account's current password directly in Keeper and save it with the rest of the entry. **Save Password in Keeper** updates a vault entry for an existing login. The service's password remains the same.
+
 Right-click a folder and choose **Copy Group Reference**, or right-click an entry and choose **Copy Entry Reference**, to give the agent the exact target.
 
 The CLI submits proposals with `keepassxc-agent edits request --json` and checks their status with `keepassxc-agent edits status --request REQUEST_UUID --json`. The stdio runner offers `request_edit` and `edit_status`. See the KeePass skill for the request format. Reuse the same UUID for transport retries. Each approval applies to a single change. Completed edit records lose identity and project details after the Activity retention period. Keeper keeps request IDs, digests, and outcomes to prevent replay and return consistent results for retries.

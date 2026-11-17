@@ -60,9 +60,11 @@ def edit_request(data):
     required = {"id", "operation", "vault", *references}
     if operation == "replace_password":
         required.add("password_source")
+    if operation == "replace_password" or operation == "create_entry" and "password_source" in data:
         if data.get("password_source") not in ("owner", "generate"):
             raise ValueError
-    if not required <= data.keys() <= required | {"fields"}:
+    optional = {"fields", "password_source"} if operation == "create_entry" else {"fields"}
+    if not required <= data.keys() <= required | optional:
         raise ValueError
     fields = data.get("fields", {})
     if (

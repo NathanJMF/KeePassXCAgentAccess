@@ -78,12 +78,20 @@ def review_edit(app, record, *, standalone=False):
     if app.desktop.locked or app.busy or record.status != "pending":
         return
     operation = record.request.operation
-    dialog, body = _dialog(app, OPERATION_LABELS[operation], 640, -1)
+    title = OPERATION_LABELS[operation]
+    approve_label = "Approve and Apply"
+    if record.request.password_source == "owner":
+        if operation == "create_entry":
+            approve_label = "Save Entry"
+        elif operation == "replace_password":
+            title = "Save Password in Keeper"
+            approve_label = "Save Password"
+    dialog, body = _dialog(app, title, 640, -1)
     dialog.set_name("keeper-edit-review")
     dialog.set_position(Gtk.WindowPosition.CENTER_ON_PARENT)
     dialog.set_modal(True)
     dialog.add_buttons("Close", Gtk.ResponseType.CLOSE, "Deny", Gtk.ResponseType.REJECT,
-                       "Approve and Apply", Gtk.ResponseType.ACCEPT)
+                       approve_label, Gtk.ResponseType.ACCEPT)
     dialog.set_default_response(Gtk.ResponseType.CLOSE)
     require_mouse_decisions(dialog)
     styled(dialog.get_widget_for_response(Gtk.ResponseType.ACCEPT), "suggested-action")
@@ -96,7 +104,7 @@ def review_edit(app, record, *, standalone=False):
     except ActivityError:
         error = "Keeper could not read the edit request."
     title_only = operation == "update_entry" and preview and tuple(key for key, _ in preview.new) == ("title",)
-    _add(body, "Rename this entry?" if title_only else f"{OPERATION_LABELS[operation]}?",
+    _add(body, "Rename this entry?" if title_only else f"{title}?",
          "keeper-review-title")
     _add(body, f"Requested by {record.identity} · {record.project}", "keeper-review-muted")
 
@@ -124,14 +132,15 @@ def review_edit(app, record, *, standalone=False):
             subgroups = "1 subgroup" if groups == 1 else f"{groups} subgroups"
             _add(panel, f"Affected contents  {entries} · {subgroups}")
         if preview.password_source == "generate":
-            _add(panel, "Keeper will generate and save a new password.")
+            _add(panel, "Keeper will generate and save a password in the vault. This does not change the password on the service.")
         elif preview.password_source == "owner":
-            _add(panel, "Enter the replacement password.")
+            _add(panel, "Paste the account’s current password. Keeper saves it here and does not change the account’s login.")
             owner_password = password_entry()
             owner_password.set_name("edit-owner-password")
-            owner_password.set_placeholder_text("Replacement Password")
+            owner_password.set_placeholder_text("Current Account Password")
             panel.pack_start(owner_password, False, False, 0)
-        if operation == "replace_password" or any(field == "username" for field, _ in preview.new):
+        if operation == "replace_password" or (operation == "update_entry" and any(
+                field == "username" for field, _ in preview.new)):
             _add(panel, "Existing credential action approvals for this entry will require fresh approval.")
     elif error:
         _add(panel, error)

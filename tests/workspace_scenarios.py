@@ -865,7 +865,10 @@ def main(root):
                 table.get_selection().select_path(path)
 
                 def check(dialog):
-                    assert dialog.get_title() == OPERATION_LABELS[proposal["operation"]]
+                    title = OPERATION_LABELS[proposal["operation"]]
+                    if proposal["operation"] == "replace_password" and proposal.get("password_source") == "owner":
+                        title = "Save Password in Keeper"
+                    assert dialog.get_title() == title
                     labels = [child.get_text() for child in descendants(dialog) if isinstance(child, Gtk.Label)]
                     assert all(any(expected.casefold() in label.casefold() for label in labels) for expected in strings)
                     if password:
@@ -916,8 +919,9 @@ def main(root):
 
             rename = propose("rename_group", group=group, fields={"name": "Approved group"})
             apply(rename, strings=("Reviewed group", "Approved group"))
-            new = propose("create_entry", parent=group, fields={"title": "Agent fixture", "username": "fixture"})
-            entry = apply(new, strings=("Agent fixture", "Approved group"))
+            new = propose("create_entry", parent=group, fields={"title": "Agent fixture", "username": "fixture"},
+                          password_source="owner")
+            entry = apply(new, strings=("Agent fixture", "Approved group"), password=REQUESTED_PASSWORD)
             assert invoke("beta", "entries", "list")["entries"] == fixture[2:]
             assert invoke("beta", "entries", "list", "--vault", first, expected=1)
             proposal = propose("update_entry", entry=entry, fields={"title": "Approved edit"})
@@ -1654,9 +1658,10 @@ def main(root):
                 assert app.usage_button.get_style_context().has_class("keeper-usage-review")
                 assert old_access.read().review_usage
 
-                root_group, = [group["id"] for group in app.workspace.session(second).groups if group["parent"] is None]
+                named_group = next(row["group"] for row in app.workspace.session(second).entries
+                                   if row["id"] == nested_entry)
                 edits = [{"vault": second, "entry": nested_entry, "edits": ["update_entry"]},
-                         {"vault": second, "group": root_group, "edits": ["create_entry"]}]
+                         {"vault": second, "group": named_group, "edits": ["create_entry"]}]
                 assert enroll("scoped-editor", edits) == {"status": "pending"}
                 approve("scoped-editor")
 

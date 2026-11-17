@@ -35,6 +35,13 @@ _KINDS = {
 }
 _MAX_PENDING = 64
 _MAX_PER_TOKEN = 8
+_ENTRY_PLACEMENT = frozenset({"create_entry", "move_entry"})
+
+
+def _root_entry_destination(request, groups):
+    return request.operation in _ENTRY_PLACEMENT and any(
+        row["id"] == request.parent and row["parent"] is None for row in groups
+    )
 
 
 @dataclass(frozen=True)
@@ -62,14 +69,15 @@ class EditRequest:
                 required.add("parent")
             if operation == "replace_password":
                 required.add("password_source")
-            if not required <= payload.keys() or payload.keys() - (required | {"fields"}):
+            optional = {"fields", "password_source"} if operation == "create_entry" else {"fields"}
+            if not required <= payload.keys() <= required | optional:
                 raise ValueError
             fields = payload.get("fields", {})
             if (not isinstance(fields, dict) or fields.keys() - set(kind.fields)
                     or not set(kind.required) <= fields.keys() or operation == "update_entry" and not fields):
                 raise ValueError
             source = payload.get("password_source")
-            if operation == "replace_password" and source not in ("generate", "owner"):
+            if "password_source" in payload and source not in ("generate", "owner"):
                 raise ValueError
             return cls(uuid_text(payload["id"]), operation, uuid_text(payload["vault"]),
                        entry=uuid_text(payload["entry"]) if kind.target == "entry" else None,
@@ -209,7 +217,7 @@ class EditRequests:
         if request.fields:
             scope.append("Fields " + ", ".join(name for name, _ in request.fields))
         if request.password_source:
-            scope.append(f"Replacement source {request.password_source}")
+            scope.append(f"Password source {request.password_source}")
         registration = self.workspace.registrations.get(request.vault)
         vault_name = preview.vault_name if preview else registration.name if registration else None
         folder, title, destination = None, None, None
@@ -238,8 +246,18 @@ class EditRequests:
                 "SELECT * FROM edit_requests WHERE status='pending'")]
         for record in rows:
             current = self.grants.records.get(record.token_id)
-            if current is None or current.generation != record.token_generation or current.status != "active":
+            if (current is None or current.generation != record.token_generation or current.status != "active"
+                    or self._targets_root(record.request)):
                 self._stale(record, current, label="Cancel edit")
+
+    def _targets_root(self, request):
+        if request.operation not in _ENTRY_PLACEMENT:
+            return False
+        session = self.workspace.owner_session(request.vault)
+        if session is not None:
+            return _root_entry_destination(request, session.groups)
+        cached = self.workspace.discovery.snapshots.get(request.vault)
+        return bool(cached and _root_entry_destination(request, cached["groups"]))
 
     @staticmethod
     def _permitted(token, request):
@@ -274,6 +292,8 @@ class EditRequests:
                     if previous["digest"] != digest:
                         raise ListingError("invalid_request")
                     return self._response(previous)
+                if self._targets_root(request):
+                    raise ListingError("choose_entry_group")
                 count, own = db.execute("""
                     SELECT count(*), count(CASE WHEN token=? THEN 1 END)
                     FROM edit_requests WHERE status IN ('pending', 'applying', 'dispatched')
@@ -372,7 +392,7 @@ class EditRequests:
             try:
                 edit_text(password, required=True)
             except EditError:
-                raise VaultError("Enter the replacement password before approving.") from None
+                raise VaultError("Enter the password to save in Keeper before approving.") from None
         elif password is not None:
             raise VaultError("This edit request does not accept a password.")
         return self._apply_claim(*self._claim_edit(preview), password=password)
@@ -507,6 +527,8 @@ def _subtree(session, identifier):
 def _preview(record, vault_name, session):
     request = record.request
     operation = request.operation
+    if _root_entry_destination(request, session.groups):
+        raise VaultError("Choose a named group for the entry. Agents cannot place entries at the vault root.")
     old, target = (), ()
     group_count, entry_count = 0, 0
     destination, ancestors = None, set()
@@ -535,7 +557,8 @@ def _preview(record, vault_name, session):
         new = tuple((field, proposed.get(field, "")) for field in _ENTRY_FIELDS)
         change = "put_entry"
         values = dict(parent=request.parent, entry=None, title=proposed["title"],
-                      username=proposed.get("username", ""), url=proposed.get("url", ""), password=None)
+                      username=proposed.get("username", ""), url=proposed.get("url", ""), password=None,
+                      generate_password=request.password_source == "generate", require_group=True)
     elif operation == "create_group":
         change = "put_group"
         values = dict(parent=request.parent, group=None, name=proposed["name"])
@@ -544,6 +567,8 @@ def _preview(record, vault_name, session):
         values = dict(parent=request.parent or entry["group"], entry=request.entry,
                       password=None, generate_password=request.password_source == "generate",
                       **{field: proposed.get(field, entry[field]) for field in _ENTRY_FIELDS})
+        if operation == "move_entry":
+            values["require_group"] = True
     elif operation in ("rename_group", "move_group"):
         change = "put_group"
         values = dict(parent=request.parent or group["parent"], group=request.group,

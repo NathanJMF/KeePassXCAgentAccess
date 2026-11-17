@@ -61,7 +61,7 @@ def _entry(vault, identifier):
 
 
 def _put_entry(vault, request):
-    destination = _group(vault, request["parent"])
+    destination = _group(vault, request["parent"], allow_root=not request.get("require_group"))
     title = edit_text(request["title"], required=True)
     username = edit_text(request["username"])
     url = edit_text(request["url"])
@@ -70,7 +70,7 @@ def _put_entry(vault, request):
         notes = edit_text(notes, limit=EDIT_LIMIT)
     password = request["password"]
     if request.get("generate_password"):
-        if request["entry"] is None or password is not None:
+        if password is not None:
             raise EditError("invalid")
         password = token_urlsafe(32)
     if password is not None:
