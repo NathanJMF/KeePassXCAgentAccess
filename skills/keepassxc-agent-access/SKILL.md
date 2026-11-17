@@ -78,6 +78,14 @@ To change this task's active token permissions, keep the same profile and omit i
 
 Keeper can auto approve ordinary metadata/edit token requests and permission changes when the owner enables the main Auto Approve setting and corresponding token option. Requests containing reusable credential permissions require owner review. If a request is pending, tell the user and check again after they review it. Only active tokens can run scoped operations. Ask the owner about disabled tokens, locked vaults, or globally paused agent access.
 
+### Give up access when you are done
+
+Decide when this task no longer needs an entry. For example, after provisioning and verifying the owner's account, release your access to the owner's entry while keeping the access needed for your own role.
+
+    "$keeper" --profile "$profile" --note "Finished setting up the owner's account" access release --vault "$vault" --entry "$entry" --json
+
+Use the exact vault and entry UUIDs. Keeper releases all of this token's permissions for that entry immediately and records the decision in Activity. This needs no owner review and works even when agent access is paused. The entry stays in the vault, and other tokens retain their own grants. Finish outstanding operations under this token first, since changing its scope invalidates in-flight requests. An effective release cancels any pending permission change for this token. If the reply has `"cancelled_change": true`, use a new request ID for any unrelated permissions you still need. Check `access status --details --json` for the remaining scope. Regaining a released entry requires a fresh owner-approved grant.
+
 ## Discover and list
 
 When a listing or credential action requires approval, keep the active call open while the owner decides.

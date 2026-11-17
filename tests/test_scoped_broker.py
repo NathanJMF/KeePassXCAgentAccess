@@ -96,6 +96,67 @@ class ScopedBrokerTests(unittest.TestCase):
             self.invoke("discover")
         self.assertEqual(error.exception.code, "paused")
 
+    def test_agent_can_release_one_entry_without_affecting_another_vault_or_token(self):
+        source, other = self.vaults
+        item = {"vault": source, "entry": self.entry, "metadata": True}
+        identifier = self.approve([item, {**item, "action": "check"}, {**item, "vault": other}])
+        self.approve([item], index=1)
+        change = {"identity": "Fixture agent 0", "project": "Fixture",
+                  "change_id": str(uuid4()), "items": [item]}
+        self.assertEqual(self.invoke("request_access", request=change), {"status": "pending"})
+        token = self.grants.records[identifier]
+        previous = token.pending_change
+        selected = [self.grants.choices(item)[0] for item in previous.items]
+        self.workspace.pause()
+        self.assertEqual(self.invoke("release_entry", vault=source, entry=self.entry,
+                                     context={"note": "Finished using the owner's login"}),
+                         {"status": "released", "cancelled_change": True})
+        with self.assertRaises(ListingError) as error:
+            self.grants.decide(identifier, selected, change_id=previous.id)
+        self.assertEqual(error.exception.code, "revoked")
+        self.assertEqual(self.invoke("request_access", request=change), {"status": "denied"})
+        self.assertEqual(self.invoke("release_entry", vault=source, entry=self.entry),
+                         {"status": "released", "cancelled_change": False})
+        event, = self.activity.rows(action="Release entry access")
+        self.assertEqual((event["outcome"], event["vault_id"], event["entry"], event["note"]),
+                         ("Released", source, self.entry, "Finished using the owner's login"))
+        self.assertEqual(self.grants.records[identifier].generation, token.generation + 1)
+
+        self.grants = self.engine.grants = Grants(self.workspace, self.activity)
+        self.workspace.pause(False)
+        self.assertEqual({row["id"] for row in self.invoke("list_vaults")["vaults"]}, {other})
+        self.assertEqual(len(self.invoke("list_entries", vault=other)["entries"]), 1)
+        self.assertEqual(len(self.invoke("list_entries", index=1, vault=source)["entries"]), 1)
+        self.assert_code("ineligible", "use_password", vault=source, entry=self.entry, action="check")
+        self.workspace.acknowledge_token_auto_approval(True)
+        self.workspace.set_token_auto_approval("auto_approve_token_changes", True)
+        self.assertEqual(self.invoke("request_access", request={**change, "change_id": str(uuid4()),
+                                                              "items": [{**item, "vault": other}]}),
+                         {"status": "active"})
+        renewed = {**change, "change_id": str(uuid4()),
+                   "items": [{"vault": source, "label": "Example entry", "metadata": True}]}
+        self.assertEqual(self.invoke("request_access", request=renewed), {"status": "pending"})
+        self.assertEqual({scope["vault"] for scope in self.invoke("access_status", details=True)["scope"]}, {other})
+        pending = self.grants.records[identifier].pending_change
+        selected = [self.grants.choices(pending.items[0])[0]]
+        self.assertEqual(self.invoke("release_entry", vault=source, entry=self.entry),
+                         {"status": "released", "cancelled_change": True})
+        with self.assertRaises(ListingError) as error:
+            self.grants.decide(identifier, selected, change_id=pending.id)
+        self.assertEqual(error.exception.code, "revoked")
+        renewed["change_id"] = str(uuid4())
+        self.assertEqual(self.invoke("request_access", request=renewed), {"status": "pending"})
+        pending = self.grants.records[identifier].pending_change
+        self.grants.decide(identifier, [self.grants.choices(pending.items[0])[0]], change_id=pending.id)
+        self.assertEqual(len(self.invoke("list_entries", vault=source)["entries"]), 1)
+
+    def test_release_invalidates_an_inflight_entry_read_before_delivery(self):
+        vault = self.vaults[0]
+        self.approve([{"vault": vault, "entry": self.entry, "metadata": True}])
+        self.assert_code("revoked", "list_entries", vault=vault,
+                         before=lambda: self.invoke("release_entry", vault=vault, entry=self.entry))
+        self.assertEqual(self.invoke("access_status", details=True)["scope"], [])
+
     def test_discovery_rejects_echoed_credentials_before_writing_activity(self):
         with self.assertRaises(ListingError):
             self.invoke("discover", credential=self.secrets[0], context={"note": self.secrets[0]})

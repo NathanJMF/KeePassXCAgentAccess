@@ -223,6 +223,7 @@ class Grant:
     generation: int = 0
     change: PermissionChange | None = None
     superseded_changes: tuple[str, ...] = ()
+    released_entries: tuple[tuple[str, str], ...] = ()
 
     @property
     def pending_change(self):
@@ -248,7 +249,9 @@ class Grants:
                 record = Grant(**dict(row, context=Attribution(**row["context"]),
                                       items=tuple(Item(**item) for item in row["items"]),
                                       scope=tuple(Scope(**scope) for scope in row["scope"]), change=change,
-                                      superseded_changes=tuple(row.get("superseded_changes", ()))))
+                                      superseded_changes=tuple(row.get("superseded_changes", ())),
+                                      released_entries=tuple((uuid_text(vault), uuid_text(entry))
+                                                             for vault, entry in row.get("released_entries", ()))))
                 if record.id in self.records or record.verifier in self.credentials:
                     raise ValueError
                 self.records[record.id] = record
@@ -372,6 +375,8 @@ class Grants:
         choices = None
         if self.workspace.token_auto_approval_enabled("auto_approve_token_changes"):
             choices = self._automatic_choices(items)
+            if choices and self._restores_released_entry(record, (choice.scope for choice in choices)):
+                choices = None
         self._change(row, "Request token permissions", "Pending approval", context=attribution,
                      target_scope=tuple(choice.scope for choice in choices) if choices else ())
         if choices:
@@ -441,6 +446,10 @@ class Grants:
         with self.workspace.mutex:
             self._decide(self.records[identifier], choices, change_id=change_id)
 
+    @staticmethod
+    def _restores_released_entry(record, scopes):
+        return not set(record.released_entries).isdisjoint((item.vault, item.entry) for item in scopes)
+
     def _decide(self, record, choices, *, change_id=None, automatic=False):
         if change_id:
             change = record.change
@@ -463,12 +472,44 @@ class Grants:
         ):
             raise ValueError("The requested scope changed. Reopen the request and review it again.")
         scope = tuple(choice.scope for choice in choices)
+        if automatic and self._restores_released_entry(record, scope):
+            raise ListingError("revoked")
+        granted = {(item.vault, item.entry) for item in scope}
+        released = tuple(entry for entry in record.released_entries if entry not in granted)
         action = "Approve token permissions" if change_id else "Approve token"
-        row = replace(record, status="active", scope=scope)
+        row = replace(record, status="active", scope=scope, released_entries=released)
         if change_id:
             row = replace(row, change=replace(change, status="active"), generation=record.generation + 1)
         decision = "Auto approved" if automatic else "Approved in Access"
         self._change(row, action, "Approved", context=context, decision=decision)
+
+    def release_entry(self, token, vault, entry, context):
+        """Relinquish one entry on the calling token, including all its uses."""
+        with self.workspace.mutex:
+            current = self.records.get(token.id)
+            if current is None or current.status != "active" or current.generation != token.generation:
+                raise ListingError("ineligible")
+            target = (vault, entry)
+            removed = tuple(item for item in current.scope if (item.vault, item.entry) == target)
+            pending = current.pending_change
+            may_restore = (pending is not None and target in current.released_entries
+                           and any(item.group is None and item.vault in (None, vault)
+                                   and item.entry in (None, entry) for item in pending.items))
+            # A repeated release can withdraw a pending restoration. A label
+            # can resolve differently at review time, so match its vault too.
+            if not removed and not may_restore:
+                return {"status": "released", "cancelled_change": False}
+            remaining = tuple(item for item in current.scope if (item.vault, item.entry) != target)
+            change = replace(pending, status="denied") if pending else current.change
+            row = replace(current, scope=remaining, generation=current.generation + 1, change=change,
+                          released_entries=tuple(sorted(set(current.released_entries) | {target})))
+            decision = "Released by agent"
+            if pending:
+                decision += " · Pending permission change canceled"
+            audit_scope = removed or (Scope(vault, entry, False, None, None),)
+            self._change(row, "Release entry access", "Released", target_scope=audit_scope, context=context,
+                         decision=decision)
+            return {"status": "released", "cancelled_change": pending is not None}
 
     def transition(self, identifier, status):
         with self.workspace.mutex:
@@ -486,7 +527,7 @@ class Grants:
             if row.pending_change:
                 row = replace(row, change=replace(row.change, status="denied"))
             if status == "removed":
-                row = replace(row, scope=(), items=(), change=None, superseded_changes=())
+                row = replace(row, scope=(), items=(), change=None, superseded_changes=(), released_entries=())
             self._change(row, action, status.capitalize(), target_scope=record.scope)
 
     def _target(self, scope):

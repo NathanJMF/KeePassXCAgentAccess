@@ -345,6 +345,11 @@ def _validate(reply, payload):
         elif set(reply) != {"status"}:
             raise ListingError("invalid_response")
         return reply
+    if operation == "release_entry":
+        if (set(reply) != {"status", "cancelled_change"} or reply["status"] != "released"
+                or type(reply["cancelled_change"]) is not bool):
+            raise ListingError("invalid_response")
+        return reply
     if operation in CONSOLE_OPERATIONS:
         if operation == "console_open":
             if (set(reply) != {"console", "expires_in"} or edit_uuid(reply["console"]) != reply["console"]
@@ -526,6 +531,11 @@ def main(argv=None):
     status.add_argument("--json", action="store_true", required=True, help="Emit JSON")
     status.add_argument("--details", action="store_true", help="Show the registered identity, project, attribution, and permission scope")
     status.set_defaults(operation="access_status")
+    release = commands.add_parser("release", help="Give up this token's access to one entry")
+    release.add_argument("--vault", required=True, type=_request_id)
+    release.add_argument("--entry", required=True, type=_request_id)
+    release.add_argument("--json", action="store_true", required=True, help="Emit JSON")
+    release.set_defaults(operation="release_entry")
     edits = topics.add_parser("edits", help="Request an owner-reviewed vault edit")
     commands = edits.add_subparsers(required=True)
     submit = commands.add_parser("request", help="Read an edit request as JSON from stdin")
@@ -623,7 +633,7 @@ def main(argv=None):
         payload["include_reviewed"] = True
     if options.operation == "edit_status":
         payload["id"] = options.request
-    if options.operation == "console_open":
+    if options.operation in ("console_open", "release_entry"):
         payload["entry"] = options.entry
     elif options.operation in CONSOLE_OPERATIONS:
         payload["console"] = options.console
@@ -687,7 +697,7 @@ def main(argv=None):
             except (ValueError, RecursionError):
                 raise ListingError("invalid_request") from None
         if options.operation != "discover" and (token_file or options.operation in (
-            "request_access", "access_status", "list_vaults", "request_edit", "edit_status",
+            "request_access", "access_status", "release_entry", "list_vaults", "request_edit", "edit_status",
         )):
             scope = payload.get("request")
             create = options.operation == "request_access" and isinstance(scope, dict) and "change_id" not in scope

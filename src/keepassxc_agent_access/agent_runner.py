@@ -124,6 +124,10 @@ OPERATIONS = {
         "request_access", "Request a scoped token or replace this token’s scope using a change_id.",
         {"request": ENROLLMENT}, required=("request",), read_only=False,
     )),
+    "release_entry": (("access", "release"), tool(
+        "release_entry", "Immediately give up this token's access to one entry. A new owner grant is required to regain it.",
+        {"vault": REFERENCE, "entry": REFERENCE}, required=("vault", "entry"), read_only=False,
+    )),
     "request_edit": (("edits", "request"), tool(
         "request_edit", "Queue one vault edit for owner review. For password replacements pass only the password source.",
         {"request": EDIT_REQUEST}, required=("request",), read_only=False,

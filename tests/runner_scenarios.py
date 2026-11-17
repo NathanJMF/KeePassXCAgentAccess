@@ -183,6 +183,16 @@ def check_tools(runner, anchor, target, endpoint, private, expected, url, calls,
         workspace.set_token_auto_approval("auto_approve_token_changes", True)
         assert invoke("request_access", {"request": change}) == {"status": "active"}
         assert invoke("list_entries", {"vault": vault}) == {"entries": [unapproved]}
+        assert invoke("release_entry", {"vault": vault, "entry": unapproved["id"],
+                                        "note": "Hand the entry back to the owner"}) == {
+            "status": "released", "cancelled_change": False,
+        }
+        assert invoke("list_vaults") == {"vaults": []}
+        assert invoke("access_status", {"details": True})["scope"] == []
+        event, = activity.rows(action="Release entry access", outcome="Released")
+        assert (event["vault_id"], event["entry"], event["note"]) == (
+            vault, unapproved["id"], "Hand the entry back to the owner")
+        assert invoke("request_access", {"request": {**change, "change_id": str(uuid4())}}) == {"status": "pending"}
         invoke("use_password", action, error=True)
         assert calls == expected_calls
         grants.transition(record.id, "disabled")
@@ -204,4 +214,4 @@ def check_tools(runner, anchor, target, endpoint, private, expected, url, calls,
 if __name__ == "__main__":
     with TemporaryDirectory(prefix="keeper-runner-") as root:
         check(Path(root))
-    print("Runner scenario passed: bundled runner, all eight stdio tools, separate peer UID, scoped TLS and fixed API delivery, persisted edits, and revocation")
+    print("Runner scenario passed: bundled runner, stdio tools, separate peer UID, scoped API delivery, persisted edits, entry release and revocation")

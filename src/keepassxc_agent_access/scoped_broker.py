@@ -121,6 +121,8 @@ class ScopedBroker:
                 pass
             elif operation == "edit_status" and keys == {"id"}:
                 pass
+            elif operation == "release_entry" and keys == {"vault", "entry"}:
+                vault, entry = uuid_text(payload["vault"]), uuid_text(payload["entry"])
             elif operation == "discover" and keys <= {"vault", "summary"}:
                 vault = uuid_text(payload["vault"]) if "vault" in keys else None
                 if type(payload.get("summary", False)) is not bool:
@@ -193,6 +195,9 @@ class ScopedBroker:
                 status = self.grants.enroll(credential, uid, payload["request"], context)
                 return encode({"status": status})
             token = self.grants.authenticate(credential, uid)
+            if operation == "release_entry":
+                self._charge_request(token.verifier, uid, active=token.status == "active")
+                return encode(self.grants.release_entry(token, vault, entry, context))
             if operation == "access_status":
                 return encode(access_details(token) if payload.get("details") else {"status": token.status})
             if operation == "edit_status":

@@ -243,6 +243,7 @@ ACTIVITY_STATES = {
     "Paused": ("media-playback-pause-symbolic", "keeper_warning"),
     "Disabled": ("action-unavailable-symbolic", "keeper_muted"),
     "Removed": ("user-trash-symbolic", "keeper_muted"),
+    "Released": ("changes-prevent-symbolic", "keeper_muted"),
     "Revoked": ("action-unavailable-symbolic", "keeper_muted"),
     "Rate limited": ("appointment-soon-symbolic", "keeper_warning"),
 }
@@ -261,6 +262,7 @@ ACTIVITY_ACTION_ICONS = {
     "Disable token": "changes-prevent-symbolic",
     "Re-enable token": "changes-allow-symbolic",
     "Remove token": "user-trash-symbolic",
+    "Release entry access": "changes-prevent-symbolic",
 }
 
 
@@ -939,14 +941,17 @@ class AccessView(Gtk.Box):
         )), False, False, 0)
         body.pack_start(styled(Gtk.Label(label="Approved Entries", xalign=0), "keeper-event-section-title"),
                         False, False, 0)
-        tree, needs_unlock = approved_entries_tree(self.app.workspace, grant.scope)
-        scroll = _scroll(tree)
-        scroll.set_propagate_natural_height(True)
-        scroll.set_min_content_height(95)
-        scroll.set_max_content_height(335)
-        body.pack_start(scroll, True, True, 0)
-        if needs_unlock:
-            add_label(body, "Unlock a database to see its group and entry names.")
+        if grant.scope:
+            tree, needs_unlock = approved_entries_tree(self.app.workspace, grant.scope)
+            scroll = _scroll(tree)
+            scroll.set_propagate_natural_height(True)
+            scroll.set_min_content_height(95)
+            scroll.set_max_content_height(335)
+            body.pack_start(scroll, True, True, 0)
+            if needs_unlock:
+                add_label(body, "Unlock a database to see its group and entry names.")
+        else:
+            add_label(body, "This token has no approved entries or groups.")
         technical = Gtk.Expander(label="Technical Details")
         technical.add(activity_facts((("Verified Linux UID", grant.uid), ("Token Record", grant.id))))
         body.pack_start(technical, False, False, 0)
