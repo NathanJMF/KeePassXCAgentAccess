@@ -257,10 +257,17 @@ def exercise_console(root):
             call(foreign, *input_args, data=[{"key": "Enter"}], error="unavailable to this token")
             before = call(profile, *view_args, png=True)
             assert before.startswith(b"\x89PNG\r\n\x1a\n")
-            assert call(profile, *input_args, data=[{"key": "Enter"}, {"x": 3, "y": 1}]) == {"outcome": "succeeded"}
+            assert call(profile, *input_args, data=[{"key": "Enter"}, {"text": "Aa!"}, {"x": 3, "y": 1}]) == {"outcome": "succeeded"}
             after = call(profile, *view_args, png=True)
             assert before != after
-            assert state["input"] == [pack("!BBHIBBHIBBHHBBHH", 4, 1, 0, 0xff0d, 4, 0, 0, 0xff0d, 5, 1, 3, 1, 5, 0, 3, 1)]
+            received = [
+                (1, 0xff0d), (0, 0xff0d),
+                (1, 0xffe1), (1, ord("A")), (0, ord("A")), (0, 0xffe1),
+                (1, ord("a")), (0, ord("a")),
+                (1, 0xffe1), (1, ord("!")), (0, ord("!")), (0, 0xffe1),
+            ]
+            expected_keys = b"".join(pack("!BBHI", 4, down, 0, code) for down, code in received)
+            assert state["input"] == [expected_keys + pack("!BBHHBBHH", 5, 1, 3, 1, 5, 0, 3, 1)]
             assert len(decisions) == 4
             worker = workspace.session(vault).worker
             worker_console = worker.console
@@ -286,7 +293,7 @@ def exercise_console(root):
             rows = activity.rows(agent="Console Operator")
             assert all(secret not in repr(rows).encode() for secret in secrets_to_check)
             assert any(row["action"] == "Send Guest Console Input" and row["outcome"] == "Succeeded"
-                       and "2 input events" in row["scope"] and "Enter" not in row["scope"] for row in rows)
+                       and "3 input events" in row["scope"] and "Enter" not in row["scope"] for row in rows)
             assert "https" not in grants.records[identifier].scope[0].uses
     finally:
         stopped.set()

@@ -22,6 +22,22 @@ KEYS = {
     "PageUp": 0xff55, "PageDown": 0xff56, "End": 0xff57, "Insert": 0xff63, "Delete": 0xffff,
     **{f"F{n}": 0xffbd + n for n in range(1, 13)},
 }
+SHIFTED_US_KEYS = frozenset('~!@#$%^&*()_+{}|:"<>?')
+
+
+def _key_event(code, down):
+    return pack("!BBHI", 4, down, 0, code)
+
+
+def _key_press(key):
+    code = KEYS[key] if key in KEYS else ord(key)
+    press = _key_event(code, 1) + _key_event(code, 0)
+    # QEMU's graphical VNC console maps key symbols to physical keys.
+    # Send the Shift modifier explicitly for US-layout ASCII.
+    if len(key) == 1 and ("A" <= key <= "Z" or key in SHIFTED_US_KEYS):
+        shift = 0xffe1
+        return _key_event(shift, 1) + press + _key_event(shift, 0)
+    return press
 
 
 def validate_inputs(events):
@@ -122,7 +138,12 @@ class WebSocket:
 
     def send(self, data, opcode=2):
         size = len(data)
-        count = pack("!B", size | 128) if size < 126 else pack("!BH", 254, size)
+        if size < 126:
+            count = pack("!B", size | 128)
+        elif size <= 65535:
+            count = pack("!BH", 254, size)
+        else:
+            count = pack("!BQ", 255, size)
         mask = os.urandom(4)
         masked = bytes(byte ^ mask[i % 4] for i, byte in enumerate(data))
         self.send_bytes(pack("!B", 128 | opcode) + count + mask + masked)
@@ -299,7 +320,5 @@ class Console:
                 data.extend(pack("!BBHHBBHH", 5, 1, x, y, 5, 0, x, y))
             else:
                 for key in ([event["key"]] if "key" in event else list(event["text"])):
-                    code = KEYS[key] if key in KEYS else ord(key)
-                    data.extend(pack("!BBHIBBHI", 4, 1, 0, code, 4, 0, 0, code))
-        # Keep masked client frames below WebSocket's 16-bit length limit.
+                    data.extend(_key_press(key))
         self.ws.send(data)
