@@ -185,14 +185,17 @@ class VaultSession:
         with self._exchange(request, WORKER_TIMEOUT) as read:
             return decode(read())["entry"]
 
-    def use(self, action, gate, *, input_path=None):
+    def use(self, action, gate, *, input_path=None, allow_username=False):
         request = encode({"operation": "use_password", "entry": action.entry,
                           "url": action.url, "kind": action.kind, "command": action.command,
                           "method": action.method, "request_json": action.request_json,
+                          "result_request": action.result_request, "allow_username": bool(allow_username),
                           "headers": action.headers, "query": action.query, "opaque": action.opaque, "environment": action.environment, "prompt_contains": action.prompt_contains,
                           "browser": asdict(action.browser) if action.browser else None,
                           "executable_sha256": action.executable_sha256, "prompt_variable": action.prompt_variable,
                           "input_path": str(input_path) if input_path is not None else None})
+        if action.result_request:
+            return self._result_exchange(request, gate, 2 if "login" in json.loads(action.result_request) else 1)
         timeout = 33 if action.browser else 25 if action.prompt_variable else 12
         window = (DYNAMIC_NETWORK_WINDOW if action.prompt_variable else DYNAMIC_LOCAL_WINDOW) if action.opaque else 0
         with self._exchange(request, timeout) as read:
@@ -245,6 +248,32 @@ class VaultSession:
             finally:
                 if window:
                     sleep(max(0, deadline - monotonic()))
+
+    def _result_exchange(self, request, gate, steps):
+        # Each request that can carry authentication has its own owner guard.
+        # The login response and captures remain inside the worker throughout.
+        with self._exchange(request, 30) as read:
+            response = decode(read())
+            sent = 0
+            while response == {"ready": True}:
+                if sent >= steps:
+                    self.close()
+                    raise ListingError("invalid_response")
+                dispatched = False
+                try:
+                    dispatched = gate(lambda: self._send(b"dispatch\n"))
+                finally:
+                    if not dispatched:
+                        try:
+                            self._send(b"abort\n")
+                            read()
+                        except (OSError, EOFError, ValueError, ListingError):
+                            self.close()
+                if not dispatched:
+                    raise ListingError("revoked")
+                sent += 1
+                response = decode(read())
+            return response
 
     def __enter__(self):
         return self

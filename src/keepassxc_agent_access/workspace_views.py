@@ -232,6 +232,7 @@ ACCESS_STATES = {
 ACTIVITY_STATES = {
     "Approved": ("emblem-ok-symbolic", "keeper_success"),
     "Succeeded": ("emblem-ok-symbolic", "keeper_success"),
+    "Results Not Delivered": ("dialog-warning-symbolic", "keeper_warning"),
     "Dispatched": ("mail-send-symbolic", "keeper_accent"),
     "Pending approval": ("appointment-soon-symbolic", "keeper_warning"),
     "Pending review": ("appointment-soon-symbolic", "keeper_warning"),
@@ -288,6 +289,9 @@ def credential_use_labels(permission):
                       + "\n".join(permission.origins))
         elif use == "https_body":
             detail = ("The credential can be sent in an API request body and may be stored or published by the approved service.\n"
+                      + "\n".join(permission.origins))
+        elif use == "https_results":
+            detail = ("Releases selected scalar fields from the approved service. Resource writes also require HTTPS-use permission. Login responses and captured authentication tickets stay private. Approve only endpoints and fields you trust.\n"
                       + "\n".join(permission.origins))
         elif use == "networked_command":
             detail = ("Can send the credential to these approved TCP peers and ports. The command controls protocol and TLS verification. Shared addresses can host multiple services or tenants. Command output and exit status stay private.\n"
@@ -1285,7 +1289,7 @@ def edit_binding(app, vault, entry, previous):
     kind = Gtk.ComboBoxText()
     kind.set_name("action-kind")
     for option in ActionType:
-        if option != ActionType.TEMPLATE:
+        if option not in (ActionType.TEMPLATE, ActionType.RESULTS):
             kind.append(option.value, option.label)
     kind.set_active_id(previous.action.kind.value if previous else ActionType.BASIC.value)
     body.pack_start(kind, False, False, 0)

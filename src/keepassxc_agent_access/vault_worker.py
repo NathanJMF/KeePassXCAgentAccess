@@ -15,7 +15,8 @@ from .browser_action import prepare_browser
 from .command_action import deliver_credential, deliver_prompt, prepare_command
 from .entry_projection import active_entry, entry_listing, owner_snapshot
 from .https_action import authenticate, failure, prepare_https
-from .protocol import RESPONSE_LIMIT, encode
+from .protocol import RESPONSE_LIMIT, decode, encode
+from .result_delivery import deliver_results, parse_result_usage
 from .vault_edits import EDIT_LIMIT, EditError, database_file, file_stamp, stage_edit
 
 
@@ -80,7 +81,9 @@ def load_vault():
         elif data["operation"] == "owner_entry_notes":
             reply(entry_notes_frame(entry))
         elif data["operation"] == "use_password":
-            if data["kind"] == ActionType.STDIN:
+            if data["kind"] == ActionType.RESULTS:
+                use_results(entry, data["result_request"], data["url"], allow_username=data.get("allow_username") is True)
+            elif data["kind"] == ActionType.STDIN:
                 use_command(entry, data["command"], data["executable_sha256"])
             elif data["kind"] == ActionType.NETWORK_PROMPT:
                 use_command(entry, data["command"], data["executable_sha256"],
@@ -125,6 +128,22 @@ def use(entry, url, kind, method, request_json, *, headers=(), query=()):
                 result = authenticate(connection, path, entry, kind, method=method, request_json=request_json, headers=headers)
             reply(encode(result))
     except (OSError, HTTPException, ValueError):
+        reply(encode(failure()))
+
+
+def use_results(entry, descriptor, origin, *, allow_username=False):
+    if entry is None:
+        reply(encode(failure()))
+        return
+    try:
+        request = parse_result_usage(decode(descriptor.encode("utf-8")))
+        if request.origin != origin:
+            raise ValueError
+        def dispatch():
+            reply(encode({"ready": True}))
+            return sys.stdin.buffer.readline(16) == b"dispatch\n"
+        reply(encode(deliver_results(request, entry, dispatch, allow_username=allow_username)))
+    except (OSError, HTTPException, ValueError, TypeError, KeyError):
         reply(encode(failure()))
 
 

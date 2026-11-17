@@ -102,7 +102,9 @@ class Workspace:
         self.paused = True
         preferences = self.legacy_access.read()
         self.review_usage = preferences.review_usage
-        self.review_actions = preferences.review_actions
+        self.review_actions = preferences.review_actions - {"read_results"}
+        if preferences.review_results:
+            self.review_actions |= {"read_results"}
         self.auto_approve_tokens = preferences.auto_approve_tokens
         self.auto_approve_token_changes = preferences.auto_approve_token_changes
         self.token_auto_approval_acknowledged = preferences.token_auto_approval_acknowledged
@@ -423,7 +425,8 @@ class Workspace:
         with self.mutex:
             actions = self.review_actions | {operation} if reviewed else self.review_actions - {operation}
             if self.review_actions != actions:
-                self.legacy_access.write(replace(self.legacy_access.read(), review_actions=actions))
+                self.legacy_access.write(replace(self.legacy_access.read(), review_actions=actions - {"read_results"},
+                                                review_results="read_results" in actions))
                 self.review_actions = actions
                 self.generation += 1
 

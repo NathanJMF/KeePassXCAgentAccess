@@ -46,6 +46,7 @@ REVIEW_ACTIONS = {
     "recycle_entry": "Entries - Delete (Move to Recycle Bin)",
     **CREDENTIAL_REVIEW_ACTIONS,
     "replace_password": "Passwords - Replace",
+    "read_results": "Results - Read",
 }
 
 
@@ -179,6 +180,7 @@ class ActionType(str, Enum):
     NETWORK_PROMPT = "network_command_prompt"
     BROWSER = "browser_form_post"
     TEMPLATE = "https_credential_template"
+    RESULTS = "https_result_workflow"
 
     @property
     def review_operation(self):
@@ -188,6 +190,8 @@ class ActionType(str, Enum):
             return "use_networked_command"
         if self == self.BROWSER:
             return "use_browser"
+        if self == self.RESULTS:
+            return "read_results"
         return "use_https"
 
     @property
@@ -199,6 +203,7 @@ class ActionType(str, Enum):
             self.NETWORK_PROMPT: "Networked command prompt",
             self.BROWSER: "Browser Sign-in",
             self.TEMPLATE: "HTTPS Credential Template",
+            self.RESULTS: "Read HTTPS Results",
         }[self]
 
 
@@ -308,6 +313,7 @@ class Action:
     query: tuple[tuple[str, str], ...] = ()
     environment: tuple[tuple[str, str], ...] = ()
     prompt_contains: str = ""
+    result_request: str = ""
 
     @property
     def is_command(self):
@@ -324,6 +330,8 @@ class Action:
 
     @property
     def destination(self):
+        if self.kind == ActionType.RESULTS:
+            return f"Protected HTTPS result read · {self.url}"
         if self.kind == ActionType.STDIN:
             return f"Local stdin · {join(self.command)}"
         if self.kind == ActionType.NETWORK_PROMPT:
@@ -337,6 +345,9 @@ class Action:
 
     @property
     def request_summary(self):
+        if self.kind == ActionType.RESULTS:
+            from .result_delivery import parse_result_usage
+            return parse_result_usage(decode(self.result_request.encode("utf-8"))).summary
         if self.browser:
             return self.browser.description
         if self.request_json:
@@ -349,7 +360,7 @@ class Action:
     @property
     def scope(self):
         return (self.kind, self.url, self.id, self.command, self.executable_sha256,
-                self.prompt_variable, self.accepts_input, self.method, self.request_json, self.browser, self.opaque, self.headers, self.query, self.environment, self.prompt_contains)
+                self.prompt_variable, self.accepts_input, self.method, self.request_json, self.browser, self.opaque, self.headers, self.query, self.environment, self.prompt_contains, self.result_request)
 
     def __post_init__(self):
         action_id(self.id)
@@ -363,6 +374,24 @@ class Action:
         except ValueError:
             raise ValueError("Choose a supported credential action.") from None
         object.__setattr__(self, "entry", uuid_text(self.entry))
+        if not isinstance(self.result_request, str):
+            raise ValueError("Use a declared protected result workflow.")
+        if kind == ActionType.RESULTS:
+            if (not self.result_request
+                    or self.opaque or self.command or self.executable_sha256 or self.prompt_variable
+                    or self.accepts_input or self.request_json or self.browser or self.headers
+                    or self.query or self.environment or self.prompt_contains or self.method != "GET"):
+                raise ValueError("A protected result read contains only its declared workflow.")
+            from .result_delivery import parse_result_usage
+            request = parse_result_usage(decode(self.result_request.encode("utf-8")))
+            if Destination.parse(self.url).url != request.origin:
+                raise ValueError("The result workflow must match its approved origin.")
+            object.__setattr__(self, "url", request.origin)
+            object.__setattr__(self, "result_request", request.canonical_json)
+            object.__setattr__(self, "kind", kind)
+            return
+        if self.result_request:
+            raise ValueError("Choose a protected result read for a result workflow.")
         if self.opaque and kind not in (ActionType.STDIN, ActionType.NETWORK_PROMPT):
             raise ValueError("Dispatch-only output applies to commands.")
         headers = credential_headers(self.headers)
@@ -459,6 +488,7 @@ class AccessSettings:
     auto_approve_tokens: bool = False
     auto_approve_token_changes: bool = False
     token_auto_approval_acknowledged: bool = False
+    review_results: bool = True
 
     def for_vault(self, identity):
         return dict(self.vaults).get(identity, VaultPolicy())
@@ -485,12 +515,13 @@ class AccessStore:
                 raise ValueError
             retention = data["retention_days"]
             review_usage = data.get("review_usage", False)
+            review_results = data.get("review_results", True)
             review_actions = data.get("review_actions", [])
             start_unlocked = data.get("start_unlocked", True)
             auto_approve_tokens = data.get("auto_approve_tokens", False)
             auto_approve_token_changes = data.get("auto_approve_token_changes", False)
             token_auto_approval_acknowledged = data.get("token_auto_approval_acknowledged", False)
-            if (type(retention) is not int or not 1 <= retention <= 365 or type(review_usage) is not bool
+            if (type(retention) is not int or not 1 <= retention <= 365 or type(review_usage) is not bool or type(review_results) is not bool
                     or type(start_unlocked) is not bool or type(auto_approve_tokens) is not bool
                     or type(auto_approve_token_changes) is not bool or type(token_auto_approval_acknowledged) is not bool
                     or not isinstance(review_actions, list)
@@ -505,7 +536,7 @@ class AccessStore:
             )
             return AccessSettings(AccessMode(data["mode"]), endpoint, uid, retention, vaults, review_usage,
                                   normalize_review_actions(review_actions), start_unlocked,
-                                  auto_approve_tokens, auto_approve_token_changes, token_auto_approval_acknowledged)
+                                  auto_approve_tokens, auto_approve_token_changes, token_auto_approval_acknowledged, review_results)
         except FileNotFoundError:
             return AccessSettings()
         except (OSError, AttributeError, ValueError, TypeError, KeyError):
@@ -515,12 +546,15 @@ class AccessStore:
         config = settings.broker_config()
         if config:
             config.validate()
-        review_actions = normalize_review_actions(settings.review_actions)
+        review_actions = normalize_review_actions(settings.review_actions) - {"read_results"}
+        if type(settings.review_results) is not bool:
+            raise ValueError("Choose whether result reads require review.")
         if not 1 <= settings.retention_days <= 365:
             raise ValueError("Choose a retention period between 1 and 365 days.")
         write_private_json(self.path, {
             "mode": settings.mode.value,
             "review_usage": settings.review_usage,
+            "review_results": settings.review_results,
             "review_actions": sorted(review_actions),
             "start_unlocked": settings.start_unlocked,
             "auto_approve_tokens": settings.auto_approve_tokens,

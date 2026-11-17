@@ -29,7 +29,7 @@ Expand a token to see which vaults, groups, and entries it covers. Open its deta
 
 ## Activity
 
-See which agent acted, which resource it used, and what happened. Expand related events for their history or double-click an event for details and its audit note. Approved credential use can authenticate HTTPS requests and browser forms, or deliver a secret to an isolated command through stdin or a credential prompt. Keeper records each use without returning credential values. Dynamic commands return a dispatch receipt while their output and exit status stay private. See [credential delivery](docs/guide.md#use-approved-credentials-without-preconfigured-actions).
+See which agent acted, which resource it used, and what happened. Expand related events for their history or double-click an event for details and its audit note. Approved credential use can authenticate HTTPS requests and browser forms, or deliver a secret to an isolated command through stdin or a credential prompt. Keeper records each use without returning credential values. Protected API workflows return selected inventory or other JSON fields while login tickets stay private, so agents can use the results to continue their tasks. Dynamic commands that receive a credential return a dispatch receipt while their output and exit status stay private. See [credential delivery](docs/guide.md#use-approved-credentials-without-preconfigured-actions).
 
 ![Keeper's Activity view showing grouped audit events, affected resources, and outcomes](docs/screenshots/activity-view.png)
 

@@ -3,6 +3,7 @@
 from collections import Counter, deque
 from contextlib import contextmanager
 from hashlib import sha256
+import json
 from types import SimpleNamespace
 from threading import BoundedSemaphore
 from time import monotonic, time
@@ -13,7 +14,7 @@ from .activity import ActivityError, Attribution, entry_label, entry_target_labe
 from .grants import OPTIONAL_METADATA_FIELDS, verifier
 from .protocol import RESPONSE_LIMIT, ListingError, decode, encode, validate_command, validate_upload
 from .settings import SettingsError
-from .usage import requires_body_permission, usage_action, usage_origin
+from .usage import requires_body_permission, requires_write_permission, usage_action, usage_origin
 
 
 REQUEST_WINDOW = 60
@@ -214,6 +215,9 @@ class ScopedBroker:
                 binding = SimpleNamespace(action=action)
             review_operation = binding.action.kind.review_operation if binding else operation
             review_usage = self.workspace.requires_review(review_operation)
+            if binding is not None and binding.action.kind == ActionType.RESULTS:
+                review_usage = (review_usage or self.workspace.requires_review("use_https")
+                                or "certificate_sha256" in decode(binding.action.result_request.encode("utf-8")))
             if usage is not None:
                 origin = None
                 if binding.action.kind != ActionType.STDIN:
@@ -221,7 +225,8 @@ class ScopedBroker:
                 candidates = tuple(s for s in token.scope
                                    if (s.vault, s.entry) == (chosen, entry) and usage["type"] in s.uses
                                    and (origin is None or origin in s.origins)
-                                   and (not requires_body_permission(binding.action) or "https_body" in s.uses))
+                                   and (not requires_body_permission(binding.action) or "https_body" in s.uses)
+                                   and (not requires_write_permission(binding.action) or "https" in s.uses))
                 permitted = registration is not None and any(
                     s.use_revision is not None and s.use_revision == registration.credential_revision(entry)
                     for s in candidates)
@@ -237,6 +242,10 @@ class ScopedBroker:
             scope_summary = f"Requested entry fields · {', '.join(fields)}" if fields else None
             if usage is not None:
                 scope_summary = f"Agent-supplied {usage.get('type', 'operation')} · SHA-256 {sha256(encode(usage)).hexdigest()}"
+                if binding.action.kind == ActionType.RESULTS:
+                    workflow = decode(binding.action.result_request.encode("utf-8"))
+                    scope_summary += (" · " + workflow["request"].get("method", "GET")
+                                      + " · Fields: " + ", ".join(workflow["result"]["columns"]))
             elif permitted and binding.action.request_summary:
                 scope_summary = binding.action.request_summary
             if input_info is not None:
@@ -322,9 +331,20 @@ class ScopedBroker:
                 else:
                     scope = (" › ".join(part for part in (registration.name, folder, title) if part),)
                     if usage is not None:
-                        scope += ("Requested operation · " + encode(usage).decode("ascii").strip(),)
+                        if binding.action.kind == ActionType.RESULTS:
+                            from .result_delivery import parse_result_usage
+                            declared = parse_result_usage(usage)
+                            scope += declared.description
+                            scope += ("Complete requested workflow:\n" + json.dumps(declared.data, ensure_ascii=False, indent=2),)
+                        else:
+                            scope += ("Requested operation · " + encode(usage).decode("ascii").strip(),)
                         if input_info is not None:
                             scope += (artifact_summary,)
+                        if binding.action.kind == ActionType.RESULTS:
+                            if "certificate_sha256" in decode(binding.action.result_request.encode("utf-8")):
+                                scope += ("Verify this certificate fingerprint. A supplied certificate pin always requires owner review.",)
+                            scope += ("Release only the selected fields from this approved endpoint. Login responses, passwords and session tickets stay private.",
+                                      "Trust this endpoint to supply these fields. Filters cannot guarantee secrecy if a service deliberately encodes credentials in its results.")
                         if binding.action.opaque:
                             scope += ("Command output and exit status stay private. The agent receives only a dispatch receipt.",)
                         if binding.action.kind == ActionType.NETWORK_PROMPT:
@@ -351,12 +371,16 @@ class ScopedBroker:
                 def gate(send):
                     def audit_and_send():
                         nonlocal dispatch_started
-                        self.activity.dispatched(event)
-                        dispatch_started = True
+                        if not dispatch_started:
+                            self.activity.dispatched(event)
+                            dispatch_started = True
                         send()
                     return guard(lambda: dispatch(audit_and_send))
 
-                if binding.action.is_command or binding.action.browser:
+                if binding.action.kind == ActionType.RESULTS:
+                    username_allowed = any((s.vault, s.entry) == (chosen, entry) and s.username for s in token.scope)
+                    result = session.worker.use(binding.action, gate, allow_username=username_allowed)
+                elif binding.action.is_command or binding.action.browser:
                     with self._command_slot():
                         if input_info is None:
                             result = session.worker.use(binding.action, gate)
@@ -373,6 +397,9 @@ class ScopedBroker:
             if len(frame) > RESPONSE_LIMIT:
                 raise ListingError("too_large")
             delivered = deliver(frame, guard)
+            if (operation == "use_password" and binding.action.kind == ActionType.RESULTS and not delivered):
+                self.activity.finish(event, "Results Not Delivered", result.get("http_status"))
+                return None
             if operation == "use_password":
                 # Already-dispatched remote work can still complete after revocation.
                 outcome = {"succeeded": "Succeeded", "failed": "Failed", "dispatched": "Dispatched",
@@ -407,6 +434,8 @@ class ScopedBroker:
 
     @staticmethod
     def _usage_destination(action):
+        if action.kind == ActionType.RESULTS:
+            return f"Protected HTTPS results · {usage_origin(action.url)}"
         if action.kind == ActionType.STDIN:
             return "Isolated local command"
         if action.kind == ActionType.NETWORK_PROMPT:

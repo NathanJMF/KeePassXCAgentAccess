@@ -2,6 +2,7 @@
 
 import argparse
 import ipaddress
+import math
 import re
 from hashlib import sha256
 import os
@@ -19,7 +20,7 @@ from .protocol import (
 
 
 ENTRY_FIELDS = ("username", "url")
-USE_TYPES = frozenset(("local_command", "networked_command", "https", "browser"))
+USE_TYPES = frozenset(("local_command", "networked_command", "https", "https_results", "browser"))
 CREDENTIAL_USE_TYPES = USE_TYPES | {"https_body"}
 EDIT_STATUSES = ("pending", "applying", "applied", "denied", "stale", "interrupted", "failed")
 EDIT_OPERATIONS = {
@@ -101,11 +102,112 @@ def https_target(value, *, origin=False):
     return f"https://{authority}:{port}{path}"
 
 
+def result_pointer(value):
+    if not isinstance(value, str) or len(value) > 256 or value and not value.startswith("/"):
+        raise ValueError
+    if value and (len(value.split("/")) > 17 or re.search(r"~(?![01])", value) or not value.isprintable()):
+        raise ValueError
+    return value
+
+
+RESULT_PRIVATE_COLUMNS = frozenset(("password", "passwd", "secret", "token", "ticket", "csrfpreventiontoken",
+                                    "authorization", "cookie", "setcookie", "session", "apikey", "privatekey",
+                                    "accesstoken", "refreshtoken", "csrftoken", "credential", "credentials"))
+
+
+def result_columns(value):
+    if (not isinstance(value, list) or not 0 < len(value) <= 16
+            or any(not isinstance(column, str) or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_.-]{0,79}", column)
+                   or re.sub(r"[_-]", "", column).lower() in RESULT_PRIVATE_COLUMNS
+                   for column in value) or len(set(value)) != len(value)):
+        raise ValueError
+    return value
+
+
+def _result_path(value):
+    if (not isinstance(value, str) or not re.fullmatch(r"[!-~]{1,2048}", value)
+            or not value.startswith("/") or value.startswith("//")
+            or any(part in value for part in ("?", "#", "\\", "{{"))):
+        raise ValueError
+
+
+def _result_map(value, limit):
+    if (not isinstance(value, dict) or len(value) > limit
+            or any(not isinstance(key, str) or not key or not key.isprintable() or not isinstance(item, str)
+                   or not item.isprintable() or len(key) > 256 or len(item) > 2048 for key, item in value.items())):
+        raise ValueError
+
+
+def result_usage_request(data):
+    required = {"type", "origin", "request", "result"}
+    if not required <= data.keys() <= required | {"certificate_sha256", "login"}:
+        raise ValueError
+    https_target(data["origin"], origin=True)
+    if "certificate_sha256" in data and (not isinstance(data["certificate_sha256"], str)
+                                           or not re.fullmatch(r"[0-9a-f]{64}", data["certificate_sha256"])):
+        raise ValueError
+    captures = set()
+    login = data.get("login")
+    if "login" in data:
+        if (not isinstance(login, dict) or not {"path", "capture"} <= login.keys() <= {"path", "capture", "method", "form", "json"}
+                or login.get("method", "POST") != "POST" or ("form" in login) == ("json" in login)):
+            raise ValueError
+        _result_path(login["path"])
+        capture = login["capture"]
+        if (not isinstance(capture, dict) or not 0 < len(capture) <= 4
+                or any(not isinstance(key, str) or not re.fullmatch(r"[A-Za-z][A-Za-z0-9_]{0,31}", key)
+                       for key in capture)):
+            raise ValueError
+        for pointer in capture.values():
+            result_pointer(pointer)
+        captures = set(capture)
+        if "form" in login:
+            _result_map(login["form"], 16)
+        elif not isinstance(login["json"], (dict, str)):
+            raise ValueError
+    request = data["request"]
+    if (not isinstance(request, dict) or not {"path", "auth"} <= request.keys() <=
+            {"path", "auth", "method", "headers", "query", "json", "form"}
+            or request["auth"] not in ("basic", "bearer", "template", "session")
+            or request.get("method", "GET") not in ("GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS")
+            or "form" in request and "json" in request):
+        raise ValueError
+    _result_path(request["path"])
+    if request["auth"] == "session" and not captures:
+        raise ValueError
+    if "headers" in request:
+        _result_map(request["headers"], 16)
+        if request["headers"] and request["auth"] not in ("session", "template"):
+            raise ValueError
+    if "query" in request:
+        _result_map(request["query"], 32)
+    for key in ("form", "json"):
+        if key in request:
+            if request.get("method", "GET") not in ("POST", "PUT", "PATCH", "DELETE"):
+                raise ValueError
+            if key == "form":
+                _result_map(request[key], 16)
+            elif not isinstance(request[key], (dict, str)):
+                raise ValueError
+            if "{{" in encode(request[key]).decode("ascii"):
+                raise ValueError
+    result = data["result"]
+    if not isinstance(result, dict) or not {"columns"} <= result.keys() <= {"path", "columns"}:
+        raise ValueError
+    result_pointer(result.get("path", ""))
+    result_columns(result["columns"])
+    if len(encode(data)) >= REQUEST_LIMIT:
+        raise ValueError
+    return data
+
+
 def usage_request(data):
     """Check descriptor shape; the owner broker independently compiles and authorizes it."""
     if not isinstance(data, dict) or data.get("type") not in USE_TYPES:
         raise ValueError
     kind = data["type"]
+    if kind == "https_results":
+        return result_usage_request(data)
     if kind in ("local_command", "networked_command"):
         keys = {"type", "command"}
         if kind == "networked_command":
@@ -180,7 +282,7 @@ def _validate_access_details(reply):
                 raise ValueError
             uses, origins = value.get("uses", []), value.get("origins", [])
             if (not isinstance(uses, list) or any(not isinstance(use, str) or use not in CREDENTIAL_USE_TYPES for use in uses)
-                    or len(set(uses)) != len(uses) or "https_body" in uses and "https" not in uses
+                    or len(set(uses)) != len(uses) or "https_body" in uses and not {"https", "https_results"} & set(uses)
                     or not isinstance(origins, list) or len(origins) > 8
                     or any(https_target(origin, origin=True) != origin for origin in origins)
                     or len(set(origins)) != len(origins)
@@ -286,6 +388,28 @@ def _validate(reply, payload):
                 raise ListingError("invalid_response")
         return reply
     if operation == "use_password":
+        if payload.get("usage", {}).get("type") == "https_results":
+            if reply.get("outcome") == "succeeded":
+                if set(reply) != {"outcome", "http_status", "data"} or type(reply["http_status"]) is not int or not 200 <= reply["http_status"] < 300:
+                    raise ListingError("invalid_response")
+                rows = reply["data"]
+                columns = result_columns(payload["usage"]["result"]["columns"])
+                if not isinstance(rows, list) or len(rows) > 256:
+                    raise ListingError("invalid_response")
+                for row in rows:
+                    if not isinstance(row, dict) or set(row) != set(columns):
+                        raise ListingError("invalid_response")
+                    for value in row.values():
+                        if (value is not None and type(value) not in (str, bool, int, float)
+                                or isinstance(value, str) and len(value) > 512
+                                or type(value) is float and not math.isfinite(value)):
+                            raise ListingError("invalid_response")
+                return reply
+            if (reply not in ({"outcome": "failed"}, {"outcome": "uncertain"})
+                    and not (set(reply) == {"outcome", "http_status"} and reply["outcome"] == "failed"
+                             and type(reply["http_status"]) is int and 100 <= reply["http_status"] <= 599)):
+                raise ListingError("invalid_response")
+            return reply
         if payload.get("usage", {}).get("type") in ("local_command", "networked_command"):
             if reply != {"outcome": "dispatched"}:
                 raise ListingError("invalid_response")

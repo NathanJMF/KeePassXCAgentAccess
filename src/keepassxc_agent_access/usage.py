@@ -2,11 +2,11 @@
 
 import json
 
-from .access_settings import Action, ActionType, BrowserForm, Destination, template_body_references
+from .access_settings import Action, ActionType, BrowserForm, Destination, HTTPS_WRITE_METHODS, template_body_references
 from .command_action import executable_digest
 
 
-USE_TYPES = frozenset(("local_command", "networked_command", "https", "browser"))
+USE_TYPES = frozenset(("local_command", "networked_command", "https", "https_results", "browser"))
 
 
 def usage_origin(url):
@@ -39,6 +39,11 @@ def usage_action(entry, data, *, accepts_input=False, pin_executable=True):
                       environment=data.get("environment", ()), prompt_contains=data.get("prompt_contains", ""))
     if accepts_input:
         raise ValueError("Only networked commands accept an input artifact.")
+    if kind == "https_results":
+        from .result_delivery import parse_result_usage
+        request = parse_result_usage(data)
+        return Action("agent-request", "Read HTTPS Results", entry, request.origin, kind=ActionType.RESULTS,
+                      result_request=request.canonical_json)
     if kind == "https":
         if not {"type", "url", "auth"} <= data.keys() <= {"type", "url", "auth", "method", "json", "headers", "query"}:
             raise ValueError("Use an HTTPS URL, authentication type, method and optional JSON.")
@@ -59,6 +64,18 @@ def usage_action(entry, data, *, accepts_input=False, pin_executable=True):
 
 def requires_body_permission(action):
     """Classify rendered body disclosure separately from authentication headers."""
+    if action.kind == ActionType.RESULTS:
+        from .result_delivery import parse_result_usage
+        return "login" in parse_result_usage(json.loads(action.result_request)).data
     if action.kind != ActionType.TEMPLATE or not action.request_json:
         return False
     return bool(template_body_references(action.request_json))
+
+
+def requires_write_permission(action):
+    """Reading selected data does not authorize a resource mutation."""
+    if action.kind != ActionType.RESULTS:
+        return False
+    from .result_delivery import parse_result_usage
+    request = parse_result_usage(json.loads(action.result_request))
+    return request.data["request"]["method"] in HTTPS_WRITE_METHODS

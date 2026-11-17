@@ -1084,13 +1084,15 @@ class WorkspaceApplication(Gtk.Application):
         actions = self._settings_card(approvals)
         actions.set_spacing(7)
         actions.pack_start(styled(_label("Auto Approve These Requests"), "keeper-settings-caption"), False, False, 0)
-        actions.pack_start(styled(_label("These switches apply to actions within approved permissions."),
+        actions.pack_start(styled(_label("These switches apply to actions within approved permissions. Results - Read automatic approval starts off: enabling it trusts approved servers and the fields requested by agents."),
                                  "keeper-settings-description"), False, False, 0)
         for operation, caption in REVIEW_ACTIONS.items():
             actions.pack_start(Gtk.Separator(), False, False, 0)
             self._settings_switch(actions, caption, operation not in self.workspace.review_actions,
                                   lambda control, operation=operation: self._set_action_auto_approval(control, operation),
-                                  operation)
+                                  operation,
+                                  "Trust the approved endpoint and requested fields when releasing results. Explicit certificate pins still need review."
+                                  if operation == "read_results" else None)
         self._token_auto_approval_settings(approvals)
         vaults = page("vaults", "Vaults", "drive-harddisk-symbolic")
         self._settings_switch(self._settings_card(vaults), "Start Unlocked", self.start_unlocked, self._set_start_unlocked,

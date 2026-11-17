@@ -23,9 +23,10 @@ CREDENTIAL_USES = {
     "networked_command": "Use Password in Networked Commands",
     "https": "Use Password in HTTPS Requests",
     "https_body": "API Request Bodies (Credential Disclosure)",
+    "https_results": "Read Selected HTTPS Results",
     "browser": "Use Password in Browser Sign-ins",
 }
-NETWORK_CREDENTIAL_USES = frozenset(("networked_command", "https", "https_body", "browser"))
+NETWORK_CREDENTIAL_USES = frozenset(("networked_command", "https", "https_body", "https_results", "browser"))
 MAX_ORIGINS = 8
 ENTRY_EDITS = {
     "update_entry": "Update Entry Details",
@@ -55,7 +56,7 @@ def _edit_permissions(values, allowed):
 def credential_permissions(uses, origins, *, group=None):
     """Freeze transport permissions and the destinations explicitly reviewed by the owner."""
     uses = _edit_permissions(uses, CREDENTIAL_USES)
-    if "https_body" in uses and "https" not in uses:
+    if "https_body" in uses and not {"https", "https_results"} & set(uses):
         raise ValueError("Credential request bodies also require HTTPS use permission.")
     if not isinstance(origins, (tuple, list)) or len(origins) > MAX_ORIGINS:
         raise ValueError("Choose at most eight approved destinations.")
