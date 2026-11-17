@@ -87,7 +87,7 @@ def configure(app, root, database, key_file):
     before = database.read_bytes()
 
     fill_setup(app, database, key_file, "Incorrect synthetic input")
-    assert "rejected" in app.notice.get_text()
+    assert "rejected" in app.notice.get_text(), (app.notice.get_text(), app.desktop.locked, app.desktop.states)
     assert app.setup.store.read().target is None
     fill_setup(app, database, key_file, ROTATED)
     assert app.status.get_text() == "Locked"
@@ -170,7 +170,7 @@ def recover(app, root, _database, _key_file):
     app.buttons["unlock"].clicked()
     wait_for(lambda: not app.busy, "invalid saved unlock did not finish")
     assert app.status.get_text() == "Locked"
-    assert "rejected" in app.notice.get_text()
+    assert "rejected" in app.notice.get_text(), (app.notice.get_text(), app.desktop.locked, app.desktop.states)
     assert "recover" in app.notice.get_text()
     assert not (root / "legacy-input.txt").exists()
     enter_password(app, RECOVERY)

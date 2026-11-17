@@ -59,6 +59,11 @@ if ! watcher_active; then
     exit 1
 fi
 
+# Start the private compositor's lock service so tests establish a verified
+# unlocked session before Keeper's conservative startup checks.
+gdbus call --session --dest org.gnome.ScreenSaver --object-path /org/gnome/ScreenSaver \
+    --method org.gnome.ScreenSaver.GetActive >/dev/null
+
 if [[ ${TRAY_WORKSPACE_ONLY:-0} == 1 ]]; then
     workspace_root=$(mktemp -d /tmp/keepass-workspace.XXXXXX)
     trap 'rm -rf -- "$workspace_root"; kill "$compositor" 2>/dev/null || true; wait "$compositor" 2>/dev/null || true' EXIT
