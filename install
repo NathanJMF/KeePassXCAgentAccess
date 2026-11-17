@@ -11,7 +11,7 @@ packages=(python3 python3-gi python3-gi-cairo python3-pykeepass gir1.2-gtk-3.0
           gir1.2-secret-1 gir1.2-ayatanaappindicator3-0.1 gnome-keyring bubblewrap libseccomp2 ca-certificates)
 for option in "$@"; do
     case "$option" in
-        --agent) packages+=(acl uidmap util-linux gir1.2-webkit2-4.1 xvfb) ;;
+        --agent) packages+=(acl uidmap util-linux gir1.2-webkit2-4.1 xvfb python3-pycryptodome) ;;
         --help|-h) printf '%s\n' 'Usage: ./install [--agent] [--no-launch]' 'Add --agent to set up the isolated agent runner and its user service.'; exit ;;
         --no-launch) ;;
         *) printf 'Unknown option: %s\n' "$option" >&2; exit 2 ;;

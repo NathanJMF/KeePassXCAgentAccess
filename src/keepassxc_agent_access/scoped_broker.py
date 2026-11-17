@@ -11,8 +11,9 @@ from time import monotonic, time
 from .approvals import Approval, ApprovalQueue
 from .access_settings import ActionType, Destination, action_id, uuid_text
 from .activity import ActivityError, Attribution, entry_label, entry_target_labels
+from .console_access import ConsoleAccess
 from .grants import OPTIONAL_METADATA_FIELDS, verifier
-from .protocol import RESPONSE_LIMIT, ListingError, decode, encode, validate_command, validate_upload
+from .protocol import CONSOLE_OPERATIONS, RESPONSE_LIMIT, ListingError, decode, encode, validate_command, validate_upload
 from .result_delivery import result_fields
 from .settings import SettingsError
 from .usage import requires_body_permission, requires_write_permission, usage_action, usage_origin
@@ -62,6 +63,7 @@ class ScopedBroker:
         self.next_limit_notice = 0
         self.command_slots = BoundedSemaphore(2)
         self.certificate_reviews = set()
+        self.console_access = ConsoleAccess(self)
 
     @contextmanager
     def _command_slot(self):
@@ -106,6 +108,10 @@ class ScopedBroker:
             operation = payload["operation"]
             keys = set(payload) - {"version", "operation", "credential", "context"}
             context = Attribution.parse(payload.get("context", {}))
+            if isinstance(operation, str) and operation in CONSOLE_OPERATIONS:
+                if upload is not None:
+                    raise ValueError
+                return self.console_access.handle(operation, keys, payload, uid, context, live, dispatch, deliver)
             entry, binding_id, vault = None, None, None
             fields = ()
             command = None

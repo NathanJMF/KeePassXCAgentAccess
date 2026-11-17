@@ -8,6 +8,7 @@ from time import monotonic
 REQUEST_LIMIT = 4 * 1024
 UPLOAD_LIMIT = 8 * 1024**2
 RESPONSE_LIMIT = 1024 * 1024
+CONSOLE_OPERATIONS = frozenset({"console_open", "console_view", "console_input", "console_close"})
 REQUEST_TIMEOUT = 5
 WORKER_TIMEOUT = 3
 APPROVAL_TIMEOUT = 60
@@ -25,6 +26,8 @@ ERRORS = {
     "busy": "The broker is busy.",
     "ineligible": "The requested operation is unavailable for this token.",
     "write_approval_required": "This token allows reads here. Set approve_write_once to true on the protected HTTPS write to request approval for just that operation.",
+    "console_closed": "This console is closed or unavailable to this token. Request a new console if you still need it.",
+    "console_failed": "Keeper could not complete the console operation. Check the approved endpoint and certificate or reopen the console.",
     "credential_changed": "That entry's credential changed after approval. Request a permission change for owner review.",
     "token_change_pending": "This token already has a permission change awaiting review.",
     "identity_in_use": "That identity is already in use. Choose a different identity and retry the request.",

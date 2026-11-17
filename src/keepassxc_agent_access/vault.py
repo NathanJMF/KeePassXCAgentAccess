@@ -252,7 +252,14 @@ class VaultSession:
     def _result_exchange(self, request, gate, steps):
         # Each request that can carry authentication has its own owner guard.
         # The login response and captures remain inside the worker throughout.
-        with self._exchange(request, 30) as read:
+        return self._gated_exchange(request, gate, steps, 30)
+
+    def console(self, request, gate):
+        steps = 4 if request["operation"] == "console_open" else 1
+        return self._gated_exchange(encode(request), gate, steps, 42 if steps == 4 else 10)
+
+    def _gated_exchange(self, request, gate, steps, timeout):
+        with self._exchange(request, timeout) as read:
             response = decode(read())
             sent = 0
             while response == {"ready": True}:

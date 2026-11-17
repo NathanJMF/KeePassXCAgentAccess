@@ -132,6 +132,8 @@ Keeper's offline browser validates a single-step URL-encoded HTML form with scri
 
 The browser worker requires Bubblewrap, the systemd user manager, WebKitGTK 4.1 and Xvfb. `./install --agent` installs these dependencies on Ubuntu.
 
+For an interactive VM installer, **Review Guest Console** can authorize a session to an exact RFB console over a TLS WebSocket. Keeper performs login and ticket exchange in the vault worker. The agent can request a PNG and send keyboard or mouse input through `keeper-agent console`. The session is bound to the token that opened it and lasts up to 15 minutes. Pausing access, locking the vault or changing the token closes that session. Console pixels and keystrokes stay out of Activity. The installed skill includes a Proxmox QEMU descriptor. RFB console delivery does not create a general signed-in browser session.
+
 ## Use a credential with a local command
 
 The agent calls `keeper-agent --profile PROFILE run --vault VAULT_UUID --entry ENTRY_UUID --json -- /usr/bin/example --read-stdin`. No saved command or action ID is needed. Keeper checks the installed system executable and pins its digest for that use, creates a disposable sandbox, and delivers the password as UTF-8 bytes on private stdin followed by EOF. Local jobs have no network or writable host files; `/usr` is mounted read-only.

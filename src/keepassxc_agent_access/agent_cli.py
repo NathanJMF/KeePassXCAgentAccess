@@ -1,6 +1,7 @@
 """Agent-side command. This module needs only the Python standard library."""
 
 import argparse
+from base64 import b64decode
 import ipaddress
 import math
 import re
@@ -14,7 +15,7 @@ from urllib.parse import urlsplit
 
 from .runner_token import UninitializedProfile, credential
 from .protocol import (
-    CLIENT_TIMEOUT, ERRORS, LIST_REQUEST, ListingError, REQUEST_LIMIT, REQUEST_TIMEOUT, RESPONSE_LIMIT, UPLOAD_LIMIT,
+    CLIENT_TIMEOUT, CONSOLE_OPERATIONS, ERRORS, LIST_REQUEST, ListingError, REQUEST_LIMIT, REQUEST_TIMEOUT, RESPONSE_LIMIT, UPLOAD_LIMIT,
     decode, encode, receive, remaining, validate_command,
 )
 
@@ -342,6 +343,24 @@ def _validate(reply, payload):
         elif set(reply) != {"status"}:
             raise ListingError("invalid_response")
         return reply
+    if operation in CONSOLE_OPERATIONS:
+        if operation == "console_open":
+            if (set(reply) != {"console", "expires_in"} or edit_uuid(reply["console"]) != reply["console"]
+                    or type(reply["expires_in"]) is not int or not 1 <= reply["expires_in"] <= 900):
+                raise ListingError("invalid_response")
+        elif operation == "console_view":
+            if (set(reply) != {"png_base64", "width", "height", "scale"}
+                    or type(reply["width"]) is not int or not 1 <= reply["width"] <= 2048
+                    or type(reply["height"]) is not int or not 1 <= reply["height"] <= 1536
+                    or type(reply["scale"]) is not int or reply["scale"] not in (1, 2, 4, 8)
+                    or not isinstance(reply["png_base64"], str)):
+                raise ListingError("invalid_response")
+            png = b64decode(reply["png_base64"], validate=True)
+            if not png.startswith(b"\x89PNG\r\n\x1a\n") or len(png) > 700_000:
+                raise ListingError("invalid_response")
+        elif reply != {"outcome": "succeeded"}:
+            raise ListingError("invalid_response")
+        return reply
     if operation in ("request_edit", "edit_status"):
         edit = payload["request"] if operation == "request_edit" else None
         expected_id = edit["id"] if edit is not None else payload["id"]
@@ -533,6 +552,23 @@ def main(argv=None):
     use.add_argument("--action", help="Legacy owner-configured action ID; omit to read a usage descriptor")
     use.add_argument("--json", action="store_true", required=True, help="Emit JSON")
     use.set_defaults(operation="use_password")
+    console = topics.add_parser("console", help="Open or use an owner-approved guest console")
+    commands = console.add_subparsers(required=True)
+    opening = commands.add_parser("open", help="Read the console connection descriptor from stdin")
+    opening.add_argument("--vault", required=True, type=_request_id)
+    opening.add_argument("--entry", required=True, type=_request_id)
+    opening.add_argument("--json", action="store_true", required=True)
+    opening.set_defaults(operation="console_open")
+    for verb in ("view", "input", "close"):
+        command = commands.add_parser(verb)
+        command.add_argument("--console", required=True, type=_request_id)
+        if verb == "view":
+            output = command.add_mutually_exclusive_group(required=True)
+            output.add_argument("--png", action="store_true")
+            output.add_argument("--json", action="store_true")
+        else:
+            command.add_argument("--json", action="store_true", required=True)
+        command.set_defaults(operation="console_" + verb)
     run = topics.add_parser("run", help="Use a Keeper credential with an approved isolated command")
     run.add_argument("--vault", help="Scoped vault ID")
     run.add_argument("--entry", required=True, help="Entry UUID")
@@ -585,6 +621,10 @@ def main(argv=None):
         payload["include_reviewed"] = True
     if options.operation == "edit_status":
         payload["id"] = options.request
+    if options.operation == "console_open":
+        payload["entry"] = options.entry
+    elif options.operation in CONSOLE_OPERATIONS:
+        payload["console"] = options.console
     if getattr(options, "vault", None):
         payload["vault"] = options.vault
     if getattr(options, "field", None):
@@ -618,6 +658,14 @@ def main(argv=None):
             except (ValueError, TypeError, RecursionError):
                 raise ListingError("invalid_request") from None
         token_file = os.environ.get("KEEPASSXC_AGENT_TOKEN_FILE")
+        if options.operation in ("console_open", "console_input"):
+            try:
+                raw = sys.stdin.buffer.read(REQUEST_LIMIT)
+                if not raw or len(raw) >= REQUEST_LIMIT:
+                    raise ValueError
+                payload["request" if options.operation == "console_open" else "events"] = decode(raw)
+            except (ValueError, RecursionError):
+                raise ListingError("invalid_request") from None
         if options.operation in ("request_access", "request_edit"):
             try:
                 raw = sys.stdin.buffer.read(REQUEST_LIMIT)
@@ -645,7 +693,7 @@ def main(argv=None):
         if len(encode(payload)) > REQUEST_LIMIT:
             raise ListingError("too_large")
         result = request(os.environ.get("KEEPASSXC_AGENT_SOCKET"), payload, input_data=input_data)
-        sys.stdout.buffer.write(encode(result))
+        sys.stdout.buffer.write(b64decode(result["png_base64"]) if getattr(options, "png", False) else encode(result))
     except UninitializedProfile as error:
         if options.operation == "access_status":
             result = {"status": "uninitialized"}

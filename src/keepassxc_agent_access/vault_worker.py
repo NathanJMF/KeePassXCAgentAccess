@@ -9,10 +9,12 @@ from select import select
 import subprocess
 import sys
 from threading import Thread
+from time import monotonic
 
 from .access_settings import ActionType, BrowserForm, Destination
 from .browser_action import prepare_browser
 from .command_action import deliver_credential, deliver_prompt, prepare_command
+from .console_request import open_console
 from .entry_projection import active_entry, entry_listing, owner_snapshot
 from .https_action import authenticate, failure, prepare_https
 from .protocol import RESPONSE_LIMIT, decode, encode
@@ -46,6 +48,7 @@ def load_vault():
             print("ambiguous", flush=True)
             return
     print("ready", vault.root_group.uuid, fingerprint, flush=True)
+    consoles = {}
     while line := sys.stdin.buffer.readline(EDIT_LIMIT):
         if line == b"list_entries\n":
             reply(entry_listing(vault))
@@ -80,6 +83,8 @@ def load_vault():
             reply(encode({"entry": metadata}))
         elif data["operation"] == "owner_entry_notes":
             reply(entry_notes_frame(entry))
+        elif data["operation"] in ("console_open", "console_view", "console_input", "console_close"):
+            reply(encode(use_console(consoles, data, entry)))
         elif data["operation"] == "use_password":
             if data["kind"] == ActionType.RESULTS:
                 use_results(entry, data["result_request"], data["url"], allow_username=data.get("allow_username") is True)
@@ -158,6 +163,43 @@ def use_browser(entry, url, profile):
             reply(encode(result))
     except (OSError, HTTPException, ValueError, subprocess.SubprocessError):
         reply(encode(failure()))
+
+
+def use_console(consoles, data, entry):
+    for handle, console in tuple(consoles.items()):
+        if monotonic() >= console.expires:
+            consoles.pop(handle).close()
+    identifier, operation = data["console"], data["operation"]
+
+    def dispatch():
+        reply(encode({"ready": True}))
+        return sys.stdin.buffer.readline(16) == b"dispatch\n"
+
+    try:
+        if operation == "console_open":
+            if entry is None or identifier in consoles or len(consoles) >= 4:
+                return {"error": "console_failed"}
+            consoles[identifier] = open_console(data["request"], entry, dispatch)
+            return {"outcome": "succeeded"}
+        console = consoles.get(identifier)
+        if console is None:
+            return {"error": "console_closed"}
+        if not dispatch():
+            raise PermissionError
+        if operation == "console_close":
+            consoles.pop(identifier).close()
+        elif entry is None:
+            raise ValueError
+        elif operation == "console_view":
+            return console.view()
+        else:
+            console.input(data["events"])
+        return {"outcome": "succeeded"}
+    except (OSError, EOFError, HTTPException, ValueError, TypeError, KeyError, ImportError):
+        console = consoles.pop(identifier, None)
+        if console is not None:
+            console.close()
+        return {"error": "console_failed"}
 
 
 def use_command(entry, command, digest, **profile):
