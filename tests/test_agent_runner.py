@@ -90,6 +90,21 @@ class RunnerTests(TestCase):
         self.assertTrue(replies[0]["result"]["isError"])
         self.assertIn("unavailable or unsafe", replies[0]["result"]["content"][0]["text"])
 
+    def test_access_status_details_are_typed_and_do_not_create_a_token(self):
+        args, data = invocation("access_status", {"details": True})
+        self.assertEqual(args[1:], ["access", "status", "--json", "--details"])
+        self.assertEqual(data, b"")
+        with self.assertRaises(ValueError):
+            invocation("access_status", {"details": "true"})
+        result, replies = self.run_server(call_tool("access_status", {"details": True}))
+        self.assertEqual(result.returncode, 0)
+        detail = payload(replies[0])
+        self.assertEqual(detail["status"], "uninitialized")
+        self.assertEqual(detail["scope"], [])
+        self.assertEqual(detail["requested_items"], [])
+        self.assertIsNone(detail["identity"])
+        self.assertEqual(list(self.profile.iterdir()), [])
+
     def test_runner_rejects_non_keeper_operations_and_credential_access(self):
         requests = [
             call_tool("run_shell", {"command": "cat token"}, identifier=1),

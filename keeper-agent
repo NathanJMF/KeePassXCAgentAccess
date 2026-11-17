@@ -1,0 +1,5 @@
+#!/bin/sh
+set -eu
+file=$(/usr/bin/readlink -f -- "$0")
+root=$(/usr/bin/dirname -- "$file")
+exec /usr/bin/python3 -I "$root/src/keeper_bootstrap.py" keepassxc_agent_access.agent_entrypoint "$@"

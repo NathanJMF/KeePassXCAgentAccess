@@ -1,3 +1,4 @@
+from copy import deepcopy
 import os
 from pathlib import Path
 import socket
@@ -6,7 +7,8 @@ from tempfile import TemporaryDirectory
 from threading import Thread
 from unittest import TestCase
 
-from keepassxc_agent_access.protocol import LIST_REQUEST, decode, encode
+from keepassxc_agent_access.agent_cli import _validate
+from keepassxc_agent_access.protocol import ERRORS, LIST_REQUEST, ListingError, decode, encode
 from keepassxc_agent_access.runner_token import credential
 
 
@@ -14,6 +16,56 @@ CLI = Path(__file__).resolve().parents[1] / "keepassxc-agent"
 
 
 class AgentCliTests(TestCase):
+    def test_registration_requires_complete_identity_and_rejects_identity_changes(self):
+        base = {key: value for key, value in os.environ.items() if not key.startswith("KEEPASSXC_AGENT_")}
+        request = {"items": [{"label": "Synthetic Entry", "metadata": True}]}
+        cases = [
+            ({"KEEPASSXC_AGENT_IDENTITY": "Task Agent"}, request),
+            ({"KEEPASSXC_AGENT_PROJECT": "Task Project"}, request),
+            ({"KEEPASSXC_AGENT_IDENTITY": "Task Agent", "KEEPASSXC_AGENT_PROJECT": "Task Project"},
+             {**request, "identity": "Other Agent"}),
+            ({"KEEPASSXC_AGENT_IDENTITY": "Task Agent", "KEEPASSXC_AGENT_PROJECT": "Task Project"},
+             {**request, "project": "Other Project"}),
+        ]
+        for registered, submitted in cases:
+            with self.subTest(registered=registered, submitted=submitted):
+                process = subprocess.run([CLI, "access", "request", "--json"], input=encode(submitted),
+                                         env={**base, **registered}, capture_output=True, check=False, timeout=7)
+                self.assertEqual(process.returncode, 1)
+                self.assertEqual(process.stdout, b"")
+                self.assertEqual(process.stderr.decode().strip(), ERRORS["invalid_request"])
+                self.assertNotIn(b"Traceback", process.stderr)
+
+    def test_access_details_reject_extra_fields_and_malformed_permissions(self):
+        item = {"vault": "00000000-0000-0000-0000-000000000001", "entry": "00000000-0000-0000-0000-000000000002",
+                "group": None, "metadata": True, "username": False, "url": False, "action": None, "edits": []}
+        reply = {"status": "active", "identity": "Deployment Assistant", "project": "Deploy", "model": None,
+                 "chat": None, "chat_id": None, "scope": [item], "requested_items": [{**item, "label": None}],
+                 "pending_change": None}
+        request = {"operation": "access_status", "details": True}
+        self.assertEqual(_validate(reply, request), reply)
+        malformed = []
+        value = deepcopy(reply)
+        value["verifier"] = "secret sentinel"
+        malformed.append(value)
+        value = deepcopy(reply)
+        value["scope"][0]["revision"] = "secret sentinel"
+        malformed.append(value)
+        value = deepcopy(reply)
+        value["scope"][0]["username"] = "secret sentinel"
+        malformed.append(value)
+        value = deepcopy(reply)
+        value["scope"][0]["edits"] = ["unsupported"]
+        malformed.append(value)
+        value = deepcopy(reply)
+        value["pending_change"] = {"id": "secret sentinel", "items": []}
+        malformed.append(value)
+        for value in malformed:
+            with self.subTest(value=value), self.assertRaises(ListingError):
+                _validate(value, request)
+        with self.assertRaises(ListingError):
+            _validate(reply, {"operation": "access_status"})
+
     def invoke(self, endpoint, fields=()):
         return subprocess.run(
             [CLI, "entries", "list", "--json", *[f"--field={field}" for field in fields]],

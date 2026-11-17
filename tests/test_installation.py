@@ -1,4 +1,6 @@
 import json
+import os
+import stat
 from pathlib import Path
 import subprocess
 from tempfile import TemporaryDirectory
@@ -6,7 +8,7 @@ import unittest
 from unittest.mock import patch
 
 from keepassxc_agent_access.installation import Installation, SERVICE
-from keepassxc_agent_access.launcher import desktop_contents
+from keepassxc_agent_access.launcher import desktop_contents, skill_launcher_contents, _install_skill
 
 
 class InstallationTests(unittest.TestCase):
@@ -34,9 +36,15 @@ class InstallationTests(unittest.TestCase):
         self.assertEqual(launcher.read_text(), desktop_contents(installation.app / "run-tray"))
         self.assertTrue((installation.app / "run-tray").is_file())
         self.assertTrue(self.skill.exists())
+        helper = self.skill.with_name("keeper-agent")
+        self.assertTrue(helper.is_file() and os.access(helper, os.X_OK))
+        self.assertEqual(helper.read_bytes(), skill_launcher_contents(installation.app / "keeper-agent"))
+        invocation = subprocess.run([helper, "--help"], capture_output=True, text=True)
+        self.assertEqual(invocation.returncode, 0, invocation.stderr)
+        self.assertIn("keeper-agent", invocation.stdout)
         installation.install(False)
         self.assertTrue(installation.uninstall())
-        self.assertFalse(launcher.exists() or self.skill.exists() or installation.app.exists())
+        self.assertFalse(launcher.exists() or self.skill.exists() or helper.exists() or installation.app.exists())
         self.assertFalse(installation.uninstall())
 
     def test_upgrade_cleans_up_bundled_legacy_copy_and_preserves_edited_copy(self):
@@ -71,6 +79,72 @@ class InstallationTests(unittest.TestCase):
         self.assertEqual(self.skill.read_bytes(), edited)
         self.assertEqual(installation.launcher.read_bytes(), b"Locally edited launcher")
 
+    def test_skill_helper_collision_refuses_install_before_publication(self):
+        helper = self.skill.with_name("keeper-agent")
+        helper.parent.mkdir(parents=True)
+        helper.write_bytes(b"#!/bin/sh\necho unrelated program\n")
+        helper.chmod(0o755)
+        with self.assertRaisesRegex(ValueError, "customized skill helper"):
+            self.installation.install(False)
+        self.assertFalse(self.skill.exists())
+        self.assertFalse(self.installation.app.exists())
+        self.assertEqual(helper.read_bytes(), b"#!/bin/sh\necho unrelated program\n")
+        helper.unlink()
+        target = self.root / "elsewhere"
+        target.write_bytes(skill_launcher_contents(self.installation.app / "keeper-agent"))
+        helper.symlink_to(target)
+        with self.assertRaisesRegex(ValueError, "customized skill helper"):
+            self.installation.install(False)
+        self.assertTrue(helper.is_symlink())
+        self.assertFalse(self.skill.exists())
+
+    def test_customized_skill_helper_is_kept_on_uninstall(self):
+        self.installation.install(False)
+        helper = self.skill.with_name("keeper-agent")
+        helper.write_bytes(b"Custom helper")
+        with self.assertRaisesRegex(ValueError, "customized skill helper"):
+            self.installation.install(False)
+        self.assertTrue(self.installation.uninstall())
+        self.assertEqual(helper.read_bytes(), b"Custom helper")
+
+    def test_generated_skill_helper_quotes_the_installed_path(self):
+        executable = self.root / "trusted path $(touch injected) ' quoted" / "program"
+        executable.parent.mkdir()
+        executable.write_text("#!/bin/sh\nprintf '%s' \"$1\"\n")
+        executable.chmod(0o755)
+        helper = self.root / "helper"
+        helper.write_bytes(skill_launcher_contents(executable))
+        helper.chmod(0o755)
+        response = subprocess.run([helper, "literal ; $HOME"], capture_output=True, text=True)
+        self.assertEqual(response.returncode, 0, response.stderr)
+        self.assertEqual(response.stdout, "literal ; $HOME")
+        self.assertFalse((self.root / "injected").exists())
+
+    def test_standalone_skill_install_requires_a_safe_executable_helper(self):
+        helper = self.skill.with_name("keeper-agent")
+        with patch("keepassxc_agent_access.launcher.skill_destination", return_value=self.skill):
+            _install_skill()
+            self.assertTrue(self.skill.is_file() and os.access(helper, os.X_OK))
+            original_skill = self.skill.read_bytes()
+            self.skill.unlink()
+            helper.chmod(0o644)
+            with self.assertRaisesRegex(ValueError, "customized skill helper"):
+                _install_skill()
+            self.assertFalse(self.skill.exists())
+            helper.chmod(0o755)
+            _install_skill()
+            self.assertEqual(self.skill.read_bytes(), original_skill)
+            self.skill.unlink()
+            helper.unlink()
+            target = self.root / "unrelated"
+            target.write_bytes(b"Unrelated")
+            helper.symlink_to(target)
+            with self.assertRaisesRegex(ValueError, "customized skill helper"):
+                _install_skill()
+            self.assertFalse(self.skill.exists())
+            self.assertTrue(helper.is_symlink())
+            self.assertEqual(target.read_bytes(), b"Unrelated")
+
     def test_desktop_upgrade_and_uninstall_leave_external_broker_running(self):
         installation = self.installation
         installation.install(False)
@@ -91,6 +165,9 @@ class InstallationTests(unittest.TestCase):
         installation.manifest.write_bytes(old_state)
         previous_launcher = installation.launcher.read_bytes()
         previous_program = (installation.app / "run-tray").read_bytes()
+        helper = self.skill.with_name("keeper-agent")
+        previous_helper = helper.read_bytes()
+        helper.chmod(0o711)
         failed = subprocess.CalledProcessError(1, ["systemctl"])
 
         def fail_enable(command, *args, **kwargs):
@@ -98,7 +175,8 @@ class InstallationTests(unittest.TestCase):
                 raise failed
 
         with patch.object(installation, "agent_unit", return_value=b"Unit for trial"), \
-             patch("keepassxc_agent_access.installation.systemctl", side_effect=fail_enable) as manager:
+             patch("keepassxc_agent_access.installation.systemctl", side_effect=fail_enable) as manager, \
+             patch("keepassxc_agent_access.installation.skill_launcher_contents", return_value=b"Updated helper contents"):
             with self.assertRaises(subprocess.CalledProcessError):
                 installation.install(True)
             manager.assert_any_call("disable", "--now", SERVICE, check=False)
@@ -108,6 +186,8 @@ class InstallationTests(unittest.TestCase):
         self.assertEqual(installation.manifest.read_bytes(), old_state)
         self.assertEqual(installation.launcher.read_bytes(), previous_launcher)
         self.assertEqual((installation.app / "run-tray").read_bytes(), previous_program)
+        self.assertEqual(helper.read_bytes(), previous_helper)
+        self.assertEqual(stat.S_IMODE(helper.stat().st_mode), 0o711)
 
     def test_agent_upgrade_retains_service_and_uninstall_disables_it(self):
         installation = self.installation

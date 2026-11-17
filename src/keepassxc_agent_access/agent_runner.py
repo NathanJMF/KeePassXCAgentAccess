@@ -88,7 +88,10 @@ EDIT_REQUEST = {
 OPERATIONS = {
     "discover": (("discover",), tool("discover", "List all vaults, groups and entry names before requesting access. Returns only names, references and cache/lock status.",
         {"vault": REFERENCE, "summary": {"type": "boolean", "description": "List vault names and status only; use a vault UUID to fetch its groups and entry names separately."}})),
-    "access_status": (("access", "status"), tool("access_status", "Check this token profile's status.")),
+    "access_status": (("access", "status"), tool(
+        "access_status", "Check this token profile's status; request details to see its identity and permissions.",
+        {"details": {"type": "boolean"}},
+    )),
     "request_access": (("access", "request"), tool(
         "request_access", "Request a scoped token or replace this token’s scope using a change_id.",
         {"request": ENROLLMENT}, required=("request",), read_only=False,
@@ -137,11 +140,12 @@ def invocation(name, arguments):
             if not isinstance(value, str) or len(value) > 36:
                 raise ValueError
             command.append(f"--{key}={UUID(value)}")
-    if "summary" in arguments:
-        if type(arguments["summary"]) is not bool:
-            raise ValueError
-        if arguments["summary"]:
-            command.append("--summary")
+    for flag in ("summary", "details"):
+        if flag in arguments:
+            if type(arguments[flag]) is not bool:
+                raise ValueError
+            if arguments[flag]:
+                command.append(f"--{flag}")
     if name == "edit_status":
         command.append(f"--request={edit_uuid(arguments['id'])}")
     if "action" in arguments:

@@ -2,7 +2,9 @@
 
 import os
 from pathlib import Path
+from shlex import quote
 import sys
+import stat
 import tempfile
 
 from gi.repository import GLib
@@ -27,25 +29,46 @@ def skill_destination():
     return documents / "Skills" / "Keeper" / SKILL_PATH.name
 
 
-def _install_skill():
-    destination = skill_destination()
+def skill_launcher_contents(executable):
+    """Bind the skill helper to its trusted installation, without shell expansion."""
+    executable = str(Path(executable).absolute())
+    if not executable.isprintable():
+        raise ValueError("The installation path contains unsupported characters.")
+    return f'#!/bin/sh\nset -eu\nexec {quote(executable)} "$@"\n'.encode()
+
+
+def _install_skill_file(destination, contents, mode):
     if destination.exists() or destination.is_symlink():
         return
-    source = Path(__file__).resolve().parents[2] / "skills" / SKILL_PATH
-    contents = source.read_bytes()
     destination.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.NamedTemporaryFile(dir=destination.parent, delete=False) as file:
         temporary = Path(file.name)
         try:
             file.write(contents)
             file.flush()
-            os.fchmod(file.fileno(), 0o644)
-            # Publish the complete file without replacing an existing skill.
+            os.fchmod(file.fileno(), mode)
+            # Publish the complete file without replacing an existing skill/helper.
             os.link(temporary, destination)
         except FileExistsError:
             pass
         finally:
             temporary.unlink(missing_ok=True)
+
+
+def _install_skill():
+    destination = skill_destination()
+    checkout = Path(__file__).resolve().parents[2]
+    source = checkout / "skills" / SKILL_PATH
+    helper = destination.with_name("keeper-agent")
+    helper_contents = skill_launcher_contents(checkout / "keeper-agent")
+    if helper.exists() or helper.is_symlink():
+        info = helper.lstat()
+        if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid()
+                or info.st_mode & 0o022 or not info.st_mode & 0o100
+                or helper.read_bytes() != helper_contents):
+            raise ValueError("Keeper found a customized skill helper. Move keeper-agent beside the skill aside before installing.")
+    _install_skill_file(destination, source.read_bytes(), 0o644)
+    _install_skill_file(helper, helper_contents, 0o755)
 
 
 def desktop_contents(executable):

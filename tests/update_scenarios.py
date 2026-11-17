@@ -20,6 +20,10 @@ def commit(root):
 def main(root):
     os.environ["XDG_DATA_HOME"] = str(root / "data")
     os.environ["XDG_CONFIG_HOME"] = str(root / "config")
+    # Keep the installed skill/helper independent of previous desktop scenarios.
+    (root / "config").mkdir(mode=0o700)
+    (root / "config/user-dirs.dirs").write_text(
+        f'XDG_DOCUMENTS_DIR="{root / "Documents"}"\n', encoding="utf-8")
     from gi.repository import GLib
 
     from launcher_scenarios import app_pid, stop, wait_for

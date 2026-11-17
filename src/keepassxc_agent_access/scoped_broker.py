@@ -18,6 +18,27 @@ TOKEN_REQUESTS = 48
 BROKER_REQUESTS = 240
 
 
+def access_details(token):
+    """Project only this grant's attribution and permissions, never credentials."""
+    def item(value, *, requested=False):
+        result = {key: getattr(value, key) for key in
+                  ("vault", "entry", "group", "metadata", "username", "url", "action")}
+        result["edits"] = list(value.edits)
+        if requested:
+            result["label"] = value.label
+        return result
+
+    pending = token.pending_change
+    return {
+        "status": token.status, "identity": token.identity, "project": token.project,
+        **{key: getattr(token.context, key) for key in ("model", "chat", "chat_id")},
+        "scope": [item(value) for value in token.scope],
+        "requested_items": [item(value, requested=True) for value in token.items],
+        "pending_change": ({"id": pending.id, "items": [item(value, requested=True) for value in pending.items]}
+                           if pending else None),
+    }
+
+
 class ScopedBroker:
     accepts_upload = True
 
@@ -88,7 +109,10 @@ class ScopedBroker:
                 vault = uuid_text(payload["vault"]) if "vault" in keys else None
                 if type(payload.get("summary", False)) is not bool:
                     raise ValueError
-            elif operation in ("access_status", "list_vaults") and not keys:
+            elif operation == "access_status" and keys <= {"details"}:
+                if type(payload.get("details", False)) is not bool:
+                    raise ValueError
+            elif operation == "list_vaults" and not keys:
                 pass
             elif operation == "list_entries" and keys <= {"vault", "fields"}:
                 vault = uuid_text(payload["vault"]) if "vault" in keys else None
@@ -143,7 +167,7 @@ class ScopedBroker:
                 return encode({"status": status})
             token = self.grants.authenticate(credential, uid)
             if operation == "access_status":
-                return encode({"status": token.status})
+                return encode(access_details(token) if payload.get("details") else {"status": token.status})
             if operation == "edit_status":
                 if self.edits is None:
                     raise ListingError("ineligible")

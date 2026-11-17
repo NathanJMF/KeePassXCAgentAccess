@@ -19,7 +19,7 @@ from gi.repository import Gio, GLib
 
 from .access_settings import AccessStore
 from .isolated_runner import broker_path, owned, subordinate_ids
-from .launcher import DESKTOP_ID, SKILL_PATH, desktop_contents, skill_destination
+from .launcher import DESKTOP_ID, SKILL_PATH, desktop_contents, skill_destination, skill_launcher_contents
 from .settings import SettingsError, SettingsStore
 
 
@@ -27,7 +27,7 @@ APP = DESKTOP_ID.removesuffix(".desktop")
 SERVICE = "keeper-agent.service"
 LEGACY_SERVICE = "keepassxc-agent-access.service"
 CHECKOUT = Path(__file__).resolve().parents[2]
-PROGRAMS = ("run-tray", "keepassxc-agent", "keeper-agent-runner", "keeper-run-agent", "keeper-open", "uninstall")
+PROGRAMS = ("keeper-agent", "run-tray", "keepassxc-agent", "keeper-agent-runner", "keeper-run-agent", "keeper-open", "uninstall")
 
 
 def digest(data):
@@ -44,14 +44,14 @@ def regular_file(path):
     return path.read_bytes()
 
 
-def publish(path, contents):
+def publish(path, contents, *, mode=0o644):
     path.parent.mkdir(mode=0o755, parents=True, exist_ok=True)
     with NamedTemporaryFile(dir=path.parent, delete=False) as stream:
         temporary = Path(stream.name)
         try:
             stream.write(contents)
             stream.flush()
-            os.fchmod(stream.fileno(), 0o644)
+            os.fchmod(stream.fileno(), mode)
             os.replace(temporary, path)
         finally:
             temporary.unlink(missing_ok=True)
@@ -224,6 +224,19 @@ class Installation:
         manage_skill = old_skill is None or (
             previous.get("skill_path") == str(skill) and previous.get("skill") == digest(old_skill)
         )
+        skill_launcher = skill.with_name("keeper-agent")
+        source_skill_launcher = skill_launcher_contents(self.app / "keeper-agent")
+        if skill_launcher.is_symlink():
+            raise ValueError("Keeper found a customized skill helper. Move keeper-agent beside the skill aside before installing.")
+        old_skill_launcher = regular_file(skill_launcher)
+        if old_skill_launcher is not None:
+            helper_info = skill_launcher.stat()
+            if helper_info.st_uid != os.geteuid() or helper_info.st_mode & 0o022:
+                raise ValueError("Keeper found a customized skill helper with unsafe ownership or permissions. Move it aside before installing.")
+        self.check_replaceable(
+            old_skill_launcher, previous.get("skill_launcher") if previous.get("skill_launcher_path") == str(skill_launcher) else None,
+            (source_skill_launcher, skill_launcher_contents(CHECKOUT / "keeper-agent")), "skill helper",
+        )
         state = {"version": 1, "launcher": digest(launcher)}
         upstream = None
         if (CHECKOUT / ".git").exists():
@@ -240,13 +253,15 @@ class Installation:
             except UpdateError:
                 # The desktop install can still be used without a configured upstream.
                 pass
-        writes = [(self.launcher, launcher, old_launcher)]
+        writes = [(self.launcher, launcher, old_launcher, 0o644)]
         if manage_skill:
             state.update(skill_path=str(skill), skill=digest(source_skill))
-            writes.append((skill, source_skill, old_skill))
+            writes.append((skill, source_skill, old_skill, 0o644))
+        state.update(skill_launcher_path=str(skill_launcher), skill_launcher=digest(source_skill_launcher))
+        writes.append((skill_launcher, source_skill_launcher, old_skill_launcher, 0o755))
         if agent:
             state["unit"] = digest(unit)
-            writes.append((self.unit, unit, old_unit))
+            writes.append((self.unit, unit, old_unit, 0o644))
 
         self.base.mkdir(mode=0o700, parents=True, exist_ok=True)
         with TemporaryDirectory(dir=self.base) as temporary:
@@ -287,24 +302,25 @@ class Installation:
                         self.update_source.rename(old_update)
                     update_stage.rename(self.update_source)
                     replaced_update = True
-                for path, content, original in writes:
-                    publish(path, content)
-                    changed.append((path, original))
+                for path, content, original, mode in writes:
+                    original_mode = stat.S_IMODE(path.stat().st_mode) if original is not None else 0o644
+                    publish(path, content, mode=mode)
+                    changed.append((path, original, original_mode))
                 if agent:
                     systemctl("daemon-reload")
                     enabled_service = True
                     systemctl("enable", "--now", SERVICE)
                 if legacy_contents is not None and self.remove_matching(legacy_skill, digest(legacy_contents)):
-                    changed.append((legacy_skill, legacy_contents))
+                    changed.append((legacy_skill, legacy_contents, 0o644))
                 publish(self.manifest, json.dumps(state).encode())
             except Exception:
                 if enabled_service:
                     systemctl("disable", "--now", SERVICE, check=False)
-                for path, original in reversed(changed):
+                for path, original, mode in reversed(changed):
                     if original is None:
                         path.unlink(missing_ok=True)
                     else:
-                        publish(path, original)
+                        publish(path, original, mode=mode)
                 if replaced_update:
                     shutil.rmtree(self.update_source)
                 if old_update.exists():
@@ -346,6 +362,9 @@ class Installation:
         for path in (skill, skill.parents[1] / SKILL_PATH):
             if state.get("skill_path") == str(path) and not path.parent.is_symlink():
                 self.remove_matching(path, state.get("skill"))
+        skill_launcher = skill.with_name("keeper-agent")
+        if state.get("skill_launcher_path") == str(skill_launcher) and not skill_launcher.parent.is_symlink():
+            self.remove_matching(skill_launcher, state.get("skill_launcher"))
         if self.app.exists():
             shutil.rmtree(self.app)
         if self.update_source.exists() or self.update_source.is_symlink():
@@ -383,7 +402,9 @@ def main():
                 launcher, runner = installation.install(args.agent)
             print("Keeper is installed. Open Keeper from the application menu.")
             if runner:
-                print("Agent tool command: " + join([str(runner), "--profile", "default"]))
+                print(f"Agent skill: {skill_destination()}")
+                print(f"Agent command: {skill_destination().with_name('keeper-agent')}")
+                print("Advanced stdio runner: " + join([str(runner), "--profile", "CHOOSE_A_PROFILE"]))
             print(f"Uninstall command: {installation.app / 'uninstall'}")
             if not args.no_launch:
                 launcher_info = Gio.DesktopAppInfo.new_from_filename(str(launcher))

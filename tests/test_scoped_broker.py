@@ -137,6 +137,48 @@ class ScopedBrokerTests(unittest.TestCase):
         self.assert_code("paused", "list_entries", vault=self.vaults[0])
         self.assertEqual(len(self.activity.rows(action="Request token")), 1)
 
+    def test_access_details_identify_only_this_token_and_distinguish_pending_permissions(self):
+        initial = {"vault": self.vaults[0], "entry": self.entry, "metadata": True}
+        identity = "Deployment Assistant"
+        self.invoke("request_access", request={"identity": identity, "project": "Deploy",
+                    "items": [initial]}, context={"model": "Synthetic Model", "chat": "Deployment Chat",
+                                                  "note": "Do not return the audit note in status."})
+        record = self.grants.authenticate(self.secrets[0], 1500)
+        pending = self.invoke("access_status", details=True)
+        self.assertEqual(pending["identity"], identity)
+        self.assertEqual((pending["project"], pending["model"], pending["chat"]),
+                         ("Deploy", "Synthetic Model", "Deployment Chat"))
+        self.assertEqual(pending["scope"], [])
+        self.assertEqual(pending["requested_items"][0]["vault"], self.vaults[0])
+        self.assertIsNone(pending["pending_change"])
+        choice, = self.grants.choices(record.items[0])
+        self.grants.decide(record.id, [choice])
+        change = {"change_id": str(uuid4()), "identity": identity, "project": "Deploy",
+                  "items": [{**initial, "vault": self.vaults[1], "username": True}]}
+        self.assertEqual(self.invoke("request_access", request=change), {"status": "pending"})
+        detailed = self.invoke("access_status", details=True)
+        self.assertEqual(detailed["status"], "active")
+        self.assertEqual(detailed["scope"][0]["vault"], self.vaults[0])
+        self.assertFalse(detailed["scope"][0]["username"])
+        self.assertEqual(detailed["pending_change"]["id"], change["change_id"])
+        self.assertEqual(detailed["pending_change"]["items"][0]["vault"], self.vaults[1])
+        self.assertTrue(detailed["pending_change"]["items"][0]["username"])
+        self.assertEqual(self.invoke("access_status"), {"status": "active"})
+        wire = json.dumps(detailed)
+        for forbidden in (self.secrets[0], record.verifier, "revision", "generation", "uid", "Do not return",
+                          "fixture-password", "fixture-user", "fixture-notes"):
+            self.assertNotIn(forbidden, wire)
+        self.assert_code("ineligible", "access_status", uid=1501, details=True)
+        self.assert_code("ineligible", "access_status", index=1, details=True)
+        self.assert_code("invalid_request", "access_status", details="yes")
+        pending_change = self.grants.records[record.id].pending_change
+        choice, = self.grants.choices(pending_change.items[0])
+        self.grants.decide(record.id, [choice], change_id=pending_change.id)
+        changed = self.invoke("access_status", details=True)
+        self.assertIsNone(changed["pending_change"])
+        self.assertEqual(changed["scope"][0]["vault"], self.vaults[1])
+        self.assertEqual(changed["requested_items"][0]["vault"], self.vaults[0])
+
     def test_agent_token_cannot_control_owner_settings_or_approvals(self):
         item = {"vault": self.vaults[0], "entry": self.entry, "metadata": True}
         self.approve([item])

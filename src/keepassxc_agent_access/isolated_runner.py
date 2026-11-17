@@ -55,7 +55,7 @@ def alter_acl(path, *flags):
 
 
 def broker_path():
-    runtime = Path(os.environ["XDG_RUNTIME_DIR"])
+    runtime = Path(os.environ.get("XDG_RUNTIME_DIR") or f"/run/user/{os.getuid()}")
     if not runtime.is_absolute():
         raise ValueError("Use an absolute desktop runtime directory.")
     owned(runtime, private=True)
@@ -124,11 +124,16 @@ def stage_runtime(checkout, stage):
     return launcher_dir / "keeper-agent-runner"
 
 
-def launch(directory, checkout, profile, uid, gid):
+def launch(directory, checkout, profile, uid, gid, *, cli=None, anchor=None, attribution=None):
     owned(directory)
-    if not directory.joinpath("broker.sock").is_socket():
+    try:
+        endpoint = directory.joinpath("broker.sock").lstat()
+    except FileNotFoundError:
+        raise ValueError("Keeper's broker socket is unavailable. Open Keeper first.") from None
+    if not stat.S_ISSOCK(endpoint.st_mode) or endpoint.st_uid != os.geteuid():
         raise ValueError("Keeper's broker socket is unavailable. Open Keeper first.")
-    anchor = profile_anchor(profile)
+    anchor = profile_anchor(profile) if anchor is None else anchor
+    owned(anchor)
     prefix = namespace(uid, gid)
     provision_profile(anchor, os.open(anchor, os.O_RDONLY | DIRECTORY), uid, gid, prefix)
     fd_socket = os.open(directory, os.O_PATH | DIRECTORY)
@@ -136,13 +141,22 @@ def launch(directory, checkout, profile, uid, gid):
         fd_profile = os.open(anchor, os.O_PATH | DIRECTORY)
         try:
             environment = {"PATH": "/usr/bin:/bin", "PYTHONDONTWRITEBYTECODE": "1"}
-            environment.update({key: os.environ[key] for key in ATTRIBUTION if key in os.environ})
+            environment.update(attribution if attribution is not None else
+                               {key: os.environ[key] for key in ATTRIBUTION if key in os.environ})
             with TemporaryDirectory(prefix="keeper-runtime-", dir="/var/tmp") as staged:
                 runner = stage_runtime(checkout, Path(staged))
+                if cli is None:
+                    arguments = [runner, "--socket", f"/proc/self/fd/{fd_socket}/broker.sock",
+                                 "--profile-dir", f"/proc/self/fd/{fd_profile}/profile",
+                                 "--inherit-directory-fd", str(fd_socket), "--inherit-directory-fd", str(fd_profile)]
+                else:
+                    environment.update(
+                        KEEPASSXC_AGENT_SOCKET=f"/proc/self/fd/{fd_socket}/broker.sock",
+                        KEEPASSXC_AGENT_TOKEN_FILE=f"/proc/self/fd/{fd_profile}/profile/token",
+                    )
+                    arguments = [runner.with_name("keepassxc-agent"), *cli]
                 return subprocess.run(
-                    [*prefix, runner, "--socket", f"/proc/self/fd/{fd_socket}/broker.sock",
-                     "--profile-dir", f"/proc/self/fd/{fd_profile}/profile",
-                     "--inherit-directory-fd", str(fd_socket), "--inherit-directory-fd", str(fd_profile)],
+                    [*prefix, *arguments],
                     pass_fds=(fd_socket, fd_profile), cwd="/", env=environment, check=False,
                 ).returncode
         finally:

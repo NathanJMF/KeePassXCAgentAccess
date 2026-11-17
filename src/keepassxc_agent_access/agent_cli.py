@@ -70,6 +70,56 @@ def edit_request(data):
     return {**data, **normalized}
 
 
+def _validate_access_details(reply):
+    required = {"status", "identity", "project", "model", "chat", "chat_id", "scope", "requested_items", "pending_change"}
+    if set(reply) != required:
+        raise ValueError
+    for key in ("identity", "project", "model", "chat", "chat_id"):
+        value = reply[key]
+        if value is not None and (not isinstance(value, str) or not value or len(value) > 160 or not value.isprintable()):
+            raise ValueError
+    if reply["identity"] is None or reply["project"] is None:
+        raise ValueError
+
+    def items(values, *, requested=False):
+        fields = {"vault", "entry", "group", "metadata", "username", "url", "action", "edits"}
+        if requested:
+            fields.add("label")
+        if not isinstance(values, list) or len(values) > 16:
+            raise ValueError
+        for value in values:
+            if not isinstance(value, dict) or set(value) != fields:
+                raise ValueError
+            for key in ("vault", "entry", "group"):
+                if value[key] is not None and edit_uuid(value[key]) != value[key]:
+                    raise ValueError
+            if any(type(value[key]) is not bool for key in ("metadata", "username", "url")):
+                raise ValueError
+            if (value["username"] or value["url"]) and not value["metadata"]:
+                raise ValueError
+            action = value["action"]
+            if action is not None and (not isinstance(action, str) or not action or len(action) > 160 or not action.isprintable()):
+                raise ValueError
+            if requested:
+                label = value["label"]
+                if label is not None and (not isinstance(label, str) or not label or len(label) > 160 or not label.isprintable()):
+                    raise ValueError
+            edits = value["edits"]
+            allowed_edits = {"create_entry", "create_group", "rename_group", "move_group", "recycle_group", "move_into"} if value["group"] else {
+                "update_entry", "move_entry", "recycle_entry", "replace_password"}
+            if (not isinstance(edits, list) or any(not isinstance(edit, str) or edit not in allowed_edits for edit in edits)
+                    or len(set(edits)) != len(edits)):
+                raise ValueError
+
+    items(reply["scope"])
+    items(reply["requested_items"], requested=True)
+    pending = reply["pending_change"]
+    if pending is not None:
+        if not isinstance(pending, dict) or set(pending) != {"id", "items"} or edit_uuid(pending["id"]) != pending["id"]:
+            raise ValueError
+        items(pending["items"], requested=True)
+
+
 def _validate(reply, payload):
     operation = payload["operation"]
     if not isinstance(reply, dict):
@@ -79,7 +129,14 @@ def _validate(reply, payload):
         if isinstance(error, str) and error in ERRORS:
             raise ListingError(error)
     if operation in ("request_access", "access_status"):
-        if set(reply) != {"status"} or reply["status"] not in ("pending", "active", "disabled", "denied", "removed"):
+        if reply.get("status") not in ("pending", "active", "disabled", "denied", "removed"):
+            raise ListingError("invalid_response")
+        if operation == "access_status" and payload.get("details"):
+            try:
+                _validate_access_details(reply)
+            except (ValueError, TypeError, KeyError):
+                raise ListingError("invalid_response") from None
+        elif set(reply) != {"status"}:
             raise ListingError("invalid_response")
         return reply
     if operation in ("request_edit", "edit_status"):
@@ -215,6 +272,7 @@ def main(argv=None):
     enrollment.set_defaults(operation="request_access")
     status = commands.add_parser("status", help="Check this profile's token")
     status.add_argument("--json", action="store_true", required=True, help="Emit JSON")
+    status.add_argument("--details", action="store_true", help="Show the registered identity, project, attribution, and permission scope")
     status.set_defaults(operation="access_status")
     edits = topics.add_parser("edits", help="Request an owner-reviewed vault edit")
     commands = edits.add_subparsers(required=True)
@@ -272,6 +330,8 @@ def main(argv=None):
         payload["vault"] = options.vault
     if getattr(options, "field", None):
         payload["fields"] = list(dict.fromkeys(options.field))
+    if getattr(options, "details", False):
+        payload["details"] = True
     if getattr(options, "summary", False):
         payload["summary"] = True
     context = {}
@@ -297,6 +357,15 @@ def main(argv=None):
                 if len(raw) >= REQUEST_LIMIT:
                     raise ValueError
                 submitted = decode(raw)
+                if options.operation == "request_access" and any(key in os.environ for key in
+                        ("KEEPASSXC_AGENT_IDENTITY", "KEEPASSXC_AGENT_PROJECT")):
+                    identity = os.environ.get("KEEPASSXC_AGENT_IDENTITY")
+                    project = os.environ.get("KEEPASSXC_AGENT_PROJECT")
+                    if not isinstance(submitted, dict) or not identity or not project:
+                        raise ValueError
+                    if (submitted.get("identity", identity) != identity or submitted.get("project", project) != project):
+                        raise ValueError
+                    submitted = {**submitted, "identity": identity, "project": project}
                 payload["request"] = edit_request(submitted) if options.operation == "request_edit" else submitted
             except (ValueError, RecursionError):
                 raise ListingError("invalid_request") from None
@@ -312,7 +381,12 @@ def main(argv=None):
         sys.stdout.buffer.write(encode(result))
     except UninitializedProfile as error:
         if options.operation == "access_status":
-            sys.stdout.buffer.write(encode({"status": "uninitialized"}))
+            result = {"status": "uninitialized"}
+            if options.details:
+                result.update({key: os.environ.get(f"KEEPASSXC_AGENT_{key.upper()}") for key in
+                               ("identity", "project", "model", "chat", "chat_id")})
+                result.update(scope=[], requested_items=[], pending_change=None)
+            sys.stdout.buffer.write(encode(result))
             return 0
         print(error, file=sys.stderr)
         return 1

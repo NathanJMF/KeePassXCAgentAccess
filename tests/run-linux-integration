@@ -31,7 +31,7 @@ if [[ ${1:-} != --private-session ]]; then
         echo "Synthetic passphrase found in captured desktop output."
         exit 1
     fi
-    grep -E '^(Desktop scenario passed|Broker scenario passed|Password scenario passed|Launcher scenario passed|Workspace scenario passed|Runner scenario passed|Update scenario passed|Discovery scenario passed|Denied):' "$test_root/run.log"
+    grep -E '^(Desktop scenario passed|Broker scenario passed|Password scenario passed|Launcher scenario passed|Workspace scenario passed|Runner scenario passed|Update scenario passed|Discovery scenario passed|Task entrypoint scenario passed|Denied):' "$test_root/run.log"
     exit 0
 fi
 
@@ -91,6 +91,7 @@ if [[ ${TRAY_TEST_ISOLATION:-0} == 1 ]]; then
     timeout 45 /usr/bin/python3 tests/launcher_scenarios.py "$launcher_root"
     timeout 80 /usr/bin/python3 tests/workspace_scenarios.py "$workspace_root"
     timeout 45 /usr/bin/python3 tests/discovery_scenarios.py
+    timeout 60 /usr/bin/python3 tests/task_entrypoint_scenarios.py
     timeout 45 /usr/bin/python3 tests/runner_scenarios.py
     timeout 45 /usr/bin/python3 tests/update_scenarios.py
 fi
