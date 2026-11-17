@@ -130,7 +130,9 @@ class WorkspaceApplication(Gtk.Application):
         return GLib.SOURCE_REMOVE
 
     def _present(self, *_):
-        if self.window and not self.desktop.locked and not self.exiting:
+        if self.window and not self.exiting and (
+            not self.desktop.locked or not getattr(self.desktop, "available", True)
+        ):
             self.window.present()
 
     def _build_window(self):
@@ -438,8 +440,11 @@ class WorkspaceApplication(Gtk.Application):
                 self._refresh_tree()
             self._refresh_vault_lock()
             self._browse()
-            self.notice.set_text(self.message)
-            self.notice.set_visible(bool(self.message))
+            notice = self.message
+            if not getattr(self.desktop, "available", True):
+                notice = "Desktop lock status is unavailable. Vaults stay locked until monitoring recovers."
+            self.notice.set_text(notice)
+            self.notice.set_visible(bool(notice))
             paused = not self.workspace or self.workspace.paused
             pause_label = "Resume Agent Access" if paused else "Pause Agent Access"
             if self.pause_labels.get_visible_child_name() != pause_label:
@@ -1343,6 +1348,8 @@ class WorkspaceApplication(Gtk.Application):
         if self.workspace:
             try:
                 self.activity.prune(self.workspace.legacy_access.read().retention_days)
+                if self.edit_requests:
+                    self.edit_requests.prune(self.workspace.legacy_access.read().retention_days)
             except (SettingsError, ActivityError):
                 self.message = "Local activity cleanup is unavailable."
         return GLib.SOURCE_CONTINUE

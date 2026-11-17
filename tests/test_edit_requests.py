@@ -359,6 +359,22 @@ class EditRequestsTests(unittest.TestCase):
         self.assertFalse(self.edits.rows())
         self.assertTrue(self.activity.rows(action="Cancel edit", outcome="Stale"))
 
+    def test_retention_compacts_terminal_requests_and_keeps_replay_protection(self):
+        terminal = self._submit("create_group", parent=self.root_id, fields={"name": "Old group"})
+        pending = self._submit("create_group", parent=self.root_id, fields={"name": "Pending group"})
+        self.edits.deny(self.token.id, terminal["id"])
+        with self.activity.connection() as db:
+            db.execute("UPDATE edit_requests SET requested=1")
+        self.edits.prune(30)
+        with self.activity.connection() as db:
+            old = db.execute("SELECT * FROM edit_requests WHERE id=?", (terminal["id"],)).fetchone()
+            waiting = db.execute("SELECT * FROM edit_requests WHERE id=?", (pending["id"],)).fetchone()
+        self.assertEqual((old["identity"], old["project"], old["payload"], old["context"]), ("", "", None, None))
+        self.assertTrue(waiting["identity"] and waiting["project"] and waiting["payload"])
+        self.assertEqual(self.edits.submit(self.token, terminal)["status"], "denied")
+        with self.assertRaises(ListingError):
+            self.edits.submit(self.token, {**terminal, "fields": {"name": "Replayed group"}})
+
     def test_restart_keeps_idempotence_and_never_retries_unconfirmed_edits(self):
         requests = [self._submit("create_group", parent=self.root_id, fields={"name": name})
                     for name in ("Denied group", "Dispatched group", "Applying group", "Pending group")]

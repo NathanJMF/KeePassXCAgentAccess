@@ -19,7 +19,7 @@ class UpdateTests(unittest.TestCase):
         self.publisher.mkdir()
         self.git(self.publisher, "init", "--initial-branch=main")
         installer = self.publisher / "install"
-        installer.write_text('#!/bin/sh\nprintf installed > install-result\n')
+        installer.write_text('#!/bin/sh\nprintf installed > install-result\nprintf "%s\\n" "$@" > install-args\n')
         installer.chmod(0o755)
         self.first = self.commit("Initial revision")
         self.checkout = self.base / "update-source"
@@ -55,6 +55,12 @@ class UpdateTests(unittest.TestCase):
         self.assertEqual(self.git(self.checkout, "rev-parse", "HEAD"), target)
         self.assertEqual((self.checkout / "version").read_text(), "New release")
         self.assertEqual((self.checkout / "install-result").read_text(), "installed")
+        self.assertEqual((self.checkout / "install-args").read_text().splitlines(), ["--no-launch", "--agent"])
+
+    def test_dirty_installation_is_not_reported_up_to_date(self):
+        self.state["source_dirty"] = True
+        with self.assertRaisesRegex(UpdateError, "local changes"):
+            check_for_update(self.installation)
 
     def test_legacy_workspace_update_source_requires_new_install(self):
         self.state = {"checkout": str(self.checkout), "revision": self.first}

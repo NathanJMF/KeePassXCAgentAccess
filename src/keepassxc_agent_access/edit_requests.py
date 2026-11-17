@@ -154,6 +154,15 @@ class EditRequests:
                     WHEN status='dispatched' THEN 'interrupted' ELSE 'stale' END
                 WHERE status IN ('applying', 'dispatched')
             """)
+        self.prune(self.workspace.legacy_access.read().retention_days)
+
+    def prune(self, days):
+        # Keep the digest and outcome so an old request cannot be replayed.
+        with self.activity.connection() as db:
+            db.execute("""
+                UPDATE edit_requests SET identity='', project='', payload=NULL, context=NULL
+                WHERE requested < ? AND status NOT IN ('pending', 'applying', 'dispatched')
+            """, (time() - days * 86400,))
 
     @staticmethod
     def _response(row):

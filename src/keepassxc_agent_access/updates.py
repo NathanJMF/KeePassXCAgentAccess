@@ -102,6 +102,8 @@ def check_for_update(installation):
     except (OSError, ValueError):
         raise UpdateError("Run ./install from a trusted Keeper checkout to configure updates.") from None
     installed = state.get("revision")
+    if state.get("source_dirty"):
+        raise UpdateError("This installation includes local changes. Reinstall from a clean Keeper checkout to enable updates.")
     ref = state.get("update_ref")
     if not valid_revision(installed) or not isinstance(ref, str) or not ref.startswith("refs/heads/"):
         raise UpdateError("Run ./install from a trusted Keeper checkout to configure updates.")
@@ -138,10 +140,13 @@ def apply_update(installation, checked):
             failure="The update cannot be fast-forwarded. Update the checkout manually.")
         git(checked.checkout, "merge", "--ff-only", "--no-edit", fetched,
             failure="Keeper could not fast-forward the checkout.")
-        subprocess.run([str(checked.checkout / "install"), "--no-launch"], cwd=checked.checkout,
+        options = ["--agent"] if "unit" in installation.installed() else []
+        subprocess.run([str(checked.checkout / "install"), "--no-launch", *options], cwd=checked.checkout,
                        capture_output=True, check=True, timeout=180)
     except (OSError, subprocess.SubprocessError):
-        raise UpdateError("Installation could not finish. Run ./install in the Keeper checkout for details.") from None
+        command = "./install --agent" if "unit" in installation.installed() else "./install"
+        raise UpdateError(f"Installation could not finish. Run {command} from a trusted Keeper checkout "
+                          "in a terminal to install any missing packages and see details.") from None
 
     if external_broker_active():
         service = systemctl("show", "--property=ExecStart", "--value", LEGACY_SERVICE)

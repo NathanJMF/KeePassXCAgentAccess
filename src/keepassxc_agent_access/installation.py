@@ -227,10 +227,11 @@ class Installation:
         state = {"version": 1, "launcher": digest(launcher)}
         upstream = None
         if (CHECKOUT / ".git").exists():
-            from .updates import UpdateError, revision, update_upstream
+            from .updates import UpdateError, git, revision, update_upstream
 
             try:
                 state["revision"] = revision(CHECKOUT)
+                state["source_dirty"] = bool(git(CHECKOUT, "status", "--porcelain", "--untracked-files=all"))
                 if CHECKOUT == self.update_source.resolve():
                     state.update(update_url=previous["update_url"], update_ref=previous["update_ref"])
                 else:
