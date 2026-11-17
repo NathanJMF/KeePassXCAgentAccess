@@ -46,6 +46,9 @@ class WorkspaceTests(unittest.TestCase):
         identifier = self.workspace.add(VaultTarget(self.primary), self.password, False)
         catalog = self.workspace.discovery.read(self.workspace)
         self.assertFalse(catalog["vaults"][0]["cached"])
+        self.workspace.editing.add(identifier)
+        self.assertFalse(self.workspace.discovery.read(self.workspace)["vaults"][0]["locked"])
+        self.workspace.editing.remove(identifier)
         self.workspace.put_entry(identifier, str(self.group.uuid), title="New catalog title",
                                  username="Hidden user", password="Hidden password", notes="Hidden notes")
         self.workspace.lock(identifier)

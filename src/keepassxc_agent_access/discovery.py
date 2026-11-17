@@ -52,14 +52,14 @@ class DiscoveryCatalog:
 
     def references(self, workspace):
         return tuple(item for record in workspace.registrations.values()
-                     for item in (record, workspace.session(record.id), self.snapshots.get(record.id)))
+                     for item in (record, workspace.owner_session(record.id), self.snapshots.get(record.id)))
 
     def read(self, workspace, *, vault=None, summary=False):
         rows = []
         for record in workspace.registrations.values():
             if vault is not None and record.id != vault:
                 continue
-            session = workspace.session(record.id)
+            session = workspace.owner_session(record.id)
             cached = self.snapshots.get(record.id)
             data = snapshot(session.groups, session.entries) if session and not summary else cached
             rows.append({
