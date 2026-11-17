@@ -24,6 +24,7 @@ ERRORS = {
     "revoked": "Agent access changed before the request completed.",
     "busy": "The broker is busy.",
     "ineligible": "The requested operation is unavailable for this token.",
+    "write_approval_required": "This token allows reads here. Set approve_write_once to true on the protected HTTPS write to request approval for just that operation.",
     "credential_changed": "That entry's credential changed after approval. Request a permission change for owner review.",
     "token_change_pending": "This token already has a permission change awaiting review.",
     "identity_in_use": "That identity is already in use. Choose a different identity and retry the request.",

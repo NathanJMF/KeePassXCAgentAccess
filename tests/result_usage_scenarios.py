@@ -72,10 +72,27 @@ def inventory_site(state):
                 # Public documentation contains no credential, ticket or answer.
                 self.respond({"origin": state["origin"], "certificate_sha256": state["fingerprint"],
                     "login": {"path": "/auth/session", "form": {"username": "{{username}}", "password": "{{password}}"},
-                              "capture": {"ticket": "/data/ticket"}},
+                    "capture": {"ticket": "/data/ticket"}},
                     "request": {"path": "/inventory", "auth": "session",
                                 "headers": {"Authorization": "Bearer {{session.ticket}}"}},
                     "result": {"path": "/data", "columns": ["vmid", "name", "node", "status", "free_mib"]}}, public=True)
+                return
+            if self.path == "/write-docs":
+                self.respond({"create": {"path": "/jobs", "method": "POST",
+                                        "body": "JSON object containing vmid, node and name from the eligible inventory row",
+                                        "csrf_capture": "/data/csrf", "csrf_header": "X-CSRF-Token",
+                                        "result": {"path": "/data", "scalar": "task_id"}},
+                              "status": {"path": "/jobs/status", "query": "task_id",
+                                         "result": {"path": "/data", "columns": ["task_id", "status"]}}}, public=True)
+                return
+            if self.path.startswith("/jobs/status?"):
+                authorized = self.headers.get("Authorization") == "Bearer " + state["ticket"]
+                query = parse_qs(self.path.partition("?")[2])
+                if authorized and state["writes"] and query == {"task_id": [state["task_id"]]}:
+                    state["status_reads"].append(True)
+                    self.respond({"data": {"task_id": state["task_id"], "status": "complete"}})
+                else:
+                    self.respond({"error": "not found"}, 404)
                 return
             authorized = self.headers.get("Authorization") == "Bearer " + state["ticket"]
             state["requests"].append((self.path, authorized))
@@ -94,24 +111,33 @@ def inventory_site(state):
         def do_POST(self):
             size = int(self.headers.get("Content-Length", 0))
             body = self.rfile.read(min(size, 4096))
+            if self.path == "/jobs":
+                authorized = (self.headers.get("Authorization") == "Bearer " + state["ticket"]
+                              and self.headers.get("X-CSRF-Token") == state["csrf"])
+                assert authorized, "Synthetic service received invalid private authentication"
+                state["writes"].append(json.loads(body))
+                self.respond({"data": state["task_id"]}, 201)
+                return
             form = parse_qs(body.decode(), strict_parsing=True)
             authorized = (self.path == "/auth/session" and form == {
                 "username": [state["username"]], "password": [state["password"]]})
             state["logins"].append(authorized)
             if authorized:
-                self.respond({"data": {"ticket": state["ticket"], "password": state["password"]}})
+                self.respond({"data": {"ticket": state["ticket"], "csrf": state["csrf"], "password": state["password"]}})
             else:
                 self.respond({"error": "login denied"}, 401)
     return Site
 
 
-def check(root, hold=False):
+def check(root, hold=False, check_write=False):
     target, _, private, _ = prepare(root)
     runtime, state_home = root / "runtime", root / "state"
     runtime.mkdir(mode=0o700)
     uid, gid = subordinate_ids()
     state = {"username": "user-" + secrets.token_hex(16), "password": "password-" + secrets.token_hex(24),
-             "ticket": "ticket-" + secrets.token_hex(24), "logins": [], "requests": [], "reviews": []}
+             "ticket": "ticket-" + secrets.token_hex(24), "csrf": "csrf-" + secrets.token_hex(24),
+             "task_id": "job-" + secrets.token_hex(12),
+             "logins": [], "requests": [], "reviews": [], "writes": [], "write_reviews": [], "status_reads": []}
     vmids = random.sample(range(1000, 60000), 3)
     state["rows"] = [
         {"vmid": vmids[0], "name": "guest-" + secrets.token_hex(4), "node": "node-" + secrets.token_hex(3), "status": "stopped", "free_mib": random.randint(4096, 12000)},
@@ -150,7 +176,7 @@ def check(root, hold=False):
         prefix = [launcher, "--profile", profile, "--note", "Read synthetic inventory to choose an eligible deployment guest"] if profile else [launcher]
         process = subprocess.run([*prefix, *args], cwd="/tmp", capture_output=True, text=True,
                                  input=json.dumps(request) if request is not None else None, timeout=30)
-        assert all(value not in process.stdout + process.stderr for value in (PASSWORD, state["password"], state["username"], state["ticket"]))
+        assert all(value not in process.stdout + process.stderr for value in (PASSWORD, state["password"], state["username"], state["ticket"], state["csrf"]))
         if rejected:
             assert process.returncode and not process.stdout, (process.returncode, process.stdout)
             return process.stderr
@@ -196,6 +222,18 @@ def check(root, hold=False):
                         # Independently approve only this fixture's actual certificate.
                         declared = " ".join(ticket.scope)
                         approved = state["fingerprint"] in declared
+                        if ticket.write_once:
+                            workflow = json.loads(next(line.split("\n", 1)[1] for line in ticket.scope
+                                                       if line.startswith("Complete requested workflow:\n")))
+                            request = workflow["request"]
+                            approved = (approved and not ticket.trusts_certificate and not state["writes"]
+                                        and request == {"path": "/jobs", "method": "POST", "auth": "session",
+                                                        "headers": {"Authorization": "Bearer {{session.ticket}}",
+                                                                    "X-CSRF-Token": "{{session.csrf}}"},
+                                                        "json": expected})
+                            if engine.approvals.resolve(ticket.id, approved):
+                                state["write_reviews"].append(approved)
+                            continue
                         if engine.approvals.resolve(ticket.id, approved):
                             state["reviews"].append(approved)
             owner = Thread(target=owner_review, daemon=True)
@@ -212,8 +250,18 @@ def check(root, hold=False):
                                       "authenticated_inventory_reads": sum(path == "/inventory" and ok for path, ok in state["requests"]),
                                       "successful_private_logins": sum(state["logins"]),
                                       "certificate_approval_prompts": len(state["reviews"]),
+                                      "approved_writes": len(state["writes"]),
+                                      "write_reviews": state["write_reviews"],
+                                      "authenticated_status_reads": len(state["status_reads"]),
                                       "configured_actions": sum(len(row.bindings) for row in workspace.registrations.values())}), flush=True)
                     assert selected == expected, "Fresh agent did not choose the eligible live inventory row"
+                    if check_write:
+                        assert state["writes"] == [expected] and state["write_reviews"] == [True, False]
+                        assert state["status_reads"] == [True]
+                        grant, = grants.rows()
+                        assert "https" not in grant.scope[0].uses and grant.pending_change is None
+                        assert any(row["decision"] == "Approved write once" and row["outcome"] == "Succeeded"
+                                   for row in activity.rows(action="Write via HTTPS"))
                     return
 
             profile = invoke(None, "begin", "--identity", "Inventory Result Consumer", "--project", "Synthetic Result Trial")["profile"]
@@ -267,10 +315,28 @@ def check(root, hold=False):
             assert len(state["logins"]) == 3
             echo = {**workflow, "request": {**workflow["request"], "path": "/echo"}}
             assert use(echo, failed=True)["outcome"] == "failed"
+            write = {**workflow, "approve_write_once": True,
+                     "login": {**workflow["login"], "capture": {"ticket": "/data/ticket", "csrf": "/data/csrf"}},
+                     "request": {"method": "POST", "path": "/jobs", "auth": "session", "json": selected,
+                                 "headers": {"Authorization": "Bearer {{session.ticket}}", "X-CSRF-Token": "{{session.csrf}}"}},
+                     "result": {"path": "/data", "scalar": "task_id"}}
+            before = len(state["logins"])
+            use({k: v for k, v in write.items() if k != "approve_write_once"}, rejected=True)
+            assert len(state["logins"]) == before and state["writes"] == [] and state["write_reviews"] == []
+            created = use(write)
+            assert created == {"outcome": "succeeded", "http_status": 201, "data": [{"task_id": state["task_id"]}]}
+            use(write, rejected=True)
+            assert state["writes"] == [expected] and state["write_reviews"] == [True, False]
+            assert len(state["logins"]) == before + 1
+            status = use({**workflow, "request": {**workflow["request"], "path": "/jobs/status",
+                                                  "query": created["data"][0]},
+                          "result": {"path": "/data", "columns": ["task_id", "status"]}})
+            assert status["data"] == [{"task_id": state["task_id"], "status": "complete"}]
+            assert "https" not in grants.rows()[0].scope[0].uses
             workspace.pause()
             use(workflow, rejected=True)
             audit = repr(activity.rows())
-            for value in (state["password"], state["ticket"], state["username"], *[row["name"] for row in state["rows"]]):
+            for value in (state["password"], state["ticket"], state["csrf"], state["task_id"], state["username"], *[row["name"] for row in state["rows"]]):
                 assert value not in audit
             assert all(not row.bindings for row in workspace.registrations.values())
     finally:
@@ -297,5 +363,6 @@ def check(root, hold=False):
 if __name__ == "__main__":
     import sys
     with TemporaryDirectory(prefix="keeper-result-trial-") as temporary:
-        check(Path(temporary), hold="--hold" in sys.argv)
+        check(Path(temporary), hold=bool({"--hold", "--hold-write"} & set(sys.argv)),
+              check_write="--hold-write" in sys.argv)
     print("Result usage scenario passed: private login, useful randomized inventory, consumer decision, scope and audit secrecy.")

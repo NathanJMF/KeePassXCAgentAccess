@@ -22,6 +22,7 @@ class Approval:
     project: str = ""
     requested: float = 0
     trusts_certificate: bool = False
+    write_once: bool = False
     ready: Event = field(default_factory=Event)
 
 

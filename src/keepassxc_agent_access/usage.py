@@ -42,7 +42,8 @@ def usage_action(entry, data, *, accepts_input=False, pin_executable=True):
     if kind == "https_results":
         from .result_delivery import parse_result_usage
         request = parse_result_usage(data)
-        return Action("agent-request", "Read HTTPS Results", entry, request.origin, kind=ActionType.RESULTS,
+        name = "Write via HTTPS" if request.data["request"]["method"] in HTTPS_WRITE_METHODS else "Read HTTPS Results"
+        return Action("agent-request", name, entry, request.origin, kind=ActionType.RESULTS,
                       result_request=request.canonical_json)
     if kind == "https":
         if not {"type", "url", "auth"} <= data.keys() <= {"type", "url", "auth", "method", "json", "headers", "query"}:

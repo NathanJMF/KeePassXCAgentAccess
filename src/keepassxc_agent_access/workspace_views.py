@@ -646,11 +646,13 @@ class AccessView(Gtk.Box):
 
     def _review_usage(self, ticket, *, standalone=False):
         queue = self.app.usage_approvals
-        dialog, body = _dialog(self.app, "Review Agent Usage", 620, -1)
+        title = "Review HTTPS Write" if ticket.write_once else "Review Agent Usage"
+        dialog, body = _dialog(self.app, title, 620, -1)
         dialog.set_name("keeper-access-review")
         dialog.set_position(Gtk.WindowPosition.CENTER_ON_PARENT)
         dialog.set_modal(True)
-        approve_label = "Approve and Trust Certificate" if ticket.trusts_certificate else "Approve Once"
+        approve_label = "Approve Write Once" if ticket.write_once else (
+            "Approve and Trust Certificate" if ticket.trusts_certificate else "Approve Once")
         dialog.add_buttons("Deny", Gtk.ResponseType.REJECT, approve_label, Gtk.ResponseType.ACCEPT)
         dialog.connect("key-press-event", lambda *_: True)
         dialog.connect("key-release-event", lambda *_: True)
@@ -660,6 +662,10 @@ class AccessView(Gtk.Box):
         add_label(body, "Requested by · agent-reported")
         body.pack_start(styled(_label(ticket.identity), "keeper-access-agent"), False, False, 0)
         add_label(body, ticket.project)
+        if ticket.write_once:
+            add_label(body, "This request changes data on the destination. Review the method, path and request body below.")
+            if ticket.context.note:
+                add_label(body, ticket.context.note)
         details = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
         add_activity_section(details, ticket.action, (("Scope", "\n".join(ticket.scope) or "No vaults in scope"),
                                                      ("Destination", ticket.destination)))

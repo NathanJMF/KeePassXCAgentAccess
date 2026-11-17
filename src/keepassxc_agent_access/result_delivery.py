@@ -142,7 +142,7 @@ def _body(data, *, allowed=()):
 def parse_result_usage(data):
     """Freeze a strict wire request; this is also re-run inside the worker."""
     required = {"type", "origin", "request", "result"}
-    if not isinstance(data, dict) or not required <= data.keys() <= required | {"login", "certificate_sha256"} or data["type"] != "https_results":
+    if not isinstance(data, dict) or not required <= data.keys() <= required | {"login", "certificate_sha256", "approve_write_once"} or data["type"] != "https_results":
         raise ValueError("Use a protected HTTPS result request.")
     origin = Destination.parse(data["origin"])
     if origin.path != "/":
@@ -174,6 +174,10 @@ def parse_result_usage(data):
             or request.get("method", "GET") not in HTTPS_METHODS or request["auth"] not in ("basic", "bearer", "template", "session")):
         raise ValueError("Use an HTTPS resource request and authentication method.")
     method, auth = request.get("method", "GET"), request["auth"]
+    if "approve_write_once" in data:
+        if data["approve_write_once"] is not True or method not in HTTPS_WRITE_METHODS:
+            raise ValueError("One-time write approval requires an HTTPS write method.")
+        result["approve_write_once"] = True
     body, _ = _body(request)  # Resource data cannot embed credential or session references.
     if body and method not in HTTPS_WRITE_METHODS:
         raise ValueError("This resource method does not accept a body.")
@@ -192,15 +196,21 @@ def parse_result_usage(data):
     if query:
         result["request"]["query"] = query
     projection = data["result"]
-    if not isinstance(projection, dict) or not {"columns"} <= projection.keys() <= {"path", "columns"}:
+    if (not isinstance(projection, dict) or set(projection) - {"path", "columns", "scalar"}
+            or ("columns" in projection) == ("scalar" in projection)):
         raise ValueError("Choose a result path and scalar columns.")
-    columns = projection["columns"]
+    path = _pointer(projection.get("path", ""))
+    scalar = "scalar" in projection
+    columns = [projection["scalar"]] if scalar else projection["columns"]
     if (not isinstance(columns, list) or not 1 <= len(columns) <= MAX_COLUMNS
             or any(not isinstance(name, str) or not _COLUMN.fullmatch(name)
                    or re.sub(r"[_-]", "", name).lower() in _PRIVATE_COLUMNS for name in columns)
             or len(set(columns)) != len(columns)):
         raise ValueError("Choose unique noncredential scalar field names.")
-    result["result"] = {"path": _pointer(projection.get("path", "")), "columns": list(columns)}
+    if scalar and (method not in HTTPS_WRITE_METHODS or any(
+            re.sub(r"[_-]", "", key).lower() in _PRIVATE_COLUMNS for key in path.split("/"))):
+        raise ValueError("Only write operations may return a named scalar result from a noncredential path.")
+    result["result"] = {"path": path, **({"scalar": columns[0]} if scalar else {"columns": list(columns)})}
     canonical = _json(result)
     if len(canonical.encode("ascii")) > 4096:
         raise ValueError("The protected result request exceeds the limit.")
@@ -231,7 +241,7 @@ class ResultRequest:
                 *(("Certificate SHA-256: " + data["certificate_sha256"],) if data.get("certificate_sha256") else ()),
                 *(('Private POST ' + login["path"] + ' · authentication response stays in Keeper',) if login else ()),
                 data["request"]["method"] + " " + data["request"]["path"],
-                "Return scalar fields: " + ", ".join(data["result"]["columns"]),
+                "Return scalar fields: " + ", ".join(result_fields(data["result"])),
                 "Approved endpoint supplies these fields. Credentials and private captures are excluded.")
 
 
@@ -257,9 +267,15 @@ def _variants(values):
     return result
 
 
+def result_fields(projection):
+    return [projection["scalar"]] if "scalar" in projection else projection["columns"]
+
+
 def _project(document, projection, forbidden):
     rows = _select(document, projection["path"])
-    if isinstance(rows, dict):
+    if "scalar" in projection:
+        rows = [{projection["scalar"]: rows}]
+    elif isinstance(rows, dict):
         rows = [rows]
     if not isinstance(rows, list) or len(rows) > MAX_ROWS:
         raise ValueError("Use a bounded array of result objects.")
@@ -268,7 +284,7 @@ def _project(document, projection, forbidden):
         if not isinstance(row, dict):
             raise ValueError("The selected result is not an object.")
         item = {}
-        for field in projection["columns"]:
+        for field in result_fields(projection):
             value = row.get(field)
             if (type(value) not in (str, int, float, bool, type(None))
                     or isinstance(value, str) and (len(value) > 512 or not value.isprintable())

@@ -60,6 +60,8 @@ def inventory_service():
                 self.respond({'data': {'ticket': ticket, 'csrf': csrf, 'password': password, 'username': username}})
             elif self.path == '/write' and self.headers.get('Cookie') == 'Auth=' + ticket:
                 self.respond({'data': [{'vmid': body['vmid'], 'status': 'created'}]})
+            elif self.path == '/write-echo' and self.headers.get('Cookie') == 'Auth=' + ticket:
+                self.respond({'data': ticket})
             else:
                 self.respond({'error': password}, status=401)
         def do_GET(self):
@@ -157,6 +159,15 @@ class ResultDeliveryTests(TestCase):
             self.assertEqual(result, {'outcome': 'failed'})
             self.assertEqual([row[:2] for row in site.seen], [('POST', '/login')])
 
+    def test_named_scalar_write_result_still_filters_captured_credentials(self):
+        with inventory_service() as site:
+            data = workflow(site, '/write-echo')
+            data['approve_write_once'] = True
+            data['request']['method'] = 'POST'
+            data['result'] = {'path': '/data', 'scalar': 'task_id'}
+            self.assertEqual(deliver_results(data, site.entry, lambda: True), {'outcome': 'uncertain'})
+            self.assertEqual([row[:2] for row in site.seen], [('POST', '/login'), ('POST', '/write-echo')])
+
     def test_wrong_certificate_pin_sends_no_credential_or_request(self):
         with inventory_service() as site:
             data = workflow(site)
@@ -198,6 +209,9 @@ class ResultDeliveryTests(TestCase):
             cases = [
                 {**base, 'origin': site.origin + '/path'},
                 {**base, 'result': {'path': '/data', 'columns': ['ticket']}},
+                {**base, 'approve_write_once': True},
+                {**base, 'request': {**base['request'], 'method': 'POST'},
+                 'result': {'path': '/data/ticket', 'scalar': 'task_id'}},
                 {**base, 'request': {**base['request'], 'path': '//other.invalid/'}},
                 {**base, 'request': {**base['request'], 'headers': {'Host': 'other.invalid'}}},
                 {**base, 'request': {**base['request'], 'method': 'POST', 'json': {'content': '{{session.ticket}}'}}},

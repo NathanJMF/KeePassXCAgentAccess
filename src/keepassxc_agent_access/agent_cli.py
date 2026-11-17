@@ -140,7 +140,7 @@ def _result_map(value, limit):
 
 def result_usage_request(data):
     required = {"type", "origin", "request", "result"}
-    if not required <= data.keys() <= required | {"certificate_sha256", "login"}:
+    if not required <= data.keys() <= required | {"certificate_sha256", "login", "approve_write_once"}:
         raise ValueError
     https_target(data["origin"], origin=True)
     if "certificate_sha256" in data and (not isinstance(data["certificate_sha256"], str)
@@ -173,6 +173,9 @@ def result_usage_request(data):
             or "form" in request and "json" in request):
         raise ValueError
     _result_path(request["path"])
+    write = request.get("method", "GET") in ("POST", "PUT", "PATCH", "DELETE")
+    if "approve_write_once" in data and (data["approve_write_once"] is not True or not write):
+        raise ValueError
     if request["auth"] == "session" and not captures:
         raise ValueError
     if "headers" in request:
@@ -192,10 +195,11 @@ def result_usage_request(data):
             if "{{" in encode(request[key]).decode("ascii"):
                 raise ValueError
     result = data["result"]
-    if not isinstance(result, dict) or not {"columns"} <= result.keys() <= {"path", "columns"}:
+    if (not isinstance(result, dict) or set(result) - {"path", "columns", "scalar"}
+            or ("columns" in result) == ("scalar" in result) or "scalar" in result and not write):
         raise ValueError
     result_pointer(result.get("path", ""))
-    result_columns(result["columns"])
+    result_columns([result["scalar"]] if "scalar" in result else result["columns"])
     if len(encode(data)) >= REQUEST_LIMIT:
         raise ValueError
     return data
@@ -393,8 +397,10 @@ def _validate(reply, payload):
                 if set(reply) != {"outcome", "http_status", "data"} or type(reply["http_status"]) is not int or not 200 <= reply["http_status"] < 300:
                     raise ListingError("invalid_response")
                 rows = reply["data"]
-                columns = result_columns(payload["usage"]["result"]["columns"])
-                if not isinstance(rows, list) or len(rows) > 256:
+                projection = payload["usage"]["result"]
+                scalar = "scalar" in projection
+                columns = result_columns([projection["scalar"]] if scalar else projection["columns"])
+                if not isinstance(rows, list) or len(rows) > 256 or scalar and len(rows) != 1:
                     raise ListingError("invalid_response")
                 for row in rows:
                     if not isinstance(row, dict) or set(row) != set(columns):

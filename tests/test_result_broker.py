@@ -41,7 +41,7 @@ class ResultBrokerTests(unittest.TestCase):
             self.assertTrue(gate(lambda: None))
         return {"outcome": "succeeded", "http_status": 200, "data": [{"vmid": 814, "node": "node-fresh"}]}
 
-    def reviewed(self, operation, *, inspect=lambda ticket: None):
+    def reviewed(self, operation, *, inspect=lambda ticket: None, approve=True):
         with ThreadPoolExecutor(max_workers=1) as pool:
             future = pool.submit(operation)
             deadline = monotonic() + 3
@@ -49,7 +49,7 @@ class ResultBrokerTests(unittest.TestCase):
                 sleep(.01)
             ticket, = self.engine.approvals.pending()
             inspect(ticket)
-            self.engine.approvals.resolve(ticket.id, True)
+            self.engine.approvals.resolve(ticket.id, approve)
             return future.result(3)
 
     def test_old_credential_scope_cannot_release_results(self):
@@ -77,8 +77,42 @@ class ResultBrokerTests(unittest.TestCase):
     def test_login_body_and_resource_write_each_require_their_own_scope(self):
         self.approve([self.item()])
         self.assert_code("ineligible", "use_password", entry=self.entry, vault=self.vaults[0], usage=self.request(login=True))
-        self.assert_code("ineligible", "use_password", entry=self.entry, vault=self.vaults[0],
+        self.assert_code("write_approval_required", "use_password", entry=self.entry, vault=self.vaults[0],
                          usage=self.request(request={"path": "/jobs", "auth": "bearer", "method": "POST", "json": {"task": "create"}}))
+
+    def test_one_time_write_is_exact_and_cannot_be_reused(self):
+        identifier = self.approve([self.item()])
+        self.workspace.set_review_action("read_results", False)
+        worker = self.workspace.session(self.vaults[0]).worker
+        request = self.request(approve_write_once=True, certificate_sha256="a" * 64, request={
+            "path": "/jobs", "auth": "bearer", "method": "POST", "json": {"task": "create"}})
+        original = self.grants.records[identifier].scope
+
+        def inspect(ticket):
+            self.assertTrue(ticket.write_once)
+            self.assertFalse(ticket.trusts_certificate)
+            self.assertIn("POST /jobs", ticket.scope)
+            self.assertIn('"task": "create"', "\n".join(ticket.scope))
+
+        with patch.object(worker, "use", side_effect=self.fake_worker) as send:
+            self.reviewed(lambda: self.use(request), inspect=inspect)
+            with self.assertRaises(ListingError) as denied:
+                self.reviewed(lambda: self.use(request), inspect=inspect, approve=False)
+            self.assertEqual(denied.exception.code, "declined")
+            send.assert_called_once()
+        self.assertEqual(self.grants.records[identifier].scope, original)
+        self.assertEqual({row["outcome"] for row in self.activity.rows(action="Write via HTTPS")}, {"Succeeded", "Denied"})
+
+    def test_one_time_write_preserves_scope_and_inline_auth_limits(self):
+        self.approve([self.item()])
+        request = self.request(login=True, approve_write_once=True)
+        request["request"].update(method="POST", form={"name": "job"})
+        self.assert_code("ineligible", "use_password", entry=self.entry, vault=self.vaults[0], usage=request)
+        request.pop("login")
+        request["request"].update(auth="bearer", headers={})
+        request["origin"] = "https://other.example.test/"
+        self.assert_code("ineligible", "use_password", entry=self.entry, vault=self.vaults[0], usage=request)
+        self.assertEqual(self.engine.approvals.pending(), ())
 
     def test_pin_is_reviewed_once_then_auto_approve_survives_reload(self):
         self.approve([self.item()])
