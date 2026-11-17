@@ -60,6 +60,7 @@ class ScopedBroker:
         self.request_classes = Counter()
         self.next_limit_notice = 0
         self.command_slots = BoundedSemaphore(2)
+        self.certificate_reviews = set()
 
     @contextmanager
     def _command_slot(self):
@@ -215,9 +216,25 @@ class ScopedBroker:
                 binding = SimpleNamespace(action=action)
             review_operation = binding.action.kind.review_operation if binding else operation
             review_usage = self.workspace.requires_review(review_operation)
+            review_policy = review_usage
+            certificate_pin = None
+            certificate_trusted = False
+            certificate_committed = False
+            certificate_expected = ()
+            credential_revision = registration.credential_revision(entry) if registration and entry else None
             if binding is not None and binding.action.kind == ActionType.RESULTS:
-                review_usage = (review_usage or self.workspace.requires_review("use_https")
-                                or "certificate_sha256" in decode(binding.action.result_request.encode("utf-8")))
+                # Saved actions already bind the owner's exact certificate in
+                # their reviewed action revision; dynamic uses need scope trust.
+                if usage is not None:
+                    certificate_pin = decode(binding.action.result_request.encode("utf-8")).get("certificate_sha256")
+                if certificate_pin:
+                    certificate_expected = self.grants.result_certificate_pins(
+                        token, chosen, entry, credential_revision, usage_origin(binding.action.url))
+                    certificate_trusted = bool(certificate_expected) and all(
+                        pin == certificate_pin for pin in certificate_expected)
+                    certificate_committed = certificate_trusted
+                review_policy = review_usage or self.workspace.requires_review("use_https")
+                review_usage = review_policy or certificate_pin is not None and not certificate_trusted
             if usage is not None:
                 origin = None
                 if binding.action.kind != ActionType.STDIN:
@@ -246,6 +263,10 @@ class ScopedBroker:
                     workflow = decode(binding.action.result_request.encode("utf-8"))
                     scope_summary += (" · " + workflow["request"].get("method", "GET")
                                       + " · Fields: " + ", ".join(workflow["result"]["columns"]))
+                    if certificate_pin:
+                        previous_pins = sorted({pin for pin in certificate_expected if pin})
+                        scope_summary += (" · Certificate SHA-256: " + certificate_pin
+                                          + " · Previously trusted: " + (", ".join(previous_pins) or "None"))
             elif permitted and binding.action.request_summary:
                 scope_summary = binding.action.request_summary
             if input_info is not None:
@@ -266,6 +287,11 @@ class ScopedBroker:
                 if (self.workspace.paused or self.workspace.generation != generation
                         or current.generation != token.generation or current.status != "active"):
                     return False
+                if certificate_committed:
+                    pins = self.grants.result_certificate_pins(
+                        current, chosen, entry, credential_revision, usage_origin(binding.action.url))
+                    if not pins or any(pin != certificate_pin for pin in pins):
+                        return False
                 if operation == "list_vaults":
                     if self._catalog(current) != registered:
                         return False
@@ -286,6 +312,7 @@ class ScopedBroker:
                 return effect()
 
         dispatch_started = False
+        certificate_reservation = None
         try:
             if token.status != "active":
                 raise ListingError("ineligible")
@@ -315,6 +342,21 @@ class ScopedBroker:
                         raise ListingError("ineligible") from None
             if not guard(live):
                 raise ListingError("revoked")
+            if certificate_pin and not review_policy:
+                with self.workspace.mutex:
+                    certificate_expected = self.grants.result_certificate_pins(
+                        self.grants.records[token.id], chosen, entry, credential_revision, usage_origin(binding.action.url))
+                    certificate_trusted = bool(certificate_expected) and all(
+                        pin == certificate_pin for pin in certificate_expected)
+                    certificate_committed = certificate_trusted
+                    review_usage = not certificate_trusted
+                    if review_usage:
+                        key = (token.id, token.generation, chosen, entry, credential_revision,
+                               usage_origin(binding.action.url), certificate_pin)
+                        if key in self.certificate_reviews:
+                            raise ListingError("busy")
+                        self.certificate_reviews.add(key)
+                        certificate_reservation = key
             if review_usage:
                 if operation == "list_vaults":
                     scope = tuple(registered.values())
@@ -341,8 +383,8 @@ class ScopedBroker:
                         if input_info is not None:
                             scope += (artifact_summary,)
                         if binding.action.kind == ActionType.RESULTS:
-                            if "certificate_sha256" in decode(binding.action.result_request.encode("utf-8")):
-                                scope += ("Verify this certificate fingerprint. A supplied certificate pin always requires owner review.",)
+                            if certificate_pin and not certificate_trusted:
+                                scope += ("Verify this certificate fingerprint. Approving also trusts this certificate for this token, entry and destination. Future requests follow your Auto Approve settings. A changed certificate requires review again.",)
                             scope += ("Release only the selected fields from this approved endpoint. Login responses, passwords and session tickets stay private.",
                                       "Trust this endpoint to supply these fields. Filters cannot guarantee secrecy if a service deliberately encodes credentials in its results.")
                         if binding.action.opaque:
@@ -356,11 +398,14 @@ class ScopedBroker:
                 ticket = Approval(event, uid, context, name + (f" · {binding.action.name}" if binding else ""),
                                   scope, (self._usage_destination(binding.action) if usage is not None else binding.action.destination)
                                   if binding else None, monotonic() + self.approvals.timeout,
-                                  identity=token.identity, project=token.project, requested=time())
+                                  identity=token.identity, project=token.project, requested=time(),
+                                  trusts_certificate=bool(certificate_pin and not certificate_trusted))
                 result = self.approvals.wait(ticket, lambda: guard(live))
                 if result != "approved":
                     raise ListingError(result)
-            self.activity.authorize(event, "Approved once" if review_usage else "Approved token")
+            self.activity.authorize(event, ("Approved once; trust certificate on verified dispatch"
+                                           if certificate_pin and not certificate_trusted else "Approved once")
+                                    if review_usage else "Approved token")
             if not guard(live):
                 raise ListingError("revoked")
             if operation == "list_vaults":
@@ -370,8 +415,16 @@ class ScopedBroker:
             else:
                 def gate(send):
                     def audit_and_send():
-                        nonlocal dispatch_started
+                        nonlocal dispatch_started, certificate_committed
                         if not dispatch_started:
+                            if certificate_pin and not certificate_trusted:
+                                # The trusted worker reaches this gate only after
+                                # TLS has verified the exact reviewed fingerprint.
+                                # Persist under the same live guard as dispatch.
+                                self.grants.trust_result_certificate(
+                                    token.id, token.generation, chosen, entry, credential_revision,
+                                    usage_origin(binding.action.url), certificate_pin, certificate_expected)
+                                certificate_committed = True
                             self.activity.dispatched(event)
                             dispatch_started = True
                         send()
@@ -431,6 +484,10 @@ class ScopedBroker:
                 outcome = "Stale"
             self.activity.finish(event, outcome)
             raise
+        finally:
+            if certificate_reservation is not None:
+                with self.workspace.mutex:
+                    self.certificate_reviews.discard(certificate_reservation)
 
     @staticmethod
     def _usage_destination(action):

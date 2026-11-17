@@ -650,7 +650,8 @@ class AccessView(Gtk.Box):
         dialog.set_name("keeper-access-review")
         dialog.set_position(Gtk.WindowPosition.CENTER_ON_PARENT)
         dialog.set_modal(True)
-        dialog.add_buttons("Deny", Gtk.ResponseType.REJECT, "Approve Once", Gtk.ResponseType.ACCEPT)
+        approve_label = "Approve and Trust Certificate" if ticket.trusts_certificate else "Approve Once"
+        dialog.add_buttons("Deny", Gtk.ResponseType.REJECT, approve_label, Gtk.ResponseType.ACCEPT)
         dialog.connect("key-press-event", lambda *_: True)
         dialog.connect("key-release-event", lambda *_: True)
         require_mouse_decisions(dialog)
@@ -668,7 +669,8 @@ class AccessView(Gtk.Box):
         scroll.set_max_content_height(360)
         scroll.add(details)
         body.pack_start(scroll, True, True, 0)
-        add_label(body, "Approval applies to this operation only.")
+        add_label(body, "Approves this operation and remembers its verified certificate for this token and resource."
+                  if ticket.trusts_certificate else "Approval applies to this operation only.")
 
         def check_pending():
             if ticket not in queue.pending():

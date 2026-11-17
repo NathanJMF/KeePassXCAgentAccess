@@ -111,7 +111,7 @@ def check(root, hold=False):
     runtime.mkdir(mode=0o700)
     uid, gid = subordinate_ids()
     state = {"username": "user-" + secrets.token_hex(16), "password": "password-" + secrets.token_hex(24),
-             "ticket": "ticket-" + secrets.token_hex(24), "logins": [], "requests": []}
+             "ticket": "ticket-" + secrets.token_hex(24), "logins": [], "requests": [], "reviews": []}
     vmids = random.sample(range(1000, 60000), 3)
     state["rows"] = [
         {"vmid": vmids[0], "name": "guest-" + secrets.token_hex(4), "node": "node-" + secrets.token_hex(3), "status": "stopped", "free_mib": random.randint(4096, 12000)},
@@ -172,6 +172,8 @@ def check(root, hold=False):
                 second = workspace.add(replace(target, database=duplicate), PASSWORD, False, name="Meadow Inventory Copy")
             workspace.lock(second)
             workspace.pause(False)
+            workspace.set_review_action("read_results", False)
+            assert not workspace.requires_review("read_results") and not workspace.requires_review("use_https")
             assert all(not record.bindings for record in workspace.registrations.values())
             broker = ListingBroker(BrokerConfig(runtime / "keeper-scoped-runner/broker.sock", uid), lambda: engine, engine)
             broker.start()
@@ -193,7 +195,9 @@ def check(root, hold=False):
                     for ticket in engine.approvals.pending():
                         # Independently approve only this fixture's actual certificate.
                         declared = " ".join(ticket.scope)
-                        engine.approvals.resolve(ticket.id, state["fingerprint"] in declared)
+                        approved = state["fingerprint"] in declared
+                        if engine.approvals.resolve(ticket.id, approved):
+                            state["reviews"].append(approved)
             owner = Thread(target=owner_review, daemon=True)
             owner.start()
             if hold:
@@ -207,6 +211,7 @@ def check(root, hold=False):
                     print(json.dumps({"decision_matches_live_inventory": selected == expected,
                                       "authenticated_inventory_reads": sum(path == "/inventory" and ok for path, ok in state["requests"]),
                                       "successful_private_logins": sum(state["logins"]),
+                                      "certificate_approval_prompts": len(state["reviews"]),
                                       "configured_actions": sum(len(row.bindings) for row in workspace.registrations.values())}), flush=True)
                     assert selected == expected, "Fresh agent did not choose the eligible live inventory row"
                     return
@@ -244,12 +249,22 @@ def check(root, hold=False):
             decision.write_text(json.dumps(selected))
             assert state["logins"] == [True] and state["requests"] == [("/inventory", True)]
             assert all(set(row) == set(workflow["result"]["columns"]) for row in result["data"])
+            # The first verified owner approval remembers this token/resource's
+            # certificate. Repeat reads (including a token-store reload) follow
+            # Auto Approve without spawning more approval dialogs.
+            assert state["reviews"] == [True]
+            assert use(workflow)["data"] == result["data"]
+            with workspace.mutex:
+                grants = engine.grants = Grants(workspace, activity)
+            assert use(workflow)["data"] == result["data"]
+            assert state["reviews"] == [True] and len(state["logins"]) == 3
             invoke(profile, "use", "--entry", entry_id, "--vault", second, "--json", request=workflow, rejected=True)
             use({**workflow, "origin": "https://unapproved.invalid/"}, rejected=True)
-            assert len(state["logins"]) == 1
+            assert len(state["logins"]) == 3
             # Owner review independently rejects a substituted certificate pin.
             use({**workflow, "certificate_sha256": "0" * 64}, rejected=True)
-            assert len(state["logins"]) == 1
+            assert state["reviews"] == [True, False]
+            assert len(state["logins"]) == 3
             echo = {**workflow, "request": {**workflow["request"], "path": "/echo"}}
             assert use(echo, failed=True)["outcome"] == "failed"
             workspace.pause()

@@ -106,7 +106,8 @@ class ApprovalPresenter:
     def _show(self, request):
         dialog, content = _dialog(self.app, "Agent request", 560, 350)
         self.dialog, self.identifier = dialog, request.id
-        dialog.add_buttons("Decline", Gtk.ResponseType.REJECT, "Approve once", Gtk.ResponseType.ACCEPT)
+        approve_label = "Approve and Trust Certificate" if request.trusts_certificate else "Approve once"
+        dialog.add_buttons("Decline", Gtk.ResponseType.REJECT, approve_label, Gtk.ResponseType.ACCEPT)
         dialog.set_default_response(Gtk.ResponseType.REJECT)
         lines = [request.action, f"Agent OS UID {request.uid}"]
         if request.destination:

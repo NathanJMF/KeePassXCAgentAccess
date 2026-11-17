@@ -7,6 +7,7 @@ from unittest.mock import patch
 
 import test_scoped_broker as base
 from keepassxc_agent_access.protocol import ListingError
+from keepassxc_agent_access.grants import Grants
 
 
 class ResultBrokerTests(unittest.TestCase):
@@ -79,15 +80,83 @@ class ResultBrokerTests(unittest.TestCase):
         self.assert_code("ineligible", "use_password", entry=self.entry, vault=self.vaults[0],
                          usage=self.request(request={"path": "/jobs", "auth": "bearer", "method": "POST", "json": {"task": "create"}}))
 
-    def test_pin_still_needs_review_after_owner_enables_auto_result_release(self):
+    def test_pin_is_reviewed_once_then_auto_approve_survives_reload(self):
         self.approve([self.item()])
         self.workspace.set_review_action("read_results", False)
         self.assertFalse(self.workspace.requires_review("read_results"))
         worker = self.workspace.session(self.vaults[0]).worker
         with patch.object(worker, "use", side_effect=self.fake_worker):
             self.assertEqual(self.use(self.request())["data"][0]["vmid"], 814)
-            result = self.reviewed(lambda: self.use(self.request(certificate_sha256="a" * 64)))
+            workflow = self.request(certificate_sha256="a" * 64)
+            def inspect(ticket):
+                self.assertTrue(ticket.trusts_certificate)
+                self.assertIn("Future requests follow your Auto Approve settings", " ".join(ticket.scope))
+            result = self.reviewed(lambda: self.use(workflow), inspect=inspect)
             self.assertEqual(result["data"][0]["vmid"], 814)
+            self.assertEqual(self.use(workflow)["data"][0]["vmid"], 814)
+            self.grants = self.engine.grants = Grants(self.workspace, self.activity)
+            self.assertEqual(self.use(workflow)["data"][0]["vmid"], 814)
+            self.assertEqual(self.engine.approvals.pending(), ())
+            self.assertFalse(self.invoke("access_status", details=True)["scope"][0].get("result_certificates"))
+        events = self.activity.rows(action="Read HTTPS Results")
+        self.assertEqual(sum(row["decision"] == "Approved token" for row in events), 3)
+        self.assertEqual(sum("trust certificate" in (row["decision"] or "") for row in events), 1)
+        self.assertIn("Certificate SHA-256: " + "a" * 64, events[0]["scope"])
+
+    def test_changed_pin_and_different_token_require_their_own_review(self):
+        self.approve([self.item()])
+        self.approve([self.item()], index=1)
+        self.workspace.set_review_action("read_results", False)
+        worker = self.workspace.session(self.vaults[0]).worker
+        with patch.object(worker, "use", side_effect=self.fake_worker):
+            self.reviewed(lambda: self.use(self.request(certificate_sha256="a" * 64)))
+            self.reviewed(lambda: self.use(self.request(certificate_sha256="a" * 64), index=1))
+            self.reviewed(lambda: self.use(self.request(certificate_sha256="b" * 64)))
+            # Rotation replaces the old certificate, rather than accumulating trust.
+            self.reviewed(lambda: self.use(self.request(certificate_sha256="a" * 64)))
+
+    def test_known_pin_still_obeys_results_https_and_global_review(self):
+        self.approve([self.item()])
+        self.workspace.set_review_action("read_results", False)
+        worker = self.workspace.session(self.vaults[0]).worker
+        workflow = self.request(certificate_sha256="a" * 64)
+        def once(ticket):
+            self.assertFalse(ticket.trusts_certificate)
+        with patch.object(worker, "use", side_effect=self.fake_worker):
+            self.reviewed(lambda: self.use(workflow))
+            for operation in ("read_results", "use_https"):
+                self.workspace.set_review_action(operation, True)
+                self.reviewed(lambda: self.use(workflow), inspect=once)
+                self.workspace.set_review_action(operation, False)
+            self.workspace.set_review_usage(True)
+            self.reviewed(lambda: self.use(workflow), inspect=once)
+
+    def test_wrong_peer_no_dispatch_does_not_remember_certificate(self):
+        identifier = self.approve([self.item()])
+        self.workspace.set_review_action("read_results", False)
+        worker = self.workspace.session(self.vaults[0]).worker
+        workflow = self.request(certificate_sha256="a" * 64)
+        with patch.object(worker, "use", return_value={"outcome": "failed"}):
+            self.reviewed(lambda: self.use(workflow))
+        self.assertEqual(self.grants.records[identifier].scope[0].result_certificates, ())
+        with patch.object(worker, "use", side_effect=self.fake_worker):
+            self.reviewed(lambda: self.use(workflow))
+
+    def test_permission_change_discards_remembered_certificates(self):
+        from uuid import uuid4
+        identifier = self.approve([self.item()])
+        self.workspace.set_review_action("read_results", False)
+        worker = self.workspace.session(self.vaults[0]).worker
+        workflow = self.request(certificate_sha256="a" * 64)
+        with patch.object(worker, "use", side_effect=self.fake_worker):
+            self.reviewed(lambda: self.use(workflow))
+            change_id = str(uuid4())
+            self.invoke("request_access", request={"identity": "Fixture agent 0", "project": "Fixture",
+                        "items": [self.item()], "change_id": change_id})
+            change = self.grants.records[identifier].pending_change
+            self.grants.decide(identifier, [self.grants.choices(item)[0] for item in change.items], change_id=change_id)
+            self.assertEqual(self.grants.records[identifier].scope[0].result_certificates, ())
+            self.reviewed(lambda: self.use(workflow))
 
     def test_revocation_between_login_and_resource_send_blocks_data(self):
         identifier = self.approve([self.item(("https_results", "https_body"))])

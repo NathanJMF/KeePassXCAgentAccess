@@ -153,6 +153,7 @@ class Scope:
     uses: tuple[str, ...] = ()
     origins: tuple[str, ...] = ()
     use_revision: str | None = None
+    result_certificates: tuple[tuple[str, str], ...] = ()
 
     def __post_init__(self):
         if self.use_revision is not None and (not isinstance(self.use_revision, str)
@@ -163,6 +164,16 @@ class Scope:
         uses, origins = credential_permissions(self.uses, self.origins, group=self.group)
         object.__setattr__(self, "uses", uses)
         object.__setattr__(self, "origins", origins)
+        certificates = self.result_certificates
+        if (not isinstance(certificates, (list, tuple)) or len(certificates) > MAX_ORIGINS
+                or any(not isinstance(pair, (list, tuple)) or len(pair) != 2
+                       or not isinstance(pair[0], str) or pair[0] not in origins
+                       or not isinstance(pair[1], str) or not re.fullmatch(r"[0-9a-f]{64}", pair[1])
+                       for pair in certificates)
+                or len({pair[0] for pair in certificates}) != len(certificates)
+                or certificates and ("https_results" not in uses or self.use_revision is None)):
+            raise ValueError("Invalid owner-approved result certificates.")
+        object.__setattr__(self, "result_certificates", tuple(sorted(tuple(pair) for pair in certificates)))
 
     def audit_summary(self):
         operations = [name for name in ("metadata", *OPTIONAL_METADATA_FIELDS) if getattr(self, name)]
@@ -259,6 +270,42 @@ class Grants:
         if record is None or record.uid != uid:
             raise ListingError("ineligible")
         return record
+
+    @staticmethod
+    def result_certificate_pins(record, vault, entry, revision, origin):
+        return tuple(dict(scope.result_certificates).get(origin) for scope in record.scope
+                     if (scope.vault, scope.entry, scope.use_revision) == (vault, entry, revision)
+                     and "https_results" in scope.uses and origin in scope.origins)
+
+    def trust_result_certificate(self, identifier, generation, vault, entry, revision, origin, fingerprint, expected):
+        """Owner approval of a concrete workflow also pins its TLS identity to this scope.
+
+        This is never an enrollment field: an agent cannot attest to certificate
+        trust. Call only after the owner approves a ticket displaying this pin
+        and the notice explaining future use under Auto Approve.
+        """
+        with self.workspace.mutex:
+            record = self.records[identifier]
+            if record.status != "active" or record.generation != generation:
+                raise ListingError("revoked")
+            pins = self.result_certificate_pins(record, vault, entry, revision, origin)
+            if not pins or (pins != expected and any(pin != fingerprint for pin in pins)):
+                # Another owner decision replaced the certificate while this
+                # dialog was open. A stale approval must not restore old trust.
+                raise ListingError("revoked")
+            scopes = []
+            matched = False
+            for scope in record.scope:
+                if ((scope.vault, scope.entry, scope.use_revision) == (vault, entry, revision)
+                        and "https_results" in scope.uses and origin in scope.origins):
+                    certificates = dict(scope.result_certificates)
+                    certificates[origin] = fingerprint
+                    scope = replace(scope, result_certificates=tuple(certificates.items()))
+                    matched = True
+                scopes.append(scope)
+            if not matched:
+                raise ListingError("revoked")
+            self._put(replace(record, scope=tuple(scopes)))
 
     def enroll(self, credential, uid, payload, attribution):
         try:

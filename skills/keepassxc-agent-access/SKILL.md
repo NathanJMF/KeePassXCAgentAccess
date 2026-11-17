@@ -135,7 +135,7 @@ The `result.path` JSON pointer identifies an array of objects; `columns` selects
 
 Results require owner review by default, including installations whose Auto Approve was already on. The owner can explicitly enable **Results - Read** auto approval; this trusts the approved server and fields chosen by agents, while existing HTTPS review rules still apply. A protected workflow may return `uncertain` after a dispatched write if its response cannot be safely verified. Check the remote effect before retrying it.
 
-For a service with a private certificate, add `certificate_sha256` containing the exact SHA-256 fingerprint in lowercase hexadecimal. The owner must review the fingerprint and endpoint together on each use, even when result auto approval is enabled. Keeper checks the certificate before sending credentials; do not use a blanket TLS-verification bypass.
+For a service with a private certificate, add `certificate_sha256` containing the exact SHA-256 fingerprint in lowercase hexadecimal. The owner first reviews the fingerprint and endpoint using **Approve and Trust Certificate**. After Keeper verifies that certificate, it remembers the fingerprint for this token, entry, credential revision and destination; subsequent requests follow the owner's Auto Approve, Results - Read and HTTPS settings. A changed fingerprint requires review again, and approving a replacement replaces the previous fingerprint. Permission changes reset this remembered trust. Ordinary requests without a pin still require system-trusted TLS with hostname verification. Keeper checks TLS before sending credentials; do not use a blanket TLS-verification bypass. If a request is pending, wait for its decision instead of repeatedly submitting it.
 
 ### Commands
 
