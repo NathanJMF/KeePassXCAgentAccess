@@ -10,6 +10,7 @@ from threading import Event, RLock
 from uuid import uuid4
 
 from .access_settings import Action, AccessStore, TOKEN_AUTO_APPROVAL_OPTIONS, label, uuid_text
+from .discovery import DiscoveryCatalog
 from .keyring import KeyringError
 from .settings import SettingsError, SettingsStore, write_private_json
 from .vault import UnlockCancelled, VaultChanged, VaultError, VaultTarget, open_vault
@@ -84,6 +85,7 @@ class Workspace:
         self.token_auto_approval_acknowledged = preferences.token_auto_approval_acknowledged
         self.generation = 0
         self._load()
+        self.discovery = DiscoveryCatalog(self.directory / "discovery.json")
 
     def _load(self):
         try:
@@ -229,6 +231,7 @@ class Workspace:
                         self._replace(updated, pending)
                     previous = self.sessions.get(identifier)
                     self.sessions[identifier] = session
+                    self.discovery.remember(identifier, session.groups, session.entries)
                     worker = None
             return identifier
         finally:
@@ -315,6 +318,8 @@ class Workspace:
             with self.mutex:
                 record = self.registrations.get(identifier)
                 current = self.sessions.get(identifier)
+                if record is not None and (current is session or current is None):
+                    self.discovery.remember(identifier, result["snapshot"]["groups"], result["snapshot"]["entries"])
                 if current is session:
                     snapshot = result["snapshot"]
                     self.sessions[identifier] = Unlocked(session.worker, tuple(snapshot["groups"]),
@@ -439,6 +444,7 @@ class Workspace:
             record = self.registrations[identifier]
             records = {key: value for key, value in self.registrations.items() if key != identifier}
             self._save(records, self.pending + ((record.item,) if record.item else ()))
+            self.discovery.forget(identifier)
             self.lock(identifier)
         self.cleanup()
 

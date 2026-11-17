@@ -42,6 +42,23 @@ class WorkspaceTests(unittest.TestCase):
         self.workspace = Workspace(self.root, self.keyring)
         self.addCleanup(self.workspace.lock_all)
 
+    def test_discovery_cache_survives_lock_restart_and_edits_without_private_fields(self):
+        identifier = self.workspace.add(VaultTarget(self.primary), self.password, False)
+        catalog = self.workspace.discovery.read(self.workspace)
+        self.assertFalse(catalog["vaults"][0]["cached"])
+        self.workspace.put_entry(identifier, str(self.group.uuid), title="New catalog title",
+                                 username="Hidden user", password="Hidden password", notes="Hidden notes")
+        self.workspace.lock(identifier)
+        reopened = Workspace(self.root, self.keyring)
+        cached = reopened.discovery.read(reopened)["vaults"][0]
+        self.assertTrue(cached["locked"] and cached["cached"] and cached["available"])
+        self.assertIn("New catalog title", [entry["title"] for entry in cached["entries"]])
+        raw = (self.root / "discovery.json").read_text()
+        for secret in ("Hidden user", "Hidden password", "Hidden notes", str(self.primary), self.password):
+            self.assertNotIn(secret, raw)
+        reopened.remove(identifier)
+        self.assertEqual(reopened.discovery.read(reopened), {"vaults": []})
+
     def test_copies_and_independent_sessions(self):
         first = self.workspace.add(VaultTarget(self.primary), self.password, True)
         second = self.workspace.add(VaultTarget(self.copy), self.password, False)

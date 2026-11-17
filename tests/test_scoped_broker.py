@@ -53,13 +53,15 @@ class ScopedBrokerTests(unittest.TestCase):
             self.workspace.registrations[vault] = Registration(vault, str(index), VaultTarget(Path(f"fixture-{index}.kdbx")), None, None)
             worker = Worker(self.entry)
             owner_row = {**worker.row, "username": f"fixture-user-{index}", "url": f"https://fixture-{index}.example.test",
-                         "password": "fixture-password", "notes": "fixture-notes"}
+                         "password": "fixture-password", "notes": "fixture-notes", "group": str(uuid4())}
             self.workspace.sessions[vault] = Unlocked(worker, (), (owner_row,))
         self.workspace.save_binding(self.vaults[0], self.action)
         self.workspace.pause(False)
 
     def invoke(self, operation, index=0, before=None, uid=1500, **fields):
-        data = {"version": 1, "operation": operation, "credential": self.secrets[index], **fields}
+        data = {"version": 1, "operation": operation, **fields}
+        if operation != "discover":
+            data["credential"] = self.secrets[index]
         output = []
 
         def deliver(frame, guard):
@@ -73,6 +75,37 @@ class ScopedBrokerTests(unittest.TestCase):
 
         immediate = self.engine(data, uid, None, live, live, deliver)
         return decode(immediate) if immediate else (output[0] if output else None)
+
+    def test_discovery_requires_no_grant_and_projects_only_names(self):
+        from keepassxc_agent_access.discovery import snapshot
+        group = str(uuid4())
+        for vault in self.vaults:
+            old = self.workspace.sessions[vault]
+            row = {**old.entries[0], "group": group}
+            self.workspace.sessions[vault] = Unlocked(old.worker, ({"id": group, "parent": None, "name": "Folder"},), (row,))
+        result = self.invoke("discover")
+        self.assertEqual(len(result["vaults"]), len(self.vaults))
+        raw = json.dumps(result)
+        for forbidden in ("fixture-user", "https://fixture", "fixture-password", "fixture-notes", "fixture-0.kdbx"):
+            self.assertNotIn(forbidden, raw)
+        self.assertEqual(self.grants.rows(), [])
+        self.assertEqual(set(result["vaults"][0]["entries"][0]), {"id", "title", "group"})
+        self.assertEqual(self.activity.rows(action="Discover resources")[0]["outcome"], "Succeeded")
+        self.workspace.pause()
+        with self.assertRaises(ListingError) as error:
+            self.invoke("discover")
+        self.assertEqual(error.exception.code, "paused")
+
+    def test_discovery_rejects_echoed_credentials_before_writing_activity(self):
+        with self.assertRaises(ListingError):
+            self.invoke("discover", credential=self.secrets[0], context={"note": self.secrets[0]})
+        self.assertEqual(self.activity.rows(action="Discover resources"), [])
+
+    def test_discovery_rejects_sensitive_fields_and_rechecks_pause(self):
+        with self.assertRaises(ListingError):
+            self.invoke("discover", fields=["username"])
+        with self.assertRaises(ListingError):
+            self.invoke("discover", before=lambda: self.workspace.pause())
 
     def enroll(self, items, index=0, *, identity=None):
         return self.invoke("request_access", index, request={

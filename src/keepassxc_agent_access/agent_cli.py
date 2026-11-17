@@ -97,6 +97,31 @@ def _validate(reply, payload):
         ):
             raise ListingError("invalid_response")
         return reply
+    if operation == "discover":
+        if set(reply) != {"vaults"} or not isinstance(reply["vaults"], list):
+            raise ListingError("invalid_response")
+        for vault in reply["vaults"]:
+            if (not isinstance(vault, dict)
+                    or set(vault) != {"id", "name", "locked", "cached", "available", "groups", "entries"}
+                    or not isinstance(vault["name"], str)
+                    or any(type(vault[key]) is not bool for key in ("locked", "cached", "available"))
+                    or not isinstance(vault["groups"], list) or not isinstance(vault["entries"], list)):
+                raise ListingError("invalid_response")
+            edit_uuid(vault["id"])
+            for group in vault["groups"]:
+                if (not isinstance(group, dict) or set(group) != {"id", "name", "parent"}
+                        or not isinstance(group["name"], str)):
+                    raise ListingError("invalid_response")
+                edit_uuid(group["id"])
+                if group["parent"] is not None:
+                    edit_uuid(group["parent"])
+            for entry in vault["entries"]:
+                if (not isinstance(entry, dict) or set(entry) != {"id", "title", "group"}
+                        or not isinstance(entry["title"], str)):
+                    raise ListingError("invalid_response")
+                edit_uuid(entry["id"])
+                edit_uuid(entry["group"])
+        return reply
     if operation == "list_vaults":
         if set(reply) != {"vaults"} or not isinstance(reply["vaults"], list):
             raise ListingError("invalid_response")
@@ -178,6 +203,11 @@ def list_entries(endpoint):
 def main(argv=None):
     parser = argparse.ArgumentParser(prog="keepassxc-agent")
     topics = parser.add_subparsers(required=True)
+    discover = topics.add_parser("discover", help="List all vault, group and entry names before requesting access")
+    discover.add_argument("--json", action="store_true", required=True, help="Emit JSON")
+    discover.add_argument("--vault", help="Return the catalog for one vault")
+    discover.add_argument("--summary", action="store_true", help="List vault names and status without group or entry rows")
+    discover.set_defaults(operation="discover")
     access = topics.add_parser("access", help="Request and check a scoped token")
     commands = access.add_subparsers(required=True)
     enrollment = commands.add_parser("request", help="Read a new token or permission-change request from stdin")
@@ -242,6 +272,8 @@ def main(argv=None):
         payload["vault"] = options.vault
     if getattr(options, "field", None):
         payload["fields"] = list(dict.fromkeys(options.field))
+    if getattr(options, "summary", False):
+        payload["summary"] = True
     context = {}
     for key in ("model", "chat", "chat_id", "note"):
         raw = os.environ.get(f"KEEPASSXC_AGENT_{key.upper()}", "")
@@ -268,9 +300,9 @@ def main(argv=None):
                 payload["request"] = edit_request(submitted) if options.operation == "request_edit" else submitted
             except (ValueError, RecursionError):
                 raise ListingError("invalid_request") from None
-        if token_file or options.operation in (
+        if options.operation != "discover" and (token_file or options.operation in (
             "request_access", "access_status", "list_vaults", "request_edit", "edit_status",
-        ):
+        )):
             scope = payload.get("request")
             create = options.operation == "request_access" and isinstance(scope, dict) and "change_id" not in scope
             payload["credential"] = credential(token_file, create=create)

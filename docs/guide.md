@@ -52,6 +52,12 @@ Keeper checks for external changes before replacing the encrypted file. If Keepe
 
 Keep Keeper’s installation, update files, desktop and keyring sockets, startup configuration, and owner settings outside the agent’s writable or controllable environment. Expose only the scoped Keeper tools, or isolate every other agent capability using a separate unprivileged OS account or an independently enforced sandbox. This includes shell execution, filesystem access, desktop and accessibility automation, and any escalation path. An agent that can act as the desktop owner has authority over Keeper’s settings, approvals, and installed code. The runner isolates its own MCP subprocess. The MCP host must control the runner command, profile, and startup environment. Approve installs and software updates from a trusted owner session.
 
+## Discover names before requesting access
+
+Agents call `discover` or `keepassxc-agent discover --json` to list all registered vaults, groups, and entry titles with their UUIDs. Discovery works before token registration and is logged in Activity. It requires the admitted broker account and resumed agent access. Auto Approve and individual token status govern protected operations; discovery exposes this same catalog to every admitted agent account, including a profile whose token has been disabled or removed.
+
+Keeper stores a private names-only catalog at each successful unlock and edit. Locked vaults return that last-known structure with `cached: true`. A vault that has never been unlocked shows `available: false`. Cached names can be stale until the vault is unlocked again. Usernames, URLs, credentials and edits require scoped access. Discovery contains no notes or configured actions. Use discovered vault and entry IDs in access requests. For large catalogs, use `discover --summary --json` for vault names, then `discover --vault VAULT_UUID --json` for each vault’s structure. Existing `list_vaults` and `list_entries` retain their token-scoped behavior.
+
 ## Configure a custom agent runtime
 
 For a separately managed runner, run the tray under the desktop owner's account and start the agent in a separate, unprivileged OS account. Keep the vault, key file, settings, keyring, desktop session, and process memory inaccessible to the runner. Install the CLI and source in a location the runner can read but cannot change.

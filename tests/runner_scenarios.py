@@ -97,6 +97,15 @@ def check_tools(runner, anchor, target, endpoint, private, expected, url, calls,
         broker.start()
         subprocess.run([*NAMESPACE, "test", "!", "-r", str(target.database)], check=True)
         assert invoke("access_status") == {"status": "uninitialized"}
+        workspace.pause(False)
+        discovered = invoke("discover", {"note": "Find synthetic names before requesting any access"})
+        assert discovered["vaults"][0]["id"] == vault
+        assert any(entry["id"] == row["id"] for entry in discovered["vaults"][0]["entries"])
+        assert not grants.rows()
+        assert invoke("access_status") == {"status": "uninitialized"}
+        invoke("list_entries", {"vault": vault}, error=True)
+        workspace.pause()
+        invoke("discover", error=True)
         request = {"identity": "Runner fixture", "project": "Synthetic",
                    "items": [{"metadata": True, "vault": vault, "entry": row["id"], "action": "health"}]}
         request["items"].append({"vault": vault, "entry": api_entry, "action": "api"})
@@ -195,4 +204,4 @@ def check_tools(runner, anchor, target, endpoint, private, expected, url, calls,
 if __name__ == "__main__":
     with TemporaryDirectory(prefix="keeper-runner-") as root:
         check(Path(root))
-    print("Runner scenario passed: bundled runner, all seven stdio tools, separate peer UID, scoped TLS and fixed API delivery, persisted edits, and revocation")
+    print("Runner scenario passed: bundled runner, all eight stdio tools, separate peer UID, scoped TLS and fixed API delivery, persisted edits, and revocation")

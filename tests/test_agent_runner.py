@@ -59,7 +59,7 @@ class RunnerTests(TestCase):
         self.assertEqual(replies[0]["result"]["serverInfo"]["name"], "Keeper")
         self.assertEqual(replies[0]["result"]["protocolVersion"], "2025-06-18")
         self.assertEqual({tool["name"] for tool in replies[1]["result"]["tools"]},
-                         {"access_status", "request_access", "request_edit", "edit_status",
+                         {"discover", "access_status", "request_access", "request_edit", "edit_status",
                           "list_vaults", "list_entries", "use_password"})
         self.assertEqual(payload(replies[2]), MISSING)
         self.assertEqual(stat.S_IMODE(self.profile.stat().st_mode), 0o700)

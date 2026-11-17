@@ -21,6 +21,8 @@ On Ubuntu GNOME, clone this repository and run one of these commands from the ch
 
 **Security boundary.** Keep every agent tool outside your desktop owner account and session. The bundled runner isolates the Keeper connection. Agents with owner-session shell or desktop privileges can act with the owner’s authority. Use a tools-only agent or isolate its remaining capabilities and escalation paths. See [agent isolation](docs/guide.md#isolate-the-agent-runtime).
 
+Agents can discover vault, group, and entry names before requesting access. Discovery shows names and references, and respects **Pause Agent Access**.
+
 Expand a token to see which vaults, groups, and entries it covers. Open its details to review requested permissions, or disable or remove a token you previously approved. Use **Pause Agent Access** to stop agents from using their tokens.
 
 ![Keeper's Agent Access view showing pending and approved requests and an expanded token scope](docs/screenshots/access.png)

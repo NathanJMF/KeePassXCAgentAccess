@@ -84,6 +84,10 @@ class ScopedBroker:
                 pass
             elif operation == "edit_status" and keys == {"id"}:
                 pass
+            elif operation == "discover" and keys <= {"vault", "summary"}:
+                vault = uuid_text(payload["vault"]) if "vault" in keys else None
+                if type(payload.get("summary", False)) is not bool:
+                    raise ValueError
             elif operation in ("access_status", "list_vaults") and not keys:
                 pass
             elif operation == "list_entries" and keys <= {"vault", "fields"}:
@@ -107,6 +111,10 @@ class ScopedBroker:
                 raise ValueError
         except (ValueError, TypeError, KeyError, AttributeError):
             raise ListingError("invalid_request") from None
+        if operation == "discover":
+            if "credential" in payload:
+                raise ListingError("invalid_request")
+            return self._discover(uid, context, live, deliver, vault=vault, summary=payload.get("summary", False))
         credential = payload.get("credential")
         if credential is None:
             raise ListingError("token_required")
@@ -295,6 +303,44 @@ class ScopedBroker:
                 outcome = "Expired"
             self.activity.finish(event, outcome)
             raise
+
+    def _discover(self, uid, context, live, deliver, *, vault=None, summary=False):
+        with self.workspace.mutex:
+            self._charge_request(("discovery", uid), uid, active=False)
+            if not live():
+                raise ListingError("revoked")
+            event = self.activity.begin(uid, context, "Discover resources", None)
+            generation = self.workspace.generation
+            references = self.workspace.discovery.references(self.workspace)
+            catalog = None
+            if not self.workspace.paused:
+                catalog = self.workspace.discovery.read(self.workspace, vault=vault, summary=summary)
+
+        def guard(effect):
+            with self.workspace.mutex:
+                current = self.workspace.discovery.references(self.workspace)
+                if (self.workspace.paused or self.workspace.generation != generation
+                        or len(current) != len(references)
+                        or any(old is not new for old, new in zip(references, current))):
+                    return False
+                return effect()
+
+        try:
+            if self.workspace.paused:
+                raise ListingError("paused")
+            reply = encode(catalog)
+            if len(reply) > RESPONSE_LIMIT:
+                raise ListingError("too_large")
+            if not guard(live):
+                raise ListingError("revoked")
+            self.activity.authorize(event, "Discovery catalog")
+            if not deliver(reply, guard):
+                raise ListingError("revoked")
+            self.activity.finish(event, "Succeeded")
+        except ListingError as error:
+            self.activity.finish(event, {"paused": "Paused", "too_large": "Too large"}.get(error.code, "Revoked"))
+            raise
+        return None
 
     def _catalog(self, token):
         identifiers = {scope.vault for scope in token.scope}
