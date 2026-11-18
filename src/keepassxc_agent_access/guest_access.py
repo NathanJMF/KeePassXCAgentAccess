@@ -43,6 +43,11 @@ class GuestAccess:
         self.jobs = {}
         self.pending = Counter()
 
+    @staticmethod
+    def login_key(grant, receipt, fingerprint):
+        return sha256(encode([grant.token_id, grant.token_generation, grant.generation, grant.vault,
+                              grant.entry, grant.revision, receipt, fingerprint])).hexdigest()
+
     def current(self, grant):
         token = self.broker.grants.records.get(grant.token_id)
         registration = self.workspace.registrations.get(grant.vault)
@@ -123,7 +128,14 @@ class GuestAccess:
             if operation == "guest_release":
                 del self.jobs[job_key]
                 self.activity.finish(event, "Released")
-                return encode({"id": receipt, "outcome": "released"})
+
+        if operation == "guest_release":
+            if "login" in request.data:
+                try:
+                    grant.session.worker.forget_guest_login(self.login_key(grant, receipt, fingerprint))
+                except ListingError:
+                    pass  # A busy worker discards the private cache at its deadline.
+            return encode({"id": receipt, "outcome": "released"})
 
         def guard(effect):
             with self.workspace.mutex:
@@ -199,7 +211,11 @@ class GuestAccess:
                 return guard(lambda: dispatch(record_dispatch))
 
             action = usage_action(grant.entry, request.data)
-            result = grant.session.worker.use(action, gate, private_result=private_job)
+            options = {"private_result": private_job}
+            if "login" in request.data:
+                options["login_context"] = {"key": self.login_key(grant, receipt, fingerprint),
+                                            "expires": grant.expires, "reuse": not starting}
+            result = grant.session.worker.use(action, gate, **options)
             if starting:
                 status = result["outcome"]
                 job = None

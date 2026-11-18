@@ -146,7 +146,11 @@ Open **Access → Review Next** to get back to pending requests, including ones 
 
 `keeper-agent console view --console HANDLE --status` reports whether the console pixels changed since the previous view or check. The agent decides whether to request an image with `--png` or `--json`. Status checks are listed separately from image views in Activity.
 
+`console wait --console HANDLE --timeout 30 --json` waits for a frame change and returns status only. The first observed frame can count as a change. A frame change does not establish that the guest is ready. Use a structured guest job status when available.
+
 **Guest Commands - Run** governs command APIs with a separate status endpoint. The review shows the pinned destination, credential, exact POST and GET requests, command field, and results the agent can see. One approval covers submitting a command and checking its job. With the switch and Auto Approve enabled, the owner can allow any command at that exact endpoint for a bounded window. The approved credential and service must limit commands to the intended guest. The switch starts off, and the agent can still request individual commands for review. Job IDs stay private. The installed skill shows how to use `keeper-agent guest run` and `guest status` with a write receipt.
+
+`guest wait --receipt UUID --until exited --equals-json true --timeout 30 --json` waits for an approved result field. In the pinned synthetic guest test, submitting a job and checking twice uses one private login. A short cache stays in the vault worker for that exact authorized job. Every status request still verifies TLS and the live grant.
 
 ## Use a credential with a local command
 

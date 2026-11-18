@@ -16,7 +16,7 @@ from keepassxc_agent_access.agent_cli import _validate
 from keepassxc_agent_access.agent_runner import invocation
 from keepassxc_agent_access.guest_request import parse_guest_request
 from keepassxc_agent_access.protocol import ListingError, decode
-from keepassxc_agent_access.result_delivery import deliver_results
+from keepassxc_agent_access.result_delivery import GuestLoginCache, deliver_results
 import test_result_broker as broker_tests
 from tls_fixture import tls_service
 
@@ -153,9 +153,12 @@ class GuestTests(TestCase):
                 else:
                     self.send_error(404)
 
-        def worker_use(action, gate, *, private_result=None):
+        login_cache = GuestLoginCache()
+
+        def worker_use(action, gate, *, private_result=None, login_context=None):
             return deliver_results(json.loads(action.result_request), SimpleNamespace(username="", password=secret),
-                                   lambda: gate(lambda: None), private_result=private_result)
+                                   lambda: gate(lambda: None), private_result=private_result,
+                                   login_context=login_context, login_cache=login_cache)
 
         with TemporaryDirectory() as base, tls_service(Path(base), handler=Service) as (certificate, url, _):
             origin = url + "/"
@@ -179,12 +182,13 @@ class GuestTests(TestCase):
                 status = self.invoke("guest_status", receipt=reply["id"])
                 self.assertEqual(_validate(status, {"operation": "guest_status", "receipt": reply["id"]})["data"],
                                  [{"exited": True, "exitcode": 0, "out-data": "guest ready\nservice ready\n"}])
+                self.assertEqual(self.invoke("guest_status", receipt=reply["id"]), status)
                 self.assertEqual(self.invoke("write_status", receipt=reply["id"])["status"], "succeeded")
                 with self.assertRaises(ListingError) as refused:
                     self.run_guest(workflow=descriptor, command=command, receipt=reply["id"])
                 self.assertEqual(refused.exception.code, "receipt_exists")
             self.assertEqual(seen, [("/login", {"password": secret}), (start_path, {"command": ["/bin/bash", "-c", command]}),
-                                    ("/login", {"password": secret}), (status_path, {"pid": [str(remote_id)]})])
+                                    (status_path, {"pid": [str(remote_id)]}), (status_path, {"pid": [str(remote_id)]})])
             for field in ("private", "private_text"):
                 leak = {**descriptor["poll"], "result": {"path": "/data", "columns": [field]}}
                 request = parse_guest_request({**descriptor, "poll": leak}).status(remote_id)

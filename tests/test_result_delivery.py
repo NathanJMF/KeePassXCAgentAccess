@@ -13,7 +13,7 @@ from tempfile import TemporaryDirectory
 from time import monotonic, sleep
 from types import SimpleNamespace
 from unittest import TestCase
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 from urllib.parse import parse_qs, quote
 
 from keepassxc_agent_access.result_delivery import (
@@ -124,6 +124,32 @@ def workflow(fixture, path='/inventory', columns=None):
 
 
 class ResultDeliveryTests(TestCase):
+    def test_cached_guest_login_expires_before_a_delayed_dispatch(self):
+        connection = Mock()
+        cache = Mock()
+        cache.get.return_value = (11, {"session.ticket": "private_ticket", "session.csrf": "private_csrf"}, ())
+        clock = 10
+
+        @contextmanager
+        def connected(_origin, _pin, deadline):
+            self.assertEqual(deadline, 11)
+            yield connection
+
+        def delayed_gate():
+            nonlocal clock
+            clock = 11
+            return True
+
+        site = SimpleNamespace(origin="https://synthetic.test", pin="a" * 64)
+        item = SimpleNamespace(username="sample", password="fixture-only")
+        with patch("keepassxc_agent_access.result_delivery._connection", side_effect=connected), \
+                patch("keepassxc_agent_access.result_delivery.monotonic", side_effect=lambda: clock):
+            answer = deliver_results(workflow(site), item, delayed_gate, private_result=97,
+                                     login_context={"key": "synthetic", "expires": 100, "reuse": True},
+                                     login_cache=cache)
+        self.assertEqual(answer, {"outcome": "failed"})
+        connection.request.assert_not_called()
+
     def test_private_form_login_returns_fresh_inventory_and_not_credentials(self):
         with inventory_service() as site:
             calls = []

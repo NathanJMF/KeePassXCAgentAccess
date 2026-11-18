@@ -14,7 +14,7 @@ import math
 import re
 import socket
 import ssl
-from threading import Timer
+from threading import Lock, Timer
 from time import monotonic
 from urllib.parse import quote, quote_plus, urlencode
 
@@ -29,6 +29,8 @@ MAX_ROWS = 256
 MAX_COLUMNS = 16
 WORKFLOW_SECONDS = 16
 SOCKET_SECONDS = 4
+GUEST_LOGIN_SECONDS = 60
+GUEST_LOGIN_LIMIT = 32
 _NAME = re.compile(r"[A-Za-z][A-Za-z0-9_]{0,31}")
 _COLUMN = re.compile(r"[A-Za-z_][A-Za-z0-9_.-]{0,79}")
 _REFERENCE = re.compile(r"\{\{(password|username|session\.[A-Za-z][A-Za-z0-9_]{0,31})\}\}")
@@ -286,6 +288,8 @@ def _project(document, projection, forbidden, private_number=None, *, guest_outp
             raise ValueError("The selected result is not an object.")
         item = {}
         for field in result_fields(projection):
+            if guest_output and field not in row:
+                continue
             value = row.get(field)
             if isinstance(value, str):
                 text_valid = (all(char.isprintable() or char in "\n\t\r" for char in value)
@@ -439,7 +443,41 @@ def _private_strings(document):
     return result
 
 
-def deliver_results(config, entry, dispatch, *, allow_username=False, private_result=None):
+class GuestLoginCache:
+    """Private, non-sliding cache for sign-ins tied to a single guest job."""
+
+    def __init__(self):
+        self._lock = Lock()
+        self._sessions = {}
+
+    def get(self, key, signature):
+        with self._lock:
+            saved = self._sessions.get(key)
+            if saved and saved[0] == signature and monotonic() < saved[1]:
+                return saved[1:4]
+        return None
+
+    def forget(self, key, timer=None):
+        with self._lock:
+            saved = self._sessions.get(key)
+            if saved and (timer is None or saved[-1] is timer):
+                self._sessions.pop(key)[-1].cancel()
+
+    def put(self, key, signature, stop, captured, forbidden):
+        expires = min(stop, monotonic() + GUEST_LOGIN_SECONDS)
+        if expires <= monotonic():
+            return
+        with self._lock:
+            if key in self._sessions or len(self._sessions) >= GUEST_LOGIN_LIMIT:
+                return
+            timer = Timer(max(0, expires - monotonic()), lambda: self.forget(key, timer))
+            timer.daemon = True
+            self._sessions[key] = (signature, expires, dict(captured), tuple(forbidden), timer)
+            timer.start()
+
+
+def deliver_results(config, entry, dispatch, *, allow_username=False, private_result=None,
+                    login_context=None, login_cache=None):
     """Release only the concrete approved projection; dispatch gates every send."""
     sent_write = False
     write_status = None
@@ -464,22 +502,38 @@ def deliver_results(config, entry, dispatch, *, allow_username=False, private_re
             forbidden.append(username)
         deadline = monotonic() + WORKFLOW_SECONDS
         pin = data.get("certificate_sha256")
-        if "login" in data:
+        request = data["request"]
+        cached = None
+        signature = None
+        if login_context and login_cache is not None and "login" in data and pin:
+            signature = _json([data["origin"], pin, data["login"], allow_username])
+            if request["method"] == "GET" and login_context["reuse"]:
+                cached = login_cache.get(login_context["key"], signature)
+        new_capture = None
+        if cached:
+            cached_until, session, private_fields = cached
+            deadline = min(deadline, cached_until)
+            values.update(session)
+            forbidden.extend(private_fields)
+        elif "login" in data:
             login = data["login"]
             headers, body = _request_body(login, values)
-            forbidden.append(body.decode("ascii"))
-            status, document = _http(data["origin"], pin, deadline, "POST", login["path"], headers, body, dispatch, forbidden)
+            private_fields = [body.decode("ascii")]
+            status, document = _http(data["origin"], pin, deadline, "POST", login["path"], headers, body, dispatch, private_fields)
             if not 200 <= status < 300:
                 return {"outcome": "failed", "http_status": status}
-            forbidden.extend(value for value in _private_strings(document)
-                             if not allow_username or value != username)
+            private_fields.extend(value for value in _private_strings(document) if not allow_username or value != username)
+            session = {}
             for key, pointer in login["capture"].items():
                 value = _select(document, pointer)
                 if not isinstance(value, str) or not value or len(value.encode("utf-8")) > 4096 or not value.isprintable():
                     raise ValueError("The private authentication response is invalid.")
-                values["session." + key] = value
-                forbidden.append(value)
-        request = data["request"]
+                session["session." + key] = value
+                private_fields.append(value)
+            values.update(session)
+            forbidden.extend(private_fields)
+            if signature is not None:
+                new_capture = (session, private_fields)
         headers = dict(_render(request.get("headers", {}), values))
         if request["auth"] == "basic":
             if ":" in username or any(ord(char) < 32 or ord(char) == 127 for char in username + password):
@@ -502,6 +556,8 @@ def deliver_results(config, entry, dispatch, *, allow_username=False, private_re
         path = request["path"] + ("?" + urlencode(request["query"]) if request.get("query") else "")
         def gate():
             nonlocal sent_write
+            if cached and monotonic() >= cached_until:
+                return False
             permitted = dispatch()
             if permitted and request["method"] in HTTPS_WRITE_METHODS:
                 sent_write = True
@@ -514,8 +570,12 @@ def deliver_results(config, entry, dispatch, *, allow_username=False, private_re
 
         status, document = _http(data["origin"], pin, deadline, request["method"], path, headers, body, gate, forbidden, observe)
         if not 200 <= status < 300:
+            if cached and status in (401, 403):
+                login_cache.forget(login_context["key"])
             return {"outcome": "failed", "http_status": status}
         projected = _project(document, data["result"], forbidden, private_number, guest_output=private_result is not None)
+        if new_capture:
+            login_cache.put(login_context["key"], signature, login_context["expires"], *new_capture)
         return {"outcome": "succeeded", "http_status": status, "data": projected}
     except (OSError, HTTPException, ValueError, KeyError, IndexError, TypeError, AttributeError, RecursionError):
         if write_status is not None:

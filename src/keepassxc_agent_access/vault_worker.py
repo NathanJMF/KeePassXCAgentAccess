@@ -18,7 +18,7 @@ from .console_request import open_console
 from .entry_projection import active_entry, entry_listing, owner_snapshot
 from .https_action import authenticate, failure, prepare_https
 from .protocol import RESPONSE_LIMIT, decode, encode
-from .result_delivery import deliver_results, parse_result_usage
+from .result_delivery import GuestLoginCache, deliver_results, parse_result_usage
 from .vault_edits import EDIT_LIMIT, EditError, database_file, file_stamp, stage_edit
 
 
@@ -49,11 +49,16 @@ def load_vault():
             return
     print("ready", vault.root_group.uuid, fingerprint, flush=True)
     consoles = {}
+    guest_logins = GuestLoginCache()
     while line := sys.stdin.buffer.readline(EDIT_LIMIT):
         if line == b"list_entries\n":
             reply(entry_listing(vault))
             continue
         data = json.loads(line)
+        if data["operation"] == "forget_guest_login":
+            guest_logins.forget(data["key"])
+            reply(encode({"forgotten": True}))
+            continue
         if data["operation"] == "owner_edit":
             if not writable:
                 reply(encode({"error": "read_only"}))
@@ -88,7 +93,8 @@ def load_vault():
         elif data["operation"] == "use_password":
             if data["kind"] == ActionType.RESULTS:
                 use_results(entry, data["result_request"], data["url"],
-                            allow_username=data.get("allow_username") is True, private_result=data.get("private_result"))
+                            allow_username=data.get("allow_username") is True, private_result=data.get("private_result"),
+                            login_context=data.get("login_context"), login_cache=guest_logins)
             elif data["kind"] == ActionType.STDIN:
                 use_command(entry, data["command"], data["executable_sha256"])
             elif data["kind"] == ActionType.NETWORK_PROMPT:
@@ -137,7 +143,8 @@ def use(entry, url, kind, method, request_json, *, headers=(), query=()):
         reply(encode(failure()))
 
 
-def use_results(entry, descriptor, origin, *, allow_username=False, private_result=None):
+def use_results(entry, descriptor, origin, *, allow_username=False, private_result=None, login_context=None,
+                login_cache=None):
     if entry is None:
         reply(encode(failure()))
         return
@@ -148,7 +155,8 @@ def use_results(entry, descriptor, origin, *, allow_username=False, private_resu
         def dispatch():
             reply(encode({"ready": True}))
             return sys.stdin.buffer.readline(16) == b"dispatch\n"
-        reply(encode(deliver_results(request, entry, dispatch, allow_username=allow_username, private_result=private_result)))
+        reply(encode(deliver_results(request, entry, dispatch, allow_username=allow_username, private_result=private_result,
+                                     login_context=login_context, login_cache=login_cache)))
     except (OSError, HTTPException, ValueError, TypeError, KeyError):
         reply(encode(failure()))
 

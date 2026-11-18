@@ -9,14 +9,14 @@ from hashlib import sha256
 import os
 import socket
 import sys
-from time import monotonic
+from time import monotonic, sleep
 from uuid import UUID, uuid5
 from urllib.parse import urlsplit
 
 from .runner_token import UninitializedProfile, credential
 from .protocol import (
     CLIENT_TIMEOUT, CONSOLE_OPERATIONS, CONSOLE_SECONDS, ERRORS, GUEST_OPERATIONS, LIST_REQUEST, ListingError,
-    MAX_CONSOLE_REUSE_MINUTES, MAX_GUEST_REUSE_MINUTES, MAX_GUEST_TEXT,
+    MAX_CONSOLE_REUSE_MINUTES, MAX_GUEST_REUSE_MINUTES, MAX_GUEST_TEXT, MAX_WAIT_SECONDS,
     REQUEST_LIMIT, REQUEST_TIMEOUT, RESPONSE_LIMIT, UPLOAD_LIMIT, WORKFLOW_OPERATIONS,
     decode, encode, receive, remaining, validate_command,
 )
@@ -334,7 +334,7 @@ def _validate_result_rows(rows, columns=None, *, scalar=False, text_limit=512):
     for row in rows:
         if not isinstance(row, dict) or (columns is not None and set(row) != set(columns)):
             raise ListingError("invalid_response")
-        if columns is None:
+        if columns is None and row:
             result_columns(list(row))
         for value in row.values():
             if (value is not None and type(value) not in (str, bool, int, float)
@@ -580,14 +580,15 @@ def _validate(reply, payload):
     return reply
 
 
-def request(endpoint, payload, *, input_data=None):
+def request(endpoint, payload, *, input_data=None, deadline=None):
     if not endpoint or not os.path.isabs(endpoint):
         raise ListingError()
 
-    deadline = monotonic() + CLIENT_TIMEOUT
+    bounded = deadline is not None
+    deadline = monotonic() + CLIENT_TIMEOUT if not bounded else deadline
     try:
         with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as connection:
-            connection.settimeout(REQUEST_TIMEOUT)
+            connection.settimeout(min(REQUEST_TIMEOUT, remaining(deadline)))
             connection.connect(endpoint)
             connection.settimeout(remaining(deadline))
             connection.sendall(encode(payload))
@@ -596,6 +597,10 @@ def request(endpoint, payload, *, input_data=None):
                 connection.settimeout(remaining(deadline))
                 connection.sendall(input_data)
                 response = receive(connection, RESPONSE_LIMIT, deadline)
+    except TimeoutError:
+        if bounded and monotonic() >= deadline:
+            raise ListingError("wait_elapsed") from None
+        raise ListingError() from None
     except (OSError, EOFError):
         raise ListingError() from None
     except (ValueError, RecursionError):
@@ -608,6 +613,35 @@ def request(endpoint, payload, *, input_data=None):
 
 def list_entries(endpoint):
     return request(endpoint, LIST_REQUEST)
+
+
+def wait_status(endpoint, payload, seconds, *, field=None, expected=None):
+    deadline = monotonic() + seconds
+    delay = 1
+    last = None
+    while monotonic() < deadline:
+        try:
+            result = request(endpoint, payload, deadline=deadline)
+        except ListingError as error:
+            if error.code == "wait_elapsed":
+                break
+            if error.code != "busy":
+                raise
+        else:
+            last = result
+            if result.get("outcome") == "failed":
+                return {**result, "wait": "failed"}
+            if field is None:
+                if result["changed"]:
+                    return {**result, "wait": "changed"}
+            elif any(field in row and type(row[field]) is type(expected) and row[field] == expected
+                     for row in result["data"]):
+                return {**result, "wait": "matched"}
+        sleep(max(0, min(delay, deadline - monotonic())))
+        delay = min(delay * 2, 5)
+    if last is None:
+        raise ListingError("wait_elapsed")
+    return {**{key: value for key, value in last.items() if key != "data"}, "wait": "timed_out"}
 
 
 def main(argv=None):
@@ -688,7 +722,7 @@ def main(argv=None):
                          help=f"Ask to reopen this pinned connection for up to {MAX_CONSOLE_REUSE_MINUTES} minutes")
     opening.add_argument("--json", action="store_true", required=True)
     opening.set_defaults(operation="console_open")
-    for verb in ("view", "input", "close"):
+    for verb in ("view", "input", "close", "wait"):
         command = commands.add_parser(verb)
         command.add_argument("--console", required=True, type=_request_id)
         if verb == "view":
@@ -698,7 +732,11 @@ def main(argv=None):
             output.add_argument("--status", action="store_true", help="Report screen changes without returning an image")
         else:
             command.add_argument("--json", action="store_true", required=True)
-        command.set_defaults(operation="console_" + verb)
+        if verb == "wait":
+            command.add_argument("--timeout", type=int, default=30, metavar="SECONDS")
+            command.set_defaults(operation="console_view", status=True)
+        else:
+            command.set_defaults(operation="console_" + verb)
     guest = topics.add_parser("guest", help="Run or check commands at an approved guest endpoint")
     commands = guest.add_subparsers(required=True)
     command = commands.add_parser("run", help="Read a guest workflow and command from stdin as JSON")
@@ -711,7 +749,12 @@ def main(argv=None):
     status.set_defaults(operation="guest_status")
     release = commands.add_parser("release", help="Give up this profile's job status handle")
     release.set_defaults(operation="guest_release")
-    for subcommand in (command, status, release):
+    wait = commands.add_parser("wait", help="Wait for a projected status field to equal a JSON scalar")
+    wait.add_argument("--until", required=True, metavar="FIELD")
+    wait.add_argument("--equals-json", required=True, metavar="VALUE")
+    wait.add_argument("--timeout", type=int, default=30, metavar="SECONDS")
+    wait.set_defaults(operation="guest_status")
+    for subcommand in (command, status, release, wait):
         subcommand.add_argument("--receipt", required=True, type=_request_id)
         subcommand.add_argument("--json", action="store_true", required=True)
     run = topics.add_parser("run", help="Use a Keeper credential with an approved isolated command")
@@ -727,6 +770,22 @@ def main(argv=None):
     run.add_argument("command", nargs=argparse.REMAINDER, help="The exact approved executable and arguments")
     run.set_defaults(operation="use_password")
     options = parser.parse_args(argv)
+    timeout = getattr(options, "timeout", None)
+    expected = None
+    if timeout is not None:
+        if not 1 <= timeout <= MAX_WAIT_SECONDS:
+            parser.error(f"--timeout needs a duration from 1 to {MAX_WAIT_SECONDS} seconds")
+        if options.operation == "guest_status":
+            try:
+                result_columns([options.until])
+                if len(options.equals_json) > MAX_GUEST_TEXT:
+                    raise ValueError
+                expected = decode(options.equals_json.encode("utf-8"))
+                if expected is not None and (type(expected) not in (str, int, float, bool)
+                        or type(expected) is float and not math.isfinite(expected)):
+                    raise ValueError
+            except (ValueError, RecursionError):
+                parser.error("Provide a result field and one JSON scalar.")
     if hasattr(options, "command"):
         try:
             args = options.command[1:] if options.command[:1] == ["--"] else options.command
@@ -866,7 +925,11 @@ def main(argv=None):
             payload["credential"] = credential(token_file, create=create)
         if len(encode(payload)) > REQUEST_LIMIT:
             raise ListingError("too_large")
-        result = request(os.environ.get("KEEPASSXC_AGENT_SOCKET"), payload, input_data=input_data)
+        endpoint = os.environ.get("KEEPASSXC_AGENT_SOCKET")
+        if timeout is not None:
+            result = wait_status(endpoint, payload, timeout, field=getattr(options, "until", None), expected=expected)
+        else:
+            result = request(endpoint, payload, input_data=input_data)
         sys.stdout.buffer.write(b64decode(result["png_base64"]) if getattr(options, "png", False) else encode(result))
     except UninitializedProfile as error:
         if options.operation == "access_status":

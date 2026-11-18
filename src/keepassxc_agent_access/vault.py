@@ -185,12 +185,13 @@ class VaultSession:
         with self._exchange(request, WORKER_TIMEOUT) as read:
             return decode(read())["entry"]
 
-    def use(self, action, gate, *, input_path=None, allow_username=False, private_result=None):
+    def use(self, action, gate, *, input_path=None, allow_username=False, private_result=None, login_context=None):
         request = encode({"operation": "use_password", "entry": action.entry,
                           "url": action.url, "kind": action.kind, "command": action.command,
                           "method": action.method, "request_json": action.request_json,
                           "result_request": action.result_request, "allow_username": bool(allow_username),
                           "private_result": private_result,
+                          "login_context": login_context,
                           "headers": action.headers, "query": action.query, "opaque": action.opaque, "environment": action.environment, "prompt_contains": action.prompt_contains,
                           "browser": asdict(action.browser) if action.browser else None,
                           "executable_sha256": action.executable_sha256, "prompt_variable": action.prompt_variable,
@@ -258,6 +259,11 @@ class VaultSession:
     def console(self, request, gate):
         steps = 4 if request["operation"] == "console_open" else 1
         return self._gated_exchange(encode(request), gate, steps, 42 if steps == 4 else 10)
+
+    def forget_guest_login(self, key):
+        with self._exchange(encode({"operation": "forget_guest_login", "key": key}), WORKER_TIMEOUT) as read:
+            if decode(read()) != {"forgotten": True}:
+                raise ListingError("invalid_response")
 
     def _gated_exchange(self, request, gate, steps, timeout):
         with self._exchange(request, timeout) as read:

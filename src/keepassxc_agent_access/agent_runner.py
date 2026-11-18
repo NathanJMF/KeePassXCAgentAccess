@@ -12,8 +12,8 @@ import sys
 from uuid import UUID
 
 from .agent_cli import EDIT_OPERATIONS, ENTRY_FIELDS, CREDENTIAL_USE_TYPES, USE_TYPES, edit_request, edit_uuid, usage_request
-from .protocol import (CLIENT_TIMEOUT, ERRORS, ListingError, MAX_GUEST_REUSE_MINUTES, MAX_GUEST_TEXT, REQUEST_LIMIT, UPLOAD_LIMIT,
-                       decode, encode, validate_command)
+from .protocol import (CLIENT_TIMEOUT, ERRORS, ListingError, MAX_CONSOLE_REUSE_MINUTES, MAX_GUEST_REUSE_MINUTES,
+                       MAX_GUEST_TEXT, MAX_WAIT_SECONDS, REQUEST_LIMIT, UPLOAD_LIMIT, decode, encode, validate_command)
 from .runner_token import UninitializedProfile, open_profile
 
 
@@ -24,7 +24,8 @@ PROTOCOLS = ("2025-06-18", "2025-03-26", "2024-11-05")
 
 def tool(name, description, properties=None, *, required=(), read_only=True):
     properties = dict(properties or {})
-    if name not in ("access_status", "edit_status", "write_status", "guest_status", "workflow_status"):
+    if name not in ("access_status", "edit_status", "write_status", "guest_status", "guest_wait", "console_wait",
+                    "workflow_status"):
         properties["note"] = {"type": "string", "minLength": 1, "maxLength": 180,
                               "description": "Short audit reason. Keep credentials and private values out of notes."}
     return {
@@ -158,6 +159,36 @@ OPERATIONS = {
         "guest_release", "Give up this guest job's status handle. The write receipt stays available.",
         {"receipt": REFERENCE}, required=("receipt",), read_only=False,
     )),
+    "guest_wait": (("guest", "wait"), tool(
+        "guest_wait", "Wait for a selected status field on an approved guest job.",
+        {"receipt": REFERENCE, "until": {"type": "string"}, "equals": {"type": ["null", "boolean", "integer", "number", "string"]},
+         "timeout": {"type": "integer", "minimum": 1, "maximum": MAX_WAIT_SECONDS}},
+        required=("receipt", "until", "equals"),
+    )),
+    "console_open": (("console", "open"), tool(
+        "console_open", "Open an approved guest console using the pinned connection descriptor.",
+        {"vault": REFERENCE, "entry": REFERENCE, "request": {"type": "object"},
+         "reuse_minutes": {"type": "integer", "minimum": 1, "maximum": MAX_CONSOLE_REUSE_MINUTES}},
+        required=("vault", "entry", "request"), read_only=False,
+    )),
+    "console_view": (("console", "view"), tool(
+        "console_view", "Check for console changes. Set image to true to request an image.",
+        {"console": REFERENCE, "image": {"type": "boolean"}}, required=("console",),
+    )),
+    "console_wait": (("console", "wait"), tool(
+        "console_wait", "Wait for a console frame to change without returning any pixels.",
+        {"console": REFERENCE, "timeout": {"type": "integer", "minimum": 1, "maximum": MAX_WAIT_SECONDS}},
+        required=("console",),
+    )),
+    "console_input": (("console", "input"), tool(
+        "console_input", "Send an ordered list of key, text or pointer events to an approved guest console.",
+        {"console": REFERENCE, "events": {"type": "array", "items": {"type": "object"}}},
+        required=("console", "events"), read_only=False,
+    )),
+    "console_close": (("console", "close"), tool(
+        "console_close", "Close this profile's approved guest console.",
+        {"console": REFERENCE}, required=("console",), read_only=False,
+    )),
     "workflow_request": (("workflows", "request"), tool(
         "workflow_request", "Ask the owner to review a bounded set of fixed HTTPS writes, guest commands and console opens.",
         {"request": {"type": "object", "description": "Pinned HTTPS workflow manifest from the Keeper skill."}},
@@ -215,12 +246,36 @@ def invocation(name, arguments):
     if usage is not None and "input_base64" in arguments:
         local_command = validate_command(usage["command"])
     command = [CLI, "run" if local_command is not None else tokens[0], *tokens[1:], "--json"]
-    for key in ("vault", "entry"):
+    for key in ("vault", "entry", "console"):
         if key in arguments:
             value = arguments[key]
             if not isinstance(value, str) or len(value) > 36:
                 raise ValueError
             command.append(f"--{key}={UUID(value)}")
+    if "timeout" in arguments:
+        timeout = arguments["timeout"]
+        if type(timeout) is not int or not 1 <= timeout <= MAX_WAIT_SECONDS:
+            raise ValueError
+        command.append(f"--timeout={timeout}")
+    if name == "guest_wait":
+        until, expected = arguments["until"], arguments["equals"]
+        if not isinstance(until, str) or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_.-]{0,79}", until):
+            raise ValueError
+        if expected is not None and type(expected) not in (str, bool, int, float):
+            raise ValueError
+        command.extend((f"--until={until}", "--equals-json=" + encode(expected).decode("ascii").rstrip()))
+    if name == "console_view":
+        image = arguments.get("image", False)
+        if type(image) is not bool:
+            raise ValueError
+        if not image:
+            command[command.index("--json")] = "--status"
+    if "reuse_minutes" in arguments:
+        minutes = arguments["reuse_minutes"]
+        maximum = MAX_CONSOLE_REUSE_MINUTES if name == "console_open" else MAX_GUEST_REUSE_MINUTES
+        if type(minutes) is not int or not 1 <= minutes <= maximum:
+            raise ValueError
+        command.append(f"--reuse-for={minutes}")
     for flag in ("summary", "details"):
         if flag in arguments:
             if type(arguments[flag]) is not bool:
@@ -261,11 +316,10 @@ def invocation(name, arguments):
         if not isinstance(arguments["workflow"], dict) or not isinstance(arguments["guest_command"], str):
             raise ValueError
         request = {"workflow": arguments["workflow"], "command": arguments["guest_command"]}
-        if "reuse_minutes" in arguments:
-            minutes = arguments["reuse_minutes"]
-            if type(minutes) is not int or not 1 <= minutes <= MAX_GUEST_REUSE_MINUTES:
-                raise ValueError
-            command.append(f"--reuse-for={minutes}")
+    if name == "console_input":
+        if not isinstance(arguments["events"], list):
+            raise ValueError
+        request = arguments["events"]
     data = encode(request) if request is not None else encode(usage) if usage is not None else b""
     if usage is not None and "input_base64" in arguments:
         command.extend((f"--origin={usage['origin']}", f"--prompt-variable={usage['prompt_variable']}"))
@@ -343,8 +397,13 @@ class AgentRunner:
             try:
                 reply = decode(result.stdout)
                 if isinstance(reply, dict):
+                    if params.get("name") == "console_view" and arguments.get("image") is True and not result.returncode:
+                        image = reply.pop("png_base64")
+                        content = tool_result(encode(reply).decode("ascii").rstrip())
+                        content["content"].append({"type": "image", "data": image, "mimeType": "image/png"})
+                        return content
                     return tool_result(encode(reply).decode("ascii").rstrip(), bool(result.returncode))
-            except (ValueError, RecursionError):
+            except (ValueError, RecursionError, KeyError):
                 pass
         try:
             diagnostic = result.stderr.decode("utf-8").strip()
