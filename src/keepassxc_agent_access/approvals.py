@@ -27,6 +27,7 @@ class Approval:
     reuse_minutes: int = 0
     guest_command: bool = False
     workflow_review: bool = False
+    provision_account: bool = False
     ready: Event = field(default_factory=Event)
 
 

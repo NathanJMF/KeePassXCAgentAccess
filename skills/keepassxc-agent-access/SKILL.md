@@ -308,15 +308,36 @@ Use an active token to submit one exact change and its vault and target referenc
 
 - For an entry, discover a named group and use its UUID as parent. If the group does not exist, request create_group first and use its returned UUID. The vault root can be the parent of a new group, but never the destination of an agent-created or moved entry.
 - When saving a login, make one create_entry request with its title, username, URL and top-level `"password_source": "owner"`. The owner enters the current password directly in Keeper's **Create Entry** review and saves the complete entry in one step. Use `"password_source": "generate"` only when the user wants a new password generated in Keeper. Without a password source, the entry is metadata only, so don't use that flow for a login that needs a password.
-- For a new account, choose the named group and prepare the Keeper entry before provisioning the service. Confirm the provisioning operation can consume that entry's generated password privately. A generated value in Keeper does not set a remote account's password, and the broker's protected HTTPS workflow currently uses one credential entry per call. Do not generate a replacement for an existing remote account unless the user requested a reset and there is an approved way to apply it.
+- For a new account, create the Keeper entry with a generated password before provisioning the service. Use the one-time account flow below when the service accepts a password in its administrative API. A generated value in Keeper does not set a remote password by itself.
 - update_entry uses entry and at least one of title, username, or url. rename_group uses group and fields.name.
 - move_entry and move_group use entry or group and the destination parent. recycle_entry and recycle_group use entry or group.
 - For an existing entry, replace_password with `password_source: "owner"` opens **Save Password in Keeper**. This saves the account's existing password to the vault and does not change the real login. Use it for a saved entry, not as a second step after creating a login. Never put password values in requests, notes, or chat.
 
 A pending request awaits an owner decision. Report the status to the user. With Auto Approve on for the action, an edit can apply immediately when the token includes the exact edit permission. For a move, the destination group also needs `move_into` permission. Create permissions belong to the parent group. Owner-entered replacement passwords always need the review window. A completed create can include the new item's UUID under result.
 
+## Provision a new account
+
+Use a scoped administrative entry and the account entry returned by the vault edit. Both entries must be in the same vault. Send the protected, pinned HTTPS write and identify the destination body fields. Keeper reviews the transfer once and substitutes the values inside the vault worker.
+
+    "$keeper" --profile "$profile" --note "Create the approved service account" accounts provision --vault "$vault" --entry "$admin" --account "$account" --receipt "$receipt" --json <<'JSON'
+    {
+      "workflow": {
+        "type": "https_results",
+        "origin": "https://service.example.test/",
+        "certificate_sha256": "REPLACE_WITH_VERIFIED_SHA256",
+        "approve_write_once": true,
+        "request": {"path": "/accounts", "method": "POST", "auth": "bearer", "json": {"enabled": true}},
+        "result": {"path": "/data", "columns": ["id", "created"]}
+      },
+      "body_type": "json",
+      "fields": {"username": "login", "password": "initial_password"}
+    }
+    JSON
+
+Use a fresh receipt UUID. Choose the method, path, headers and field names from the actual API. Keep the named fields unassigned in the fixed JSON or form. The one-time approval grants no reusable access to the account entry. Use an approved administrative status read to verify creation. For a lost response, check the receipt and remote state before retrying. Release any standing entry permissions you no longer need with `access release`.
+
 ## Advanced stdio integration
 
-A host can instead provide a dedicated, trusted MCP profile for this task. Its tools are `discover`, `access_status`, `request_access`, `list_vaults`, `list_entries`, `use_password`, `request_edit`, and `edit_status`. Use only a profile the host explicitly assigned to this agent; an existing globally connected profile may belong to another task. If the client has stale tool schemas or no dedicated profile, use the installed `keeper-agent` workflow above rather than modifying the client installation.
+A host can instead provide a dedicated, trusted MCP profile for this task. Use the tools advertised by that runner, including status waits, console, workflows and account provisioning. Use only a profile the host explicitly assigned to this agent. If the client has stale tool schemas or no dedicated profile, use the installed `keeper-agent` workflow above.
 
 For stdio requests, pass enrollment JSON under `request` with the dedicated identity/project, and edits under `request`. For credential use, call `use_password` with `vault`, `entry`, and the same descriptor under `usage`. A legacy `action`/`command` selector is mutually exclusive with `usage`. Network command artifacts use `input_base64` beside a `networked_command` descriptor. Include a `note` on requests/actions. `list_entries` accepts `fields: ["username", "url"]` for explicitly approved fields. Check edit status with its request UUID under `id`. The host controls the MCP endpoint, profile and startup environment.

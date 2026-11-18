@@ -89,6 +89,7 @@ CREATE TABLE IF NOT EXISTS write_receipts (
     stage TEXT NOT NULL,
     http_status INTEGER,
     captured_id INTEGER,
+    secondary_entry TEXT,
     PRIMARY KEY (token, id)
 );
 CREATE TABLE IF NOT EXISTS reviewed_workflows (
@@ -134,8 +135,11 @@ class ActivityStore:
                          "group_id", "edit_request_id", "workflow_id", "workflow_step", "note"):
                 if name not in columns:
                     db.execute(f"ALTER TABLE activity ADD COLUMN {name} TEXT")
-            if "captured_id" not in {column["name"] for column in db.execute("PRAGMA table_info(write_receipts)")}:
+            receipt_columns = {column["name"] for column in db.execute("PRAGMA table_info(write_receipts)")}
+            if "captured_id" not in receipt_columns:
                 db.execute("ALTER TABLE write_receipts ADD COLUMN captured_id INTEGER")
+            if "secondary_entry" not in receipt_columns:
+                db.execute("ALTER TABLE write_receipts ADD COLUMN secondary_entry TEXT")
             db.execute(
                 """UPDATE activity SET completed=?, outcome=CASE
                 WHEN outcome='Dispatching' THEN 'Interrupted · outcome unknown' ELSE 'Revoked' END
@@ -199,7 +203,7 @@ class ActivityStore:
                 (now, now, outcome, status, entry, group_id, folder, entry_title, event),
             )
 
-    def claim_write(self, token, identifier, generation, vault, entry, revision, digest):
+    def claim_write(self, token, identifier, generation, vault, entry, revision, digest, *, secondary_entry=None):
         with self.connection() as db:
             previous = db.execute("SELECT digest FROM write_receipts WHERE token=? AND id=?",
                                   (token, identifier)).fetchone()
@@ -208,14 +212,21 @@ class ActivityStore:
             count = db.execute("SELECT count(*) FROM write_receipts WHERE token=?", (token,)).fetchone()[0]
             if count >= WRITE_RECEIPTS_PER_TOKEN:
                 return "receipt_limit"
-            db.execute("""INSERT INTO write_receipts(token, id, generation, vault, entry, revision, digest, stage)
-                          VALUES (?, ?, ?, ?, ?, ?, ?, 'pending')""",
-                       (token, identifier, generation, vault, entry, revision, digest))
+            db.execute("""INSERT INTO write_receipts(token, id, generation, vault, entry, revision, digest,
+                                                     secondary_entry, stage)
+                          VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending')""",
+                       (token, identifier, generation, vault, entry, revision, digest, secondary_entry))
             return None
 
     def write_receipt(self, token, identifier):
         with self.connection() as db:
             return db.execute("SELECT * FROM write_receipts WHERE token=? AND id=?", (token, identifier)).fetchone()
+
+    def has_provision(self, token, vault, entry):
+        with self.connection() as db:
+            return db.execute("""SELECT 1 FROM write_receipts
+                                 WHERE token=? AND vault=? AND secondary_entry=? LIMIT 1""",
+                              (token, vault, entry)).fetchone() is not None
 
     def claim_workflow(self, token, identifier, digest):
         with self.connection() as db:

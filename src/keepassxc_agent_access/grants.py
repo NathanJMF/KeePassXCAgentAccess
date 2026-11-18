@@ -498,7 +498,8 @@ class Grants:
             # A repeated release can withdraw a pending restoration. A label
             # can resolve differently at review time, so match its vault too.
             if not removed and not may_restore:
-                return {"status": "released", "cancelled_change": False}
+                if target in current.released_entries or not self.activity.has_provision(token.id, vault, entry):
+                    return {"status": "released", "cancelled_change": False}
             remaining = tuple(item for item in current.scope if (item.vault, item.entry) != target)
             change = replace(pending, status="denied") if pending else current.change
             row = replace(current, scope=remaining, generation=current.generation + 1, change=change,

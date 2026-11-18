@@ -713,6 +713,14 @@ def main(argv=None):
     use.add_argument("--receipt", type=_request_id, help="Track a protected HTTPS write under this UUID")
     use.add_argument("--json", action="store_true", required=True, help="Emit JSON")
     use.set_defaults(operation="use_password")
+    accounts = topics.add_parser("accounts", help="Privately provision an account from a Keeper entry")
+    provision = accounts.add_subparsers(required=True).add_parser("provision")
+    provision.add_argument("--vault", required=True, type=_request_id)
+    provision.add_argument("--entry", required=True, type=_request_id, help="Approved administrative entry")
+    provision.add_argument("--account", required=True, type=_request_id, help="Separate account entry in the same vault")
+    provision.add_argument("--receipt", required=True, type=_request_id)
+    provision.add_argument("--json", action="store_true", required=True)
+    provision.set_defaults(operation="use_password", provision_account=True, action=None)
     console = topics.add_parser("console", help="Open or use an owner-approved guest console")
     commands = console.add_subparsers(required=True)
     opening = commands.add_parser("open", help="Read the console connection descriptor from stdin")
@@ -871,7 +879,14 @@ def main(argv=None):
                 raw = sys.stdin.buffer.read(REQUEST_LIMIT)
                 if len(raw) >= REQUEST_LIMIT:
                     raise ValueError
-                payload["usage"] = usage_request(decode(raw))
+                descriptor = decode(raw)
+                if getattr(options, "provision_account", False):
+                    if not isinstance(descriptor, dict) or set(descriptor) != {"workflow", "body_type", "fields"}:
+                        raise ValueError
+                    payload["provision"] = {"entry": options.account, "body_type": descriptor["body_type"],
+                                            "fields": descriptor["fields"]}
+                    descriptor = descriptor["workflow"]
+                payload["usage"] = usage_request(descriptor)
             except (ValueError, TypeError, RecursionError):
                 raise ListingError("invalid_request") from None
         token_file = os.environ.get("KEEPASSXC_AGENT_TOKEN_FILE")

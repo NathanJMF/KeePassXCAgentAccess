@@ -674,6 +674,8 @@ class AccessView(Gtk.Box):
             title = "Review Guest Commands"
         elif ticket.workflow_review:
             title = "Review Workflow"
+        elif ticket.provision_account:
+            title = "Review Account Provisioning"
         else:
             title = "Review HTTPS Write" if ticket.write_once else "Review Agent Usage"
         dialog, body = _dialog(self.app, title, 620, -1)
@@ -688,6 +690,8 @@ class AccessView(Gtk.Box):
             approve_label = "Run Command Once"
         elif ticket.workflow_review:
             approve_label = "Approve Workflow"
+        elif ticket.provision_account:
+            approve_label = "Provision Once"
         else:
             approve_label = "Approve Write Once" if ticket.write_once else (
                 "Approve and Trust Certificate" if ticket.trusts_certificate else "Approve Once")
@@ -705,6 +709,8 @@ class AccessView(Gtk.Box):
         elif ticket.guest_command:
             add_label(body, "Allow any command at this endpoint during the approved window." if ticket.reuse_minutes else
                       "Run the command shown below and allow the agent to check its result.")
+        elif ticket.provision_account:
+            add_label(body, "Send the stored account password to this service using the admin credential shown below.")
         elif ticket.write_once:
             add_label(body, "This request changes data on the destination. Review the method, path and request body below.")
         if ticket.write_once or ticket.opens_console or ticket.guest_command or ticket.workflow_review:

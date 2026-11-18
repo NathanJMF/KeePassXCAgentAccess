@@ -18,6 +18,7 @@ from threading import Lock, Timer
 from time import monotonic
 from urllib.parse import quote, quote_plus, urlencode
 
+from .account_provision import parse_provision, provision_body
 from .access_settings import Destination, HTTPS_METHODS, HTTPS_WRITE_METHODS, credential_headers, request_query
 from .command_network import approved_address
 from .protocol import MAX_GUEST_TEXT
@@ -477,7 +478,7 @@ class GuestLoginCache:
 
 
 def deliver_results(config, entry, dispatch, *, allow_username=False, private_result=None,
-                    login_context=None, login_cache=None):
+                    login_context=None, login_cache=None, provision=None, account=None):
     """Release only the concrete approved projection; dispatch gates every send."""
     sent_write = False
     write_status = None
@@ -503,6 +504,10 @@ def deliver_results(config, entry, dispatch, *, allow_username=False, private_re
         deadline = monotonic() + WORKFLOW_SECONDS
         pin = data.get("certificate_sha256")
         request = data["request"]
+        if provision is not None:
+            if account is None or login_context is not None:
+                raise ValueError("The approved account is unavailable.")
+            provision = parse_provision(provision, data)
         cached = None
         signature = None
         if login_context and login_cache is not None and "login" in data and pin:
@@ -549,7 +554,10 @@ def deliver_results(config, entry, dispatch, *, allow_username=False, private_re
                or len(value.encode("utf-8")) > 16384 for value in headers.values()):
             raise ValueError("Invalid rendered authentication header.")
         forbidden.extend(headers.values())
-        body_headers, body = _request_body(request, values)
+        if provision is None:
+            body_headers, body = _request_body(request, values)
+        else:
+            body_headers, body = provision_body(request, provision, account, forbidden)
         for name, value in body_headers.items():
             headers = {key: item for key, item in headers.items() if key.lower() != name.lower()}
             headers[name] = value

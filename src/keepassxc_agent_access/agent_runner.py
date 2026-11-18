@@ -203,6 +203,13 @@ OPERATIONS = {
         {"workflow": REFERENCE, "step": {"type": "string", "pattern": "^[a-z][a-z0-9_-]{0,31}$"}},
         required=("workflow", "step"), read_only=False,
     )),
+    "provision_account": (("accounts", "provision"), tool(
+        "provision_account", "Ask the owner to apply a separate stored account password in one approved HTTPS write.",
+        {"vault": REFERENCE, "entry": REFERENCE, "account": REFERENCE, "receipt": REFERENCE,
+         "workflow": {"type": "object", "description": "Exact pinned HTTPS results write with approve_write_once."},
+         "body_type": {"enum": ["form", "json"]}, "fields": {"type": "object"}},
+        required=("vault", "entry", "account", "receipt", "workflow", "body_type", "fields"), read_only=False,
+    )),
     "list_vaults": (("vaults", "list"), tool("list_vaults", "List vaults available to the active token.")),
     "list_entries": (("entries", "list"), tool(
         "list_entries", "List approved entry metadata and optionally request approved username or URL fields.",
@@ -246,7 +253,7 @@ def invocation(name, arguments):
     if usage is not None and "input_base64" in arguments:
         local_command = validate_command(usage["command"])
     command = [CLI, "run" if local_command is not None else tokens[0], *tokens[1:], "--json"]
-    for key in ("vault", "entry", "console"):
+    for key in ("vault", "entry", "console", "account"):
         if key in arguments:
             value = arguments[key]
             if not isinstance(value, str) or len(value) > 36:
@@ -301,7 +308,7 @@ def invocation(name, arguments):
         if not isinstance(action, str) or not action or len(action) > 160 or not action.isprintable():
             raise ValueError
         command.append(f"--action={action}")
-    if "fields" in arguments:
+    if name == "list_entries" and "fields" in arguments:
         fields = arguments["fields"]
         if (not isinstance(fields, list) or len(fields) > len(ENTRY_FIELDS)
                 or any(field not in ENTRY_FIELDS for field in fields)):
@@ -316,6 +323,11 @@ def invocation(name, arguments):
         if not isinstance(arguments["workflow"], dict) or not isinstance(arguments["guest_command"], str):
             raise ValueError
         request = {"workflow": arguments["workflow"], "command": arguments["guest_command"]}
+    if name == "provision_account":
+        if not isinstance(arguments["fields"], dict) or arguments["body_type"] not in ("json", "form"):
+            raise ValueError
+        request = {"workflow": usage_request(arguments["workflow"]), "body_type": arguments["body_type"],
+                   "fields": arguments["fields"]}
     if name == "console_input":
         if not isinstance(arguments["events"], list):
             raise ValueError

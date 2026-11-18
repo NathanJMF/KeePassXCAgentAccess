@@ -9,6 +9,7 @@ from threading import BoundedSemaphore
 from time import monotonic, time
 
 from .approvals import Approval, ApprovalQueue
+from .account_provision import parse_provision
 from .access_settings import ActionType, Destination, action_id, uuid_text
 from .activity import ActivityError, Attribution, entry_label, entry_target_labels
 from .console_access import ConsoleAccess
@@ -124,6 +125,7 @@ class ScopedBroker:
             input_info = None
             usage = None
             receipt = None
+            provision = None
             if operation in ("request_access", "request_edit") and keys == {"request"}:
                 pass
             elif operation in WORKFLOW_OPERATIONS and upload is None:
@@ -161,7 +163,8 @@ class ScopedBroker:
                         or any(field not in OPTIONAL_METADATA_FIELDS for field in fields)
                         or len(set(fields)) != len(fields)):
                     raise ValueError
-            elif operation == "use_password" and {"entry", "usage"} <= keys <= {"entry", "usage", "vault", "upload", "receipt"}:
+            elif (operation == "use_password"
+                  and {"entry", "usage"} <= keys <= {"entry", "usage", "vault", "upload", "receipt", "provision"}):
                 entry = uuid_text(payload["entry"])
                 vault = uuid_text(payload["vault"]) if "vault" in keys else None
                 if not isinstance(payload["usage"], dict):
@@ -171,6 +174,10 @@ class ScopedBroker:
                 if "receipt" in keys:
                     receipt = uuid_text(payload["receipt"])
                     if usage.get("type") != "https_results":
+                        raise ValueError
+                if "provision" in keys:
+                    provision = parse_provision(payload["provision"], usage)
+                    if receipt is None or vault is None or provision["entry"] == entry or approved_step is not None:
                         raise ValueError
                 if "upload" in keys:
                     if upload is None:
@@ -258,6 +265,15 @@ class ScopedBroker:
                 chosen = next(iter(registered))
             registration = self.workspace.registrations.get(chosen) if chosen in registered else None
             session = self.workspace.session(chosen) if registration else None
+            account_revision = None
+            account_labels = ()
+            if provision:
+                account = provision["entry"]
+                if (session is None or (chosen, account) in token.released_entries
+                        or not any(row["id"] == account for row in session.entries)):
+                    raise ListingError("ineligible")
+                account_revision = registration.credential_revision(account)
+                account_labels = entry_target_labels(session.entries, account)
             binding = registration.binding(entry, binding_id) if registration and entry and usage is None else None
             if usage is not None:
                 try:
@@ -332,6 +348,8 @@ class ScopedBroker:
                         if not write_required:
                             raise ListingError("invalid_request")
                         scope_summary += f" · Write receipt {receipt}"
+                    if provision:
+                        scope_summary += f" · Account entry {provision['entry']}"
                     scope_summary += " · Fields: " + ", ".join(result_fields(workflow["result"]))
                     if certificate_pin:
                         previous_pins = sorted({pin for pin in certificate_expected if pin})
@@ -343,7 +361,8 @@ class ScopedBroker:
                 artifact_summary = f"Input file · {input_info['size']} bytes · SHA-256 {input_info['sha256']}"
                 scope_summary = f"{scope_summary} · {artifact_summary}" if scope_summary else artifact_summary
             event = self.activity.begin(
-                uid, context, name + (f" · {binding.action.name}" if recognized else ""),
+                uid, context, "Provision Account" if provision and recognized else
+                name + (f" · {binding.action.name}" if recognized else ""),
                 (self._usage_destination(binding.action) if usage is not None else binding.action.destination)
                 if recognized else None, entry if recognized else None,
                 vault=registration.name if registration else None, vault_id=chosen if registration else None,
@@ -374,6 +393,9 @@ class ScopedBroker:
                         return False
                     record = self.workspace.registrations.get(chosen)
                     if record is None:
+                        return False
+                    if provision and (record.credential_revision(provision["entry"]) != account_revision
+                                      or (chosen, provision["entry"]) in current.released_entries):
                         return False
                     if usage is not None and not any(
                             s.use_revision is not None and s.use_revision == record.credential_revision(entry)
@@ -421,11 +443,15 @@ class ScopedBroker:
             if not guard(live):
                 raise ListingError("revoked")
             if receipt:
-                digest = sha256(encode([chosen, entry, binding.action.result_request])).hexdigest()
+                operation_data = [chosen, entry, binding.action.result_request]
+                if provision:
+                    operation_data.append(provision)
+                digest = sha256(encode(operation_data)).hexdigest()
 
                 def claim():
                     failure = self.activity.claim_write(token.id, receipt, token.generation,
-                                                        chosen, entry, credential_revision, digest)
+                                                        chosen, entry, credential_revision, digest,
+                                                        secondary_entry=provision["entry"] if provision else None)
                     if failure:
                         raise ListingError(failure)
                     return True
@@ -464,6 +490,15 @@ class ScopedBroker:
                              "Visible fields: " + ", ".join(columns))
                 else:
                     scope = (" › ".join(part for part in (registration.name, folder, title) if part),)
+                    if provision:
+                        scope = (f"Admin credential: {scope[0]} ({entry})",
+                                 "Account credential: " + " › ".join(
+                                     part for part in (registration.name, *account_labels) if part)
+                                 + f" ({provision['entry']})",
+                                 "The receiving service may store the account password. "
+                                 "Approve only if this is the intended account and service.",
+                                 f"Private {provision['body_type']} fields: " + ", ".join(
+                                     f"{target} from account {source}" for source, target in provision["fields"].items()))
                     if usage is not None:
                         if binding.action.kind == ActionType.RESULTS:
                             from .result_delivery import parse_result_usage
@@ -493,12 +528,15 @@ class ScopedBroker:
                                   scope, (self._usage_destination(binding.action) if usage is not None else binding.action.destination)
                                   if binding else None, monotonic() + self.approvals.timeout,
                                   identity=token.identity, project=token.project, requested=time(),
-                                  trusts_certificate=remember_certificate, write_once=write_once)
+                                  trusts_certificate=remember_certificate, write_once=write_once,
+                                  provision_account=provision is not None)
                 result = self.approvals.wait(ticket, lambda: guard(live))
                 if result != "approved":
                     raise ListingError(result)
             decision = "Approved token"
-            if approved_step:
+            if provision:
+                decision = "Approved account provisioning once"
+            elif approved_step:
                 decision = "Approved in workflow review"
             elif write_once:
                 decision = "Approved write once"
@@ -538,7 +576,10 @@ class ScopedBroker:
 
                 if binding.action.kind == ActionType.RESULTS:
                     username_allowed = any((s.vault, s.entry) == (chosen, entry) and s.username for s in token.scope)
-                    result = session.worker.use(binding.action, gate, allow_username=username_allowed)
+                    options = {"allow_username": username_allowed}
+                    if provision:
+                        options["provision"] = provision
+                    result = session.worker.use(binding.action, gate, **options)
                     captured = None
                     if approved_step:
                         result, captured = self.workflows.capture(*approved_step, result)
