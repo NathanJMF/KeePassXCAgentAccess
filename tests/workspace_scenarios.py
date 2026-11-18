@@ -1139,6 +1139,7 @@ def main(root):
                         "View Entry Details…", "Edit Entry…", "Copy Password", "Copy Entry Reference", "Delete…",
                     ]
                     wait_for(lambda: not app.busy, "Password copy did not finish")
+                assert isinstance(clipboard.get_owner(), Gtk.TextBuffer)
                 assert clipboard.wait_for_text() == COPY_PASSWORD
                 wait_for(lambda: clipboard.wait_for_text() is None, "Copied password did not expire")
                 entry_model, selected = entry_table.get_selection().get_selected()
