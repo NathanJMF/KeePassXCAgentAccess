@@ -474,11 +474,12 @@ class WorkspaceApplication(Gtk.Application):
 
     def _review_requests(self):
         grants = self.grants.rows() if self.grants else ()
+        waiting = sorted(self.usage_approvals.pending(), key=lambda ticket: (ticket.expires, ticket.id))
         return (
+            *(("usage", str(ticket.id)) for ticket in waiting),
             *(("grant", grant.id) for grant in grants if grant.status == "pending"),
             *(("grant-change", f"{grant.id}/{grant.change.id}") for grant in grants if grant.pending_change),
             *(("edit", f"{edit.token_id}/{edit.id}") for edit in self.pending_edits() if edit.status == "pending"),
-            *(("usage", str(ticket.id)) for ticket in self.usage_approvals.pending()),
         )
 
     def _style_usage_policy(self):
@@ -890,6 +891,30 @@ class WorkspaceApplication(Gtk.Application):
 
     def _unlock(self, *_):
         self.unlock_record(self._record())
+
+    def unlock_review_button(self, record, dialog):
+        controls = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
+        button = Gtk.Button(label=f"Unlock {record.name}…", halign=Gtk.Align.START)
+        feedback = styled(_label(""), "keeper-notice")
+        feedback.set_no_show_all(True)
+        controls.pack_start(button, False, False, 0)
+        controls.pack_start(feedback, False, False, 0)
+
+        def reopen(completed, message):
+            if self.dialog is not dialog or not dialog.get_visible():
+                return
+            if completed:
+                dialog.response(Gtk.ResponseType.APPLY)
+            elif message:
+                feedback.set_text(message)
+                feedback.show()
+
+        def unlock(*_):
+            feedback.hide()
+            self.unlock_record(record, parent=dialog, finished=reopen)
+
+        button.connect("clicked", unlock)
+        return controls
 
     def unlock_record(self, record, *, parent=None, finished=None):
         if not record or self.busy or self.desktop.locked or self.exiting:

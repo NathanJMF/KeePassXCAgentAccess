@@ -144,6 +144,9 @@ def review_edit(app, record, *, standalone=False):
             _add(panel, "Existing credential action approvals for this entry will require fresh approval.")
     elif error:
         _add(panel, error)
+        vault = app.workspace.registrations.get(record.request.vault)
+        if vault and not app.workspace.session(vault.id):
+            panel.pack_start(app.unlock_review_button(vault, dialog), False, False, 0)
     _request_details(panel, app, record, preview)
 
     blocker = styled(Gtk.Box(spacing=10, valign=Gtk.Align.CENTER), "keeper-review-blocker")
@@ -188,7 +191,11 @@ def review_edit(app, record, *, standalone=False):
             widget.disconnect(signal)
         if owner_password is not None:
             owner_password.set_text("")
-    if response == Gtk.ResponseType.REJECT:
+    if response == Gtk.ResponseType.APPLY:
+        identifier = f"{record.token_id}/{record.id}"
+        if ("edit", identifier) in app._review_requests():
+            app.access_view.open_record(identifier, "edit", automatic=standalone)
+    elif response == Gtk.ResponseType.REJECT:
         app.owner_operation(lambda: app.edit_requests.deny(record.token_id, record.id, preview=preview))
     elif response == Gtk.ResponseType.ACCEPT and preview is not None:
         app._background(lambda: app.edit_requests.approve(preview, value))

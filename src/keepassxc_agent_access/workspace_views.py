@@ -2,7 +2,9 @@
 
 from collections import Counter
 from dataclasses import dataclass
+from math import ceil
 from shlex import join, split
+from time import monotonic
 
 from gi.repository import GLib, Gtk, Pango
 
@@ -24,6 +26,12 @@ def reported(value):
 
 def add_label(container, text):
     container.pack_start(_label(text), False, False, 0)
+
+
+def locked_review_vaults(workspace, items):
+    requested = {item.vault for item in items}
+    return (record for identifier, record in workspace.registrations.items()
+            if (None in requested or identifier in requested) and workspace.session(identifier) is None)
 
 
 def button(container, label, callback, *, icon=None):
@@ -439,6 +447,8 @@ class AccessView(Gtk.Box):
         header, _, _, _ = section_heading("Agent Access", "changes-prevent-symbolic")
         tools = Gtk.Box(valign=Gtk.Align.CENTER)
         header.pack_end(tools, False, False, 0)
+        self.next_review = button(tools, "Review Next", self._open_next, icon="appointment-soon-symbolic")
+        self.next_review.set_sensitive(False)
         self.review_button = button(tools, "Open Details", self._open, icon="view-reveal-symbolic")
         self.review_button.set_sensitive(False)
         self.pack_start(header, False, False, 0)
@@ -498,6 +508,9 @@ class AccessView(Gtk.Box):
         rows.sort()
         fill_table(self.table, [columns for _, _, columns in rows], self.ROW_KEY)
         self.empty.set_visible(not rows)
+        pending = len(self.app._review_requests())
+        self.next_review.set_sensitive(bool(pending) and not self.app.busy and not self.app.desktop.locked)
+        self.next_review.set_label(f"Review Next ({pending})" if pending else "Review Next")
 
     def _scope_label(self, _column, cell, model, iterator, *_):
         cell.inline_scope = model[iterator][self.KIND] == "scope"
@@ -583,6 +596,12 @@ class AccessView(Gtk.Box):
             row = model[selected]
             if row[self.RECORD_ID]:
                 self.open_record(row[self.RECORD_ID], row[self.KIND])
+
+    def _open_next(self, *_):
+        pending = self.app._review_requests()
+        if pending and not self.app.busy and self.app.dialog is None:
+            kind, identifier = pending[0]
+            self.open_record(identifier, kind)
 
     def _context(self, row):
         state = row[self.STATUS]
@@ -705,12 +724,17 @@ class AccessView(Gtk.Box):
         else:
             add_label(body, "Approves this operation and remembers its verified certificate for this token and resource."
                       if ticket.trusts_certificate else "Approval applies to this operation only.")
+        remaining = Gtk.Label(xalign=0)
+        body.pack_start(styled(remaining, "keeper-event-caption"), False, False, 0)
 
         def check_pending():
             if ticket not in queue.pending():
                 dialog.response(Gtk.ResponseType.CANCEL)
+            else:
+                remaining.set_text(f"Expires in {max(0, ceil(ticket.expires - monotonic()))} seconds")
             return GLib.SOURCE_CONTINUE
 
+        check_pending()
         watch = GLib.timeout_add(200, check_pending)
         try:
             response = self.app.run_dialog(dialog, standalone=standalone)
@@ -790,6 +814,8 @@ class AccessView(Gtk.Box):
         styled(technical, "keeper-access-technical")
 
         controls = [self._review_entry(review, details, item) for item in request.items]
+        for record in locked_review_vaults(self.app.workspace, request.items):
+            body.pack_start(self.app.unlock_review_button(record, dialog), False, False, 0)
 
         def changed(*_):
             paused = self.app.workspace.paused
@@ -811,7 +837,12 @@ class AccessView(Gtk.Box):
         finally:
             GLib.source_remove(watch)
         change_id = change.id if change else None
-        if response == Gtk.ResponseType.REJECT:
+        if response == Gtk.ResponseType.APPLY:
+            kind = "grant-change" if change else "grant"
+            identifier = f"{grant.id}/{change.id}" if change else grant.id
+            if (kind, identifier) in self.app._review_requests():
+                self.open_record(identifier, kind, automatic=standalone)
+        elif response == Gtk.ResponseType.REJECT:
             self.app.owner_operation(lambda: self.app.grants.decide(grant.id, None, change_id=change_id))
         elif response == Gtk.ResponseType.ACCEPT:
             choices = [options[combo.get_active()] for combo, options in controls]
@@ -885,8 +916,8 @@ class AccessView(Gtk.Box):
                 location.set_text("Choose the exact entry before approving.")
             elif vault and not self.app.workspace.session(vault_id):
                 title.set_text(item.label or vault.name)
-                location.set_text(f"{vault.name} is locked. Unlock it and reopen this request." if item.label
-                                  else "Vault locked. Unlock it and reopen this request to approve.")
+                location.set_text(f"{vault.name} is locked. Unlock it to review this request." if item.label
+                                  else "Unlock the vault to review this request.")
             else:
                 resource = "group" if item.group else "entry"
                 title.set_text(item.label or f"{resource.capitalize()} unavailable")
