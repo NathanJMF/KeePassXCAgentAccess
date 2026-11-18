@@ -26,6 +26,7 @@ class Approval:
     opens_console: bool = False
     reuse_minutes: int = 0
     guest_command: bool = False
+    workflow_review: bool = False
     ready: Event = field(default_factory=Event)
 
 

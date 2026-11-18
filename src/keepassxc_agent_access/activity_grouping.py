@@ -31,6 +31,8 @@ def event_relationship(row):
     action = row["action"]
     stage, _, operation = action.partition(" · ")
     if token := row.get("token"):
+        if workflow := row.get("workflow_id"):
+            return ("workflow", token, workflow), "Workflow"
         if stage in EDIT_STAGES:
             request = row.get("edit_request_id") or edit_reference(row, "Edit request ")
             if request:

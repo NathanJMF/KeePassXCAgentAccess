@@ -14,10 +14,12 @@ from .activity import ActivityError, Attribution, entry_label, entry_target_labe
 from .console_access import ConsoleAccess
 from .grants import OPTIONAL_METADATA_FIELDS, verifier
 from .guest_access import GuestAccess
-from .protocol import CONSOLE_OPERATIONS, GUEST_OPERATIONS, RESPONSE_LIMIT, ListingError, decode, encode, validate_command, validate_upload
+from .protocol import (CONSOLE_OPERATIONS, GUEST_OPERATIONS, RESPONSE_LIMIT, WORKFLOW_OPERATIONS, ListingError,
+                       decode, encode, validate_command, validate_upload)
 from .result_delivery import result_fields
 from .settings import SettingsError
 from .usage import requires_body_permission, requires_write_permission, usage_action, usage_origin
+from .workflow import WorkflowAccess
 
 
 REQUEST_WINDOW = 60
@@ -66,6 +68,7 @@ class ScopedBroker:
         self.certificate_reviews = set()
         self.console_access = ConsoleAccess(self)
         self.guest_access = GuestAccess(self)
+        self.workflows = WorkflowAccess(self)
 
     @contextmanager
     def _command_slot(self):
@@ -103,7 +106,7 @@ class ScopedBroker:
         except (ActivityError, SettingsError):
             raise ListingError("audit_unavailable") from None
 
-    def handle(self, payload, uid, live, dispatch, deliver, *, upload=None):
+    def handle(self, payload, uid, live, dispatch, deliver, *, upload=None, approved_step=None):
         try:
             if not isinstance(payload, dict) or type(payload.get("version")) is not int or payload["version"] != 1:
                 raise ValueError
@@ -113,7 +116,8 @@ class ScopedBroker:
             if isinstance(operation, str) and operation in CONSOLE_OPERATIONS:
                 if upload is not None:
                     raise ValueError
-                return self.console_access.handle(operation, keys, payload, uid, context, live, dispatch, deliver)
+                return self.console_access.handle(operation, keys, payload, uid, context, live, dispatch, deliver,
+                                                  approved_step=approved_step)
             entry, binding_id, vault = None, None, None
             fields = ()
             command = None
@@ -122,6 +126,17 @@ class ScopedBroker:
             receipt = None
             if operation in ("request_access", "request_edit") and keys == {"request"}:
                 pass
+            elif operation in WORKFLOW_OPERATIONS and upload is None:
+                if operation == "workflow_request":
+                    if keys != {"request"}:
+                        raise ValueError
+                else:
+                    if keys != ({"workflow", "step"} if operation == "workflow_run" else {"workflow"}):
+                        raise ValueError
+                    identifier = uuid_text(payload["workflow"])
+                    name = payload["step"] if operation == "workflow_run" else None
+                    if operation == "workflow_run" and not isinstance(name, str):
+                        raise ValueError
             elif operation in GUEST_OPERATIONS and upload is None:
                 pass
             elif operation == "edit_status" and keys == {"id"}:
@@ -190,9 +205,20 @@ class ScopedBroker:
 
         if operation in GUEST_OPERATIONS:
             try:
-                return self.guest_access.handle(operation, keys, payload, uid, context, live, dispatch, deliver)
+                return self.guest_access.handle(operation, keys, payload, uid, context, live, dispatch, deliver,
+                                                approved_step=approved_step)
             except (ValueError, TypeError, KeyError, AttributeError, RecursionError):
                 raise ListingError("invalid_request") from None
+        if operation in WORKFLOW_OPERATIONS:
+            if operation == "workflow_request":
+                try:
+                    return self.workflows.propose(payload["request"], credential, uid, context, live, deliver)
+                except (ValueError, TypeError, KeyError, AttributeError, RecursionError):
+                    raise ListingError("invalid_request") from None
+            workflow, step_payload = self.workflows.resolve(identifier, name, payload, uid, live)
+            if operation == "workflow_status":
+                return self.workflows.status(workflow, deliver)
+            return self.handle(step_payload, uid, live, dispatch, deliver, approved_step=(workflow, name))
         if operation == "request_edit":
             with self.workspace.mutex:
                 if not live():
@@ -323,6 +349,8 @@ class ScopedBroker:
                 vault=registration.name if registration else None, vault_id=chosen if registration else None,
                 token=token.id, agent=token.identity, project=token.project, folder=folder, entry_title=title,
                 scope=scope_summary,
+                workflow_id=approved_step[0].id if approved_step else None,
+                workflow_step=approved_step[1] if approved_step else None,
             )
 
         def guard(effect):
@@ -330,6 +358,8 @@ class ScopedBroker:
                 current = self.grants.records[token.id]
                 if (self.workspace.paused or self.workspace.generation != generation
                         or current.generation != token.generation or current.status != "active"):
+                    return False
+                if approved_step and not self.workflows.current(approved_step[0]):
                     return False
                 if certificate_committed:
                     pins = self.grants.result_certificate_pins(
@@ -419,7 +449,7 @@ class ScopedBroker:
                             raise ListingError("busy")
                         self.certificate_reviews.add(key)
                         certificate_reservation = key
-            if review_usage:
+            if review_usage and approved_step is None:
                 if operation == "list_vaults":
                     scope = tuple(registered.values())
                 elif operation == "list_entries":
@@ -468,7 +498,9 @@ class ScopedBroker:
                 if result != "approved":
                     raise ListingError(result)
             decision = "Approved token"
-            if write_once:
+            if approved_step:
+                decision = "Approved in workflow review"
+            elif write_once:
                 decision = "Approved write once"
             elif remember_certificate:
                 decision = "Approved once; trust certificate on verified dispatch"
@@ -507,10 +539,15 @@ class ScopedBroker:
                 if binding.action.kind == ActionType.RESULTS:
                     username_allowed = any((s.vault, s.entry) == (chosen, entry) and s.username for s in token.scope)
                     result = session.worker.use(binding.action, gate, allow_username=username_allowed)
+                    captured = None
+                    if approved_step:
+                        result, captured = self.workflows.capture(*approved_step, result)
                     if receipt_stage == "dispatching":
                         self.activity.advance_write(token.id, receipt, "dispatching", result["outcome"],
-                                                    result.get("http_status"))
+                                                    result.get("http_status"), captured_id=captured)
                         receipt_stage = None
+                        if captured is not None:
+                            self.workflows.remember(*approved_step, captured)
                 elif binding.action.is_command or binding.action.browser:
                     with self._command_slot():
                         if input_info is None:

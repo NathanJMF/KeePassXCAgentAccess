@@ -33,6 +33,8 @@ class ConsoleGrant:
     session: object
     expires: float
     ready: bool = False
+    workflow_id: str | None = None
+    workflow_step: str | None = None
 
 
 class ConsoleAccess:
@@ -81,7 +83,7 @@ class ConsoleAccess:
             sleep(.25)
         self.discard_worker_console(identifier, grant)
 
-    def handle(self, operation, keys, payload, uid, context, live, dispatch, deliver):
+    def handle(self, operation, keys, payload, uid, context, live, dispatch, deliver, *, approved_step=None):
         credential = payload.get("credential")
         status_only = False
         requested_minutes = 0
@@ -145,7 +147,12 @@ class ConsoleAccess:
                                      vault, entry, revision, origin, descriptor["socket"]["path"], session,
                                      monotonic() + CONSOLE_SECONDS + self.broker.approvals.timeout)
                 reuse_minutes = 0
-                if self.workspace.guest_auto_approval_enabled(operation) and "certificate_sha256" in descriptor:
+                if approved_step:
+                    workflow, step = approved_step
+                    self.broker.workflows.claim_console(workflow, step)
+                    grant = replace(grant, workflow_id=workflow.id, workflow_step=step)
+                    reuse_until = workflow.deadline
+                elif self.workspace.guest_auto_approval_enabled(operation) and "certificate_sha256" in descriptor:
                     digest = sha256(encode(descriptor)).hexdigest()
                     reuse_key = (token.id, vault, entry, digest)
                     self.reusable = {key: permit for key, permit in self.reusable.items() if self.current(permit)}
@@ -174,7 +181,8 @@ class ConsoleAccess:
                 event = self.activity.begin(uid, context, label, grant.origin, grant.entry,
                                             vault=registration.name if registration else None, vault_id=grant.vault,
                                             token=token.id, agent=token.identity, project=token.project,
-                                            folder=folder, entry_title=title, scope=scope)
+                                            folder=folder, entry_title=title, scope=scope,
+                                            workflow_id=grant.workflow_id, workflow_step=grant.workflow_step)
             except BaseException:
                 if operation == "console_open":
                     self.sessions.pop(identifier, None)
@@ -213,7 +221,7 @@ class ConsoleAccess:
                 else:
                     authorization = "Approved console once"
             elif operation == "console_open":
-                authorization = "Used approved console connection"
+                authorization = "Approved in workflow review" if approved_step else "Used approved console connection"
             self.activity.authorize(event, authorization)
             def gate(send):
                 def authorize():

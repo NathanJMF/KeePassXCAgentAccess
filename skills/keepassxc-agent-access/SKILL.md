@@ -262,6 +262,29 @@ For a JSON argument vector, add a fixed `argument_prefix` such as `["/bin/bash",
 
 An approved submission covers its matching status calls and selected result fields, including when Auto Approve is off. Keeper keeps the remote job ID private. To run more commands at the same endpoint, add `--reuse-for MINUTES` during the first request. With Auto Approve and **Guest Commands - Run** enabled, the owner can approve arbitrary commands at that exact endpoint for up to 60 minutes. Confirm the containing service is scoped to the intended guest. Use a fresh receipt per command. Poll with the same profile and receipt for up to 15 minutes, within the approved window. Release the handle when finished to free a slot. The write receipt remains available. If no safe job ID arrives, check `results status` and verify the remote effect before submitting again.
 
+## Review a known workflow together
+
+For related planned actions using one already-approved entry and destination, submit one manifest with `workflows request --json`. Keeper reviews up to eight steps together. Use the same scope and credential as the individual calls. A fresh profile still needs enrollment.
+
+    {
+      "id": "WORKFLOW_UUID",
+      "vault": "VAULT_UUID",
+      "entry": "ENTRY_UUID",
+      "origin": "https://guest.example.test/",
+      "certificate_sha256": "REPLACE_WITH_VERIFIED_SHA256",
+      "minutes": 30,
+      "steps": [
+        {"name": "create", "request": {"method": "POST", "path": "/guests", "auth": "bearer"},
+         "result": {"path": "/data/id", "scalar": "guest_id"}, "capture_id": true, "expected_id": 103},
+        {"name": "start", "request": {"method": "POST", "path": "/guests/{create}/start", "auth": "bearer"},
+         "result": {"path": "/data", "columns": ["status"]}}
+      ]
+    }
+
+Call `workflows run --workflow WORKFLOW_UUID --step create --json`, then `start`. The broker inserts a successful captured positive integer into a whole path segment `{create}` or a value `{"$from":"create"}` in JSON, form or query fields. Set `expected_id` when the target ID is known. A missing or mismatched ID blocks dependent steps. Add an optional shared private `login` at the manifest root. A `kind: "console"` step uses only the `connect` and `socket` objects as its request. A `kind: "guest"` step uses the guest workflow fields as its request, omitting origin, certificate and login, and puts one exact `command` alongside it.
+
+`workflows status --workflow WORKFLOW_UUID --json` returns the remaining authorization time and the stable receipts for writes and commands. Use those receipts to check ambiguous work. A listed console can reopen during the window when its Auto Approve switch and the master switch are on. Writes and guest commands can run once per step. Independent steps may run in any order. Check remote state before retrying interrupted work. After restart, resubmit the same manifest for review. Keeper can restore captured IDs from successful steps of the same token and credential revision. A changed manifest requires a new workflow ID and review.
+
 ### Legacy configured actions
 
 Existing action grants still work with `use --action ACTION_ID` or `run --action ACTION_ID -- ...`. Use them only if already granted for the task. Do not ask the owner to configure an action when a reusable permission and supplied operation can handle the task.

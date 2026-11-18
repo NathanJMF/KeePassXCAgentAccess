@@ -10,14 +10,14 @@ import os
 import socket
 import sys
 from time import monotonic
-from uuid import UUID
+from uuid import UUID, uuid5
 from urllib.parse import urlsplit
 
 from .runner_token import UninitializedProfile, credential
 from .protocol import (
     CLIENT_TIMEOUT, CONSOLE_OPERATIONS, CONSOLE_SECONDS, ERRORS, GUEST_OPERATIONS, LIST_REQUEST, ListingError,
     MAX_CONSOLE_REUSE_MINUTES, MAX_GUEST_REUSE_MINUTES, MAX_GUEST_TEXT,
-    REQUEST_LIMIT, REQUEST_TIMEOUT, RESPONSE_LIMIT, UPLOAD_LIMIT,
+    REQUEST_LIMIT, REQUEST_TIMEOUT, RESPONSE_LIMIT, UPLOAD_LIMIT, WORKFLOW_OPERATIONS,
     decode, encode, receive, remaining, validate_command,
 )
 
@@ -378,6 +378,40 @@ def _validate(reply, payload):
                 or (status not in ("succeeded", "acknowledged", "failed") and code is not None)):
             raise ListingError("invalid_response")
         return reply
+    if operation in ("workflow_request", "workflow_status"):
+        identifier = payload["request"]["id"] if operation == "workflow_request" else payload["workflow"]
+        steps = reply.get("receipts")
+        if (set(reply) != {"id", "expires_in", "receipts"} or reply["id"] != identifier
+                or type(reply["expires_in"]) is not int or not 1 <= reply["expires_in"] <= 3600
+                or not isinstance(steps, dict) or len(steps) > 8):
+            raise ListingError("invalid_response")
+        if any(not re.fullmatch(r"[a-z][a-z0-9_-]{0,31}", name)
+               or receipt != str(uuid5(UUID(identifier), name)) for name, receipt in steps.items()):
+            raise ListingError("invalid_response")
+        if operation == "workflow_request" and set(steps) != {step["name"] for step in payload["request"]["steps"]
+                                                               if step.get("kind") != "console"}:
+            raise ListingError("invalid_response")
+        return reply
+    if operation == "workflow_run":
+        if "console" in reply:
+            return _validate(reply, {"operation": "console_open"})
+        if "id" in reply:
+            receipt = str(uuid5(UUID(payload["workflow"]), payload["step"]))
+            return _validate(reply, {"operation": "guest_run", "receipt": receipt})
+        outcome = reply.get("outcome")
+        status = reply.get("http_status")
+        if outcome == "succeeded":
+            if set(reply) != {"outcome", "http_status", "data"} or type(status) is not int or not 200 <= status < 300:
+                raise ListingError("invalid_response")
+            _validate_result_rows(reply["data"])
+        elif outcome == "acknowledged":
+            if set(reply) != {"outcome", "http_status"} or type(status) is not int or not 200 <= status < 300:
+                raise ListingError("invalid_response")
+        elif (reply not in ({"outcome": "failed"}, {"outcome": "uncertain"})
+              and not (set(reply) == {"outcome", "http_status"} and outcome == "failed"
+                       and type(status) is int and 100 <= status <= 599)):
+            raise ListingError("invalid_response")
+        return reply
     if operation == "guest_release":
         if reply != {"id": payload["receipt"], "outcome": "released"}:
             raise ListingError("invalid_response")
@@ -612,6 +646,19 @@ def main(argv=None):
     receipt_status.add_argument("--receipt", required=True, type=_request_id, help="Write receipt UUID")
     receipt_status.add_argument("--json", action="store_true", required=True)
     receipt_status.set_defaults(operation="write_status")
+    workflows = topics.add_parser("workflows", help="Review and run a known group of operations together")
+    commands = workflows.add_subparsers(required=True)
+    submit = commands.add_parser("request", help="Read the workflow manifest from stdin")
+    submit.set_defaults(operation="workflow_request")
+    progress = commands.add_parser("status", help="Check the current workflow authorization and step receipts")
+    progress.set_defaults(operation="workflow_status")
+    step = commands.add_parser("run", help="Run a named step from the approved manifest")
+    step.add_argument("--step", required=True)
+    step.set_defaults(operation="workflow_run")
+    for subcommand in (progress, step):
+        subcommand.add_argument("--workflow", required=True, type=_request_id)
+    for subcommand in (submit, progress, step):
+        subcommand.add_argument("--json", action="store_true", required=True)
     vaults = topics.add_parser("vaults", help="Discover vaults in this token's scope")
     catalog = vaults.add_subparsers(required=True).add_parser("list")
     catalog.add_argument("--json", action="store_true", required=True, help="Emit JSON")
@@ -719,6 +766,10 @@ def main(argv=None):
         payload["include_reviewed"] = True
     if options.operation == "edit_status":
         payload["id"] = options.request
+    if options.operation in ("workflow_run", "workflow_status"):
+        payload["workflow"] = options.workflow
+        if options.operation == "workflow_run":
+            payload["step"] = options.step
     if getattr(options, "receipt", None):
         payload["receipt"] = options.receipt
     if options.operation in ("console_open", "release_entry", "guest_run"):
@@ -784,10 +835,10 @@ def main(argv=None):
                 payload.update(guest)
             except (ValueError, RecursionError):
                 raise ListingError("invalid_request") from None
-        if options.operation in ("request_access", "request_edit"):
+        if options.operation in ("request_access", "request_edit", "workflow_request"):
             try:
                 raw = sys.stdin.buffer.read(REQUEST_LIMIT)
-                if len(raw) >= REQUEST_LIMIT:
+                if not raw or len(raw) >= REQUEST_LIMIT:
                     raise ValueError
                 submitted = decode(raw)
                 if options.operation == "request_access" and any(key in os.environ for key in
@@ -799,10 +850,15 @@ def main(argv=None):
                     if (submitted.get("identity", identity) != identity or submitted.get("project", project) != project):
                         raise ValueError
                     submitted = {**submitted, "identity": identity, "project": project}
+                if options.operation == "workflow_request":
+                    if not isinstance(submitted, dict) or "id" not in submitted:
+                        raise ValueError
+                    submitted["id"] = edit_uuid(submitted["id"])
                 payload["request"] = edit_request(submitted) if options.operation == "request_edit" else submitted
             except (ValueError, RecursionError):
                 raise ListingError("invalid_request") from None
-        if options.operation != "discover" and (token_file or options.operation in GUEST_OPERATIONS or options.operation in (
+        if options.operation != "discover" and (token_file or options.operation in GUEST_OPERATIONS | WORKFLOW_OPERATIONS
+                or options.operation in (
             "request_access", "access_status", "release_entry", "list_vaults", "request_edit", "edit_status", "write_status",
         )):
             scope = payload.get("request")

@@ -5,6 +5,7 @@ from base64 import b64decode
 import json
 import os
 from pathlib import Path
+import re
 import stat
 import subprocess
 import sys
@@ -23,7 +24,7 @@ PROTOCOLS = ("2025-06-18", "2025-03-26", "2024-11-05")
 
 def tool(name, description, properties=None, *, required=(), read_only=True):
     properties = dict(properties or {})
-    if name not in ("access_status", "edit_status", "write_status", "guest_status"):
+    if name not in ("access_status", "edit_status", "write_status", "guest_status", "workflow_status"):
         properties["note"] = {"type": "string", "minLength": 1, "maxLength": 180,
                               "description": "Short audit reason. Keep credentials and private values out of notes."}
     return {
@@ -157,6 +158,20 @@ OPERATIONS = {
         "guest_release", "Give up this guest job's status handle. The write receipt stays available.",
         {"receipt": REFERENCE}, required=("receipt",), read_only=False,
     )),
+    "workflow_request": (("workflows", "request"), tool(
+        "workflow_request", "Ask the owner to review a bounded set of fixed HTTPS writes, guest commands and console opens.",
+        {"request": {"type": "object", "description": "Pinned HTTPS workflow manifest from the Keeper skill."}},
+        required=("request",), read_only=False,
+    )),
+    "workflow_status": (("workflows", "status"), tool(
+        "workflow_status", "Check a reviewed workflow and its write receipts.",
+        {"workflow": REFERENCE}, required=("workflow",),
+    )),
+    "workflow_run": (("workflows", "run"), tool(
+        "workflow_run", "Run one named step in an approved workflow.",
+        {"workflow": REFERENCE, "step": {"type": "string", "pattern": "^[a-z][a-z0-9_-]{0,31}$"}},
+        required=("workflow", "step"), read_only=False,
+    )),
     "list_vaults": (("vaults", "list"), tool("list_vaults", "List vaults available to the active token.")),
     "list_entries": (("entries", "list"), tool(
         "list_entries", "List approved entry metadata and optionally request approved username or URL fields.",
@@ -219,6 +234,13 @@ def invocation(name, arguments):
                 or usage["request"].get("method") not in ("POST", "PUT", "PATCH", "DELETE")):
             raise ValueError
         command.append(f"--receipt={edit_uuid(arguments['receipt'])}")
+    if name in ("workflow_run", "workflow_status"):
+        command.append(f"--workflow={edit_uuid(arguments['workflow'])}")
+    if name == "workflow_run":
+        step = arguments["step"]
+        if not isinstance(step, str) or not re.fullmatch(r"[a-z][a-z0-9_-]{0,31}", step):
+            raise ValueError
+        command.append(f"--step={step}")
     if "action" in arguments:
         action = arguments["action"]
         if not isinstance(action, str) or not action or len(action) > 160 or not action.isprintable():

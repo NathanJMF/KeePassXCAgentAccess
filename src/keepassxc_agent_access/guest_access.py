@@ -30,6 +30,8 @@ class GuestGrant:
     revision: str
     session: object
     expires: float
+    workflow_id: str | None = None
+    workflow_step: str | None = None
 
 
 class GuestAccess:
@@ -50,7 +52,7 @@ class GuestAccess:
                 and self.workspace.session(grant.vault) is grant.session and registration is not None
                 and registration.credential_revision(grant.entry) == grant.revision)
 
-    def handle(self, operation, keys, payload, uid, context, live, dispatch, deliver):
+    def handle(self, operation, keys, payload, uid, context, live, dispatch, deliver, *, approved_step=None):
         credential = payload.get("credential")
         starting = operation == "guest_run"
         receipt = uuid_text(payload["receipt"])
@@ -94,13 +96,16 @@ class GuestAccess:
                            and needed <= set(scope.uses) and request.origin in scope.origins for scope in token.scope):
                     raise ListingError("ineligible")
                 grant_key = (token.id, vault, entry, fingerprint)
-                automatic = self.workspace.guest_auto_approval_enabled("guest_run")
+                automatic = not approved_step and self.workspace.guest_auto_approval_enabled("guest_run")
                 permit = self.grants.get(grant_key) if automatic else None
                 reused = permit is not None
                 if automatic and not reused and len(self.grants) + self.pending.total() < MAX_GUEST_JOBS:
                     reuse_minutes = requested_minutes
                 grant = permit or GuestGrant(token.id, token.generation, self.workspace.generation, vault, entry,
                                              revision, session, monotonic() + self.broker.approvals.timeout + 30)
+                if approved_step:
+                    task, step = approved_step
+                    grant = replace(grant, expires=task.deadline, workflow_id=task.id, workflow_step=step)
             else:
                 job = self.jobs.get(job_key)
                 if job is None:
@@ -113,7 +118,8 @@ class GuestAccess:
             event = self.activity.begin(uid, context, title, request.origin, grant.entry,
                                         vault=registration.name, vault_id=grant.vault, token=token.id,
                                         agent=token.identity, project=token.project, folder=folder, entry_title=key,
-                                        scope=f"Write receipt {receipt} · Workflow SHA-256 {fingerprint}")
+                                        scope=f"Write receipt {receipt} · Workflow SHA-256 {fingerprint}",
+                                        workflow_id=grant.workflow_id, workflow_step=grant.workflow_step)
             if operation == "guest_release":
                 del self.jobs[job_key]
                 self.activity.finish(event, "Released")
@@ -122,6 +128,8 @@ class GuestAccess:
         def guard(effect):
             with self.workspace.mutex:
                 if not self.current(grant):
+                    return False
+                if approved_step and not self.broker.workflows.current(approved_step[0]):
                     return False
                 if not starting and self.jobs.get(job_key) is not job:
                     return False
@@ -151,7 +159,7 @@ class GuestAccess:
                 if not guard(lambda: live(claim)):
                     raise ListingError("revoked")
                 stage = "pending"
-            if starting and not reused:
+            if starting and not reused and approved_step is None:
                 details = (
                     " › ".join(part for part in (registration.name, folder, key) if part),
                     (f"Any command in the {workflow.body_type} field {workflow.command_field!r} for up to {reuse_minutes} minutes."
@@ -171,7 +179,8 @@ class GuestAccess:
                     grant = replace(grant, expires=monotonic() + reuse_minutes * 60)
             decision = "Approved guest job status"
             if starting:
-                decision = ("Used approved guest command endpoint" if reused else
+                decision = ("Approved in workflow review" if approved_step else
+                            "Used approved guest command endpoint" if reused else
                             f"Owner approved guest commands for {reuse_minutes} min" if reuse_minutes else
                             "Owner approved guest command once")
             self.activity.authorize(event, decision)
@@ -198,7 +207,7 @@ class GuestAccess:
                     try:
                         remote_id = result["data"][0]["job_id"]
                         job = (replace(grant, expires=min(grant.expires, monotonic() + JOB_SECONDS)
-                                       if reused or reuse_minutes else monotonic() + JOB_SECONDS),
+                                       if reused or reuse_minutes or approved_step else monotonic() + JOB_SECONDS),
                                workflow.status(remote_id), remote_id, fingerprint)
                     except (ValueError, KeyError, IndexError, TypeError):
                         status = "acknowledged"

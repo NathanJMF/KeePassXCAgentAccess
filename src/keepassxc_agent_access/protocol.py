@@ -14,6 +14,7 @@ MAX_CONSOLE_REUSE_MINUTES = 60
 GUEST_OPERATIONS = frozenset({"guest_run", "guest_status", "guest_release"})
 MAX_GUEST_REUSE_MINUTES = 60
 MAX_GUEST_TEXT = 2048
+WORKFLOW_OPERATIONS = frozenset({"workflow_request", "workflow_run", "workflow_status"})
 REQUEST_TIMEOUT = 5
 WORKER_TIMEOUT = 3
 APPROVAL_TIMEOUT = 60
@@ -38,6 +39,8 @@ ERRORS = {
     "console_closed": "This console is closed or unavailable to this token. Request a new console if you still need it.",
     "console_failed": "Keeper could not complete the console operation. Check the approved endpoint and certificate or reopen the console.",
     "guest_job_unavailable": "This guest job is unavailable to the profile. Check its write receipt and verify the remote state before submitting again.",
+    "workflow_unavailable": "This reviewed workflow is unavailable to the profile. Check the individual write receipts before requesting new approval.",
+    "dependency_unavailable": "An earlier workflow step has not supplied the expected integer result. Check its receipt and the remote state.",
     "credential_changed": "That entry's credential changed after approval. Request a permission change for owner review.",
     "token_change_pending": "This token already has a permission change awaiting review.",
     "identity_in_use": "That identity is already in use. Choose a different identity and retry the request.",

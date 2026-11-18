@@ -67,6 +67,8 @@ CREATE TABLE IF NOT EXISTS activity (
     entry TEXT,
     group_id TEXT,
     edit_request_id TEXT,
+    workflow_id TEXT,
+    workflow_step TEXT,
     folder TEXT,
     entry_title TEXT,
     destination TEXT,
@@ -86,6 +88,13 @@ CREATE TABLE IF NOT EXISTS write_receipts (
     digest TEXT NOT NULL,
     stage TEXT NOT NULL,
     http_status INTEGER,
+    captured_id INTEGER,
+    PRIMARY KEY (token, id)
+);
+CREATE TABLE IF NOT EXISTS reviewed_workflows (
+    token TEXT NOT NULL,
+    id TEXT NOT NULL,
+    digest TEXT NOT NULL,
     PRIMARY KEY (token, id)
 );
 """
@@ -122,9 +131,11 @@ class ActivityStore:
             db.executescript(SCHEMA)
             columns = {column["name"] for column in db.execute("PRAGMA table_info(activity)")}
             for name in ("entry", "vault", "vault_id", "token", "agent", "project", "scope", "folder", "entry_title",
-                         "group_id", "edit_request_id", "note"):
+                         "group_id", "edit_request_id", "workflow_id", "workflow_step", "note"):
                 if name not in columns:
                     db.execute(f"ALTER TABLE activity ADD COLUMN {name} TEXT")
+            if "captured_id" not in {column["name"] for column in db.execute("PRAGMA table_info(write_receipts)")}:
+                db.execute("ALTER TABLE write_receipts ADD COLUMN captured_id INTEGER")
             db.execute(
                 """UPDATE activity SET completed=?, outcome=CASE
                 WHEN outcome='Dispatching' THEN 'Interrupted · outcome unknown' ELSE 'Revoked' END
@@ -143,7 +154,7 @@ class ActivityStore:
 
     def begin(self, uid, context, action, destination, entry=None, *, vault=None, vault_id=None,
               token=None, agent=None, project=None, scope=None, folder=None, entry_title=None,
-              group_id=None, edit_request_id=None):
+              group_id=None, edit_request_id=None, workflow_id=None, workflow_step=None):
         with self.connection() as db:
             chat_id = context.chat_id or ""
             db.execute("INSERT OR IGNORE INTO sessions(uid, chat_id) VALUES (?, ?)", (uid, chat_id))
@@ -153,11 +164,11 @@ class ActivityStore:
             cursor = db.execute(
                 """INSERT INTO activity(session, requested, model, chat, action, destination, entry,
                                          vault, vault_id, token, agent, project, scope, folder, entry_title,
-                                         group_id, edit_request_id, note, outcome)
-                VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'Pending')""",
+                                         group_id, edit_request_id, workflow_id, workflow_step, note, outcome)
+                VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'Pending')""",
                 (session, time(), context.model, context.chat, action, destination, entry,
                  vault, vault_id, token, agent, project, scope, folder, entry_title, group_id, edit_request_id,
-                 context.note),
+                 workflow_id, workflow_step, context.note),
             )
             return cursor.lastrowid
 
@@ -206,11 +217,23 @@ class ActivityStore:
         with self.connection() as db:
             return db.execute("SELECT * FROM write_receipts WHERE token=? AND id=?", (token, identifier)).fetchone()
 
-    def advance_write(self, token, identifier, expected, stage, status=None):
+    def claim_workflow(self, token, identifier, digest):
         with self.connection() as db:
-            changed = db.execute("""UPDATE write_receipts SET stage=?, http_status=?
+            row = db.execute("SELECT digest FROM reviewed_workflows WHERE token=? AND id=?", (token, identifier)).fetchone()
+            if row is not None:
+                return None if row["digest"] == digest else "receipt_conflict"
+            count = db.execute("SELECT count(*) FROM reviewed_workflows WHERE token=?", (token,)).fetchone()[0]
+            if count >= WRITE_RECEIPTS_PER_TOKEN:
+                return "receipt_limit"
+            db.execute("INSERT INTO reviewed_workflows(token, id, digest) VALUES(?, ?, ?)",
+                       (token, identifier, digest))
+            return None
+
+    def advance_write(self, token, identifier, expected, stage, status=None, *, captured_id=None):
+        with self.connection() as db:
+            changed = db.execute("""UPDATE write_receipts SET stage=?, http_status=?, captured_id=?
                                     WHERE token=? AND id=? AND stage=?""",
-                                 (stage, status, token, identifier, expected)).rowcount
+                                 (stage, status, captured_id, token, identifier, expected)).rowcount
             if changed != 1:
                 raise ActivityError()
 

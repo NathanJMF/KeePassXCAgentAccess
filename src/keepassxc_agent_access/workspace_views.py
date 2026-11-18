@@ -672,6 +672,8 @@ class AccessView(Gtk.Box):
             title = "Review Guest Console"
         elif ticket.guest_command:
             title = "Review Guest Commands"
+        elif ticket.workflow_review:
+            title = "Review Workflow"
         else:
             title = "Review HTTPS Write" if ticket.write_once else "Review Agent Usage"
         dialog, body = _dialog(self.app, title, 620, -1)
@@ -684,6 +686,8 @@ class AccessView(Gtk.Box):
             approve_label = "Open Console"
         elif ticket.guest_command:
             approve_label = "Run Command Once"
+        elif ticket.workflow_review:
+            approve_label = "Approve Workflow"
         else:
             approve_label = "Approve Write Once" if ticket.write_once else (
                 "Approve and Trust Certificate" if ticket.trusts_certificate else "Approve Once")
@@ -703,7 +707,7 @@ class AccessView(Gtk.Box):
                       "Run the command shown below and allow the agent to check its result.")
         elif ticket.write_once:
             add_label(body, "This request changes data on the destination. Review the method, path and request body below.")
-        if ticket.write_once or ticket.opens_console or ticket.guest_command:
+        if ticket.write_once or ticket.opens_console or ticket.guest_command or ticket.workflow_review:
             if ticket.context.note:
                 add_label(body, ticket.context.note)
         details = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
@@ -721,6 +725,8 @@ class AccessView(Gtk.Box):
                       if ticket.reuse_minutes else "Approval applies to this console session.")
         elif ticket.guest_command:
             add_label(body, "The command approval also covers its status checks and the listed result fields.")
+        elif ticket.workflow_review:
+            add_label(body, "The agent can run the listed operations after approval.")
         else:
             add_label(body, "Approves this operation and remembers its verified certificate for this token and resource."
                       if ticket.trusts_certificate else "Approval applies to this operation only.")
@@ -1093,6 +1099,7 @@ def activity_execution(row):
     fields = activity_edit_fields(row)
     facts = (
         ("Destination", row.get("destination")), ("Authorization", row.get("decision")),
+        ("Workflow Step", row.get("workflow_step")),
         ("HTTP Status", row.get("status")), ("Decided", decided if decided not in (requested, completed) else None),
         ("Completed", completed if completed != requested else None),
     )
