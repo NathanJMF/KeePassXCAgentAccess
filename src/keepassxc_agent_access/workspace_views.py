@@ -34,6 +34,21 @@ def locked_review_vaults(workspace, items):
             if (None in requested or identifier in requested) and workspace.session(identifier) is None)
 
 
+def usage_approval_caption(ticket):
+    if ticket.opens_console:
+        if ticket.reuse_minutes:
+            return ("The same connection can be reopened during this window. "
+                    "Pause agent access or lock the vault before reassigning this console target.")
+        return "Approval applies to this console session."
+    if ticket.guest_command:
+        return "The command approval also covers its status checks and the listed result fields."
+    if ticket.workflow_review:
+        return "The agent can run the listed operations after approval."
+    if ticket.trusts_certificate:
+        return "Approves this operation and remembers its verified certificate for this token and resource."
+    return "Approval applies to this operation only."
+
+
 def button(container, label, callback, *, icon=None):
     widget = Gtk.Button(label=label)
     if icon:
@@ -235,6 +250,7 @@ ACCESS_STATES = {
     "Applying Edit": ("content-loading-symbolic", "keeper_accent"),
     "Usage Pending": ("appointment-soon-symbolic", "keeper_warning"),
     "Active": ("emblem-default-symbolic", "keeper_success"),
+    "Workflow Only": ("emblem-default-symbolic", "keeper_success"),
     "Disabled": ("action-unavailable-symbolic", "keeper_muted"),
 }
 ACTIVITY_STATES = {
@@ -483,7 +499,8 @@ class AccessView(Gtk.Box):
             scope = self._scope_rows(grant, snapshots) if grant.status == "active" or other else ()
             requested = change.requested if change else grant.requested
             context = change.context if change else grant.context
-            state = "Permission Change Pending" if change else grant.status.capitalize()
+            state = ("Permission Change Pending" if change else
+                     "Workflow Only" if grant.workflow and grant.status == "active" else grant.status.capitalize())
             identifier, kind = (f"{grant.id}/{change.id}", "grant-change") if change else (grant.id, "grant")
             rows.append((bool(other), -requested,
                          (table_time(requested), table_time(grant.last_used),
@@ -627,8 +644,9 @@ class AccessView(Gtk.Box):
             ]
         if state in ("Pending", "Usage Pending"):
             return [[("Review Request…", open_selected)]]
-        change = "disabled" if state == "Active" else "active"
-        label = "Disable Token" if state == "Active" else "Re-enable Token"
+        active = state in ("Active", "Workflow Only")
+        change = "disabled" if active else "active"
+        label = "Disable Token" if active else "Re-enable Token"
         return [
             [("View Permissions…", open_selected), (label, lambda: self._update_token(identifier, change))],
             [(self.REMOVE, lambda: self._update_token(identifier, "removed"))],
@@ -673,7 +691,7 @@ class AccessView(Gtk.Box):
         elif ticket.guest_command:
             title = "Review Guest Commands"
         elif ticket.workflow_review:
-            title = "Review Workflow"
+            title = "Register and Review Workflow" if ticket.workflow_enrollment else "Review Workflow"
         elif ticket.provision_account:
             title = "Review Account Provisioning"
         else:
@@ -682,14 +700,16 @@ class AccessView(Gtk.Box):
         dialog.set_name("keeper-access-review")
         dialog.set_position(Gtk.WindowPosition.CENTER_ON_PARENT)
         dialog.set_modal(True)
-        if ticket.reuse_minutes:
+        if ticket.resume_access:
+            approve_label = "Resume Access and Approve"
+        elif ticket.reuse_minutes:
             approve_label = f"Allow for {ticket.reuse_minutes} min"
         elif ticket.opens_console:
             approve_label = "Open Console"
         elif ticket.guest_command:
             approve_label = "Run Command Once"
         elif ticket.workflow_review:
-            approve_label = "Approve Workflow"
+            approve_label = "Register and Approve" if ticket.workflow_enrollment else "Approve Workflow"
         elif ticket.provision_account:
             approve_label = "Provision Once"
         else:
@@ -725,17 +745,9 @@ class AccessView(Gtk.Box):
         scroll.set_max_content_height(360)
         scroll.add(details)
         body.pack_start(scroll, True, True, 0)
-        if ticket.opens_console:
-            add_label(body, "The same connection can be reopened during this window. "
-                      "Pause agent access or lock the vault before reassigning this console target."
-                      if ticket.reuse_minutes else "Approval applies to this console session.")
-        elif ticket.guest_command:
-            add_label(body, "The command approval also covers its status checks and the listed result fields.")
-        elif ticket.workflow_review:
-            add_label(body, "The agent can run the listed operations after approval.")
-        else:
-            add_label(body, "Approves this operation and remembers its verified certificate for this token and resource."
-                      if ticket.trusts_certificate else "Approval applies to this operation only.")
+        add_label(body, usage_approval_caption(ticket))
+        if ticket.resume_access:
+            add_label(body, "Agent access is paused. Approving also resumes access for all approved agents.")
         remaining = Gtk.Label(xalign=0)
         body.pack_start(styled(remaining, "keeper-event-caption"), False, False, 0)
 
@@ -994,13 +1006,15 @@ class AccessView(Gtk.Box):
         elif grant.status == "disabled":
             dialog.add_button("Re-enable", Gtk.ResponseType.APPLY)
 
-        status = styled(_label(grant.status.capitalize()), "keeper-event-title")
+        status = styled(_label("Workflow Only" if grant.workflow and grant.status == "active"
+                               else grant.status.capitalize()), "keeper-event-title")
         body.pack_start(status, False, False, 0)
         body.pack_start(activity_facts((
             ("Identity", reported(grant.identity)), ("Project", reported(grant.project)),
             ("Model", reported(grant.context.model)), ("Chat", reported(grant.context.chat)),
             ("Requested", table_time(grant.requested)),
             ("Last Used", table_time(grant.last_used) if grant.last_used is not None else "Never"),
+            ("Workflow", grant.workflow[0] if grant.workflow else None),
         )), False, False, 0)
         body.pack_start(styled(Gtk.Label(label="Approved Entries", xalign=0), "keeper-event-section-title"),
                         False, False, 0)

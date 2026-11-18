@@ -270,7 +270,9 @@ def usage_request(data):
 
 def _validate_access_details(reply):
     required = {"status", "identity", "project", "model", "chat", "chat_id", "scope", "requested_items", "pending_change"}
-    if set(reply) != required:
+    if not required <= reply.keys() <= required | {"workflow"}:
+        raise ValueError
+    if "workflow" in reply and edit_uuid(reply["workflow"]) != reply["workflow"]:
         raise ValueError
     for key in ("identity", "project", "model", "chat", "chat_id"):
         value = reply[key]
@@ -683,6 +685,7 @@ def main(argv=None):
     workflows = topics.add_parser("workflows", help="Review and run a known group of operations together")
     commands = workflows.add_subparsers(required=True)
     submit = commands.add_parser("request", help="Read the workflow manifest from stdin")
+    submit.add_argument("--register", action="store_true", help="Request a fresh token limited to this workflow")
     submit.set_defaults(operation="workflow_request")
     progress = commands.add_parser("status", help="Check the current workflow authorization and step receipts")
     progress.set_defaults(operation="workflow_status")
@@ -928,6 +931,20 @@ def main(argv=None):
                     if not isinstance(submitted, dict) or "id" not in submitted:
                         raise ValueError
                     submitted["id"] = edit_uuid(submitted["id"])
+                    requested = submitted.pop("registration", None)
+                    if options.register:
+                        identity = os.environ.get("KEEPASSXC_AGENT_IDENTITY")
+                        project = os.environ.get("KEEPASSXC_AGENT_PROJECT")
+                        if any(key in os.environ for key in ("KEEPASSXC_AGENT_IDENTITY", "KEEPASSXC_AGENT_PROJECT")):
+                            verified = {"identity": identity, "project": project}
+                            if not identity or not project or requested is not None and requested != verified:
+                                raise ValueError
+                            requested = verified
+                        if not isinstance(requested, dict) or set(requested) != {"identity", "project"}:
+                            raise ValueError
+                        payload["enrollment"] = requested
+                    elif requested is not None:
+                        raise ValueError
                 payload["request"] = edit_request(submitted) if options.operation == "request_edit" else submitted
             except (ValueError, RecursionError):
                 raise ListingError("invalid_request") from None
@@ -936,7 +953,8 @@ def main(argv=None):
             "request_access", "access_status", "release_entry", "list_vaults", "request_edit", "edit_status", "write_status",
         )):
             scope = payload.get("request")
-            create = options.operation == "request_access" and isinstance(scope, dict) and "change_id" not in scope
+            create = (options.operation == "request_access" and isinstance(scope, dict) and "change_id" not in scope
+                      or options.operation == "workflow_request" and "enrollment" in payload)
             payload["credential"] = credential(token_file, create=create)
         if len(encode(payload)) > REQUEST_LIMIT:
             raise ListingError("too_large")

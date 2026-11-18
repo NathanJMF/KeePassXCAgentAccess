@@ -5,10 +5,12 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import Mock, patch
 
+from keepassxc_agent_access.activity import Attribution
+from keepassxc_agent_access.approvals import Approval
 from keepassxc_agent_access.review_popups import ReviewPopups
 from keepassxc_agent_access.settings import SettingsError
 from keepassxc_agent_access.workspace_app import Gtk, WorkspaceApplication
-from keepassxc_agent_access.workspace_views import AccessView, locked_review_vaults
+from keepassxc_agent_access.workspace_views import AccessView, locked_review_vaults, usage_approval_caption
 
 
 class ReviewPopupTests(unittest.TestCase):
@@ -102,3 +104,16 @@ class ReviewPopupTests(unittest.TestCase):
         self.assertEqual(list(locked_review_vaults(workspace, [SimpleNamespace(vault=None)])),
                          ["First Vault", "Second Vault"])
         self.assertEqual(list(locked_review_vaults(workspace, [SimpleNamespace(vault="a")])), ["First Vault"])
+
+    def test_caption_matches_the_authority_even_when_access_can_resume(self):
+        default = {"id": 1, "uid": 123, "context": Attribution(), "action": "Fixture", "scope": (),
+                   "destination": None, "expires": 1}
+        for settings, text in (
+            ({}, "this operation only"),
+            ({"opens_console": True, "reuse_minutes": 5}, "can be reopened"),
+            ({"guest_command": True, "reuse_minutes": 5}, "status checks"),
+            ({"workflow_review": True}, "listed operations"),
+            ({"workflow_review": True, "workflow_enrollment": True, "resume_access": True}, "listed operations"),
+        ):
+            with self.subTest(settings=settings):
+                self.assertIn(text, usage_approval_caption(Approval(**default, **settings)))

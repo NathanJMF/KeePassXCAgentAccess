@@ -191,7 +191,9 @@ OPERATIONS = {
     )),
     "workflow_request": (("workflows", "request"), tool(
         "workflow_request", "Ask the owner to review a bounded set of fixed HTTPS writes, guest commands and console opens.",
-        {"request": {"type": "object", "description": "Pinned HTTPS workflow manifest from the Keeper skill."}},
+        {"request": {"type": "object", "description": "Pinned HTTPS workflow manifest from the Keeper skill."},
+         "registration": {"type": "object", "properties": {"identity": {"type": "string"}, "project": {"type": "string"}},
+                          "required": ["identity", "project"], "additionalProperties": False}},
         required=("request",), read_only=False,
     )),
     "workflow_status": (("workflows", "status"), tool(
@@ -319,6 +321,12 @@ def invocation(name, arguments):
         raise ValueError
     if name == "request_edit":
         request = edit_request(request)
+    if name == "workflow_request" and "registration" in arguments:
+        registration = arguments["registration"]
+        if not isinstance(registration, dict) or set(registration) != {"identity", "project"} or "registration" in request:
+            raise ValueError
+        request = {**request, "registration": registration}
+        command.append("--register")
     if name == "guest_run":
         if not isinstance(arguments["workflow"], dict) or not isinstance(arguments["guest_command"], str):
             raise ValueError
@@ -386,7 +394,8 @@ class AgentRunner:
             "KEEPASSXC_AGENT_SOCKET": str(socket),
             "KEEPASSXC_AGENT_TOKEN_FILE": str(profile / "token"),
         }
-        for key in ("KEEPASSXC_AGENT_MODEL", "KEEPASSXC_AGENT_CHAT", "KEEPASSXC_AGENT_CHAT_ID"):
+        for key in ("KEEPASSXC_AGENT_MODEL", "KEEPASSXC_AGENT_CHAT", "KEEPASSXC_AGENT_CHAT_ID",
+                    "KEEPASSXC_AGENT_IDENTITY", "KEEPASSXC_AGENT_PROJECT"):
             if key in os.environ:
                 self.environment[key] = os.environ[key]
 

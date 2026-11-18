@@ -80,7 +80,7 @@ class GuestAccess:
                 raise ListingError("revoked")
             if self.workspace.paused:
                 raise ListingError("paused")
-            token = self.broker.grants.authenticate(credential, uid)
+            token = self.broker.grants.authenticate(credential, uid, allow_workflow=approved_step is not None or not starting)
             self.broker._charge_request(token.verifier, uid, active=token.status == "active")
             if token.status != "active":
                 raise ListingError("ineligible")
@@ -113,7 +113,7 @@ class GuestAccess:
                     grant = replace(grant, expires=task.deadline, workflow_id=task.id, workflow_step=step)
             else:
                 job = self.jobs.get(job_key)
-                if job is None:
+                if job is None or token.workflow is not None and token.workflow[0] != job[0].workflow_id:
                     raise ListingError("guest_job_unavailable")
                 grant, request, private_job, fingerprint = job
                 registration = self.workspace.registrations[grant.vault]

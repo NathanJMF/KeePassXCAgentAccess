@@ -185,6 +185,8 @@ For a form that redirects after POST, add its exact `success_url`. Login, submit
 
 ## Operate an approved guest console
 
+If the deployment has a prepared image or unattended install path, check for structured readiness before using the console.
+
 Use `console open` for a guest that offers RFB (VNC) over a TLS WebSocket, such as a Proxmox QEMU guest. Keeper signs in, requests a console ticket and opens the socket privately. It requires `https_results` and `https_body` on the entry and exact origin. Keeper never returns the login response, cookie, CSRF value, console ticket or VNC password.
 
 If you expect to reconnect to the same guest, add the verified `certificate_sha256` to the descriptor and request a short window with `console open --reuse-for MINUTES` (1–60). With Auto Approve and **Guest Consoles - Open and Reconnect** enabled, the owner reviews the exact connection and window once. Reopen with the same profile, entry and descriptor. `reuse_expires_in` reports the remaining seconds when you supply `--reuse-for`. A zero means the owner authorized this session only, such as when either switch is off. Reopening leaves the deadline unchanged. Request a fresh review after the window expires or if the guest is replaced at the same endpoint. Pause or lock the vault before reassigning that endpoint.
@@ -266,7 +268,7 @@ Use `guest wait --receipt UUID --until exited --equals-json true --timeout 30 --
 
 ## Review a known workflow together
 
-For related planned actions using one already-approved entry and destination, submit one manifest with `workflows request --json`. Keeper reviews up to eight steps together. Use the same scope and credential as the individual calls. A fresh profile still needs enrollment.
+For related planned actions using one entry and destination, submit one manifest with `workflows request --json`. Keeper reviews up to eight steps together. If this is a fresh profile, use `workflows request --register --json` to include enrollment in the same review. The profile identity and project come from `begin`. The resulting token is limited to this exact workflow, its issued console and job handles, and its receipts. Use normal access requests for tasks that need wider reusable permissions.
 
     {
       "id": "WORKFLOW_UUID",
@@ -285,7 +287,7 @@ For related planned actions using one already-approved entry and destination, su
 
 Call `workflows run --workflow WORKFLOW_UUID --step create --json`, then `start`. The broker inserts a successful captured positive integer into a whole path segment `{create}` or a value `{"$from":"create"}` in JSON, form or query fields. Set `expected_id` when the target ID is known. A missing or mismatched ID blocks dependent steps. Add an optional shared private `login` at the manifest root. A `kind: "console"` step uses only the `connect` and `socket` objects as its request. A `kind: "guest"` step uses the guest workflow fields as its request, omitting origin, certificate and login, and puts one exact `command` alongside it.
 
-`workflows status --workflow WORKFLOW_UUID --json` returns the remaining authorization time and the stable receipts for writes and commands. Use those receipts to check ambiguous work. A listed console can reopen during the window when its Auto Approve switch and the master switch are on. Writes and guest commands can run once per step. Independent steps may run in any order. Check remote state before retrying interrupted work. After restart, resubmit the same manifest for review. Keeper can restore captured IDs from successful steps of the same token and credential revision. A changed manifest requires a new workflow ID and review.
+`workflows status --workflow WORKFLOW_UUID --json` returns the remaining authorization time and the stable receipts for writes and commands. Use those receipts to check ambiguous work. A listed console can reopen during the window when its Auto Approve switch and the master switch are on. Writes and guest commands can run once per step. Independent steps may run in any order. Check remote state before retrying interrupted work. After restart, resubmit the same manifest for review. Keeper can restore captured IDs from successful steps of the same token and credential revision. A changed manifest requires a new workflow ID and review. Start a fresh profile when replacing a workflow-only token with a different manifest.
 
 ### Legacy configured actions
 

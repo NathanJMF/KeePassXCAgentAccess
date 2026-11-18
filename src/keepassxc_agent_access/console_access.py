@@ -123,7 +123,8 @@ class ConsoleAccess:
                 raise ListingError("revoked")
             if self.workspace.paused:
                 raise ListingError("paused")
-            token = self.broker.grants.authenticate(credential, uid)
+            token = self.broker.grants.authenticate(
+                credential, uid, allow_workflow=approved_step is not None or operation != "console_open")
             self.broker._charge_request(token.verifier, uid, active=token.status == "active")
             if token.status != "active":
                 raise ListingError("ineligible")
@@ -163,7 +164,8 @@ class ConsoleAccess:
                 self.sessions[identifier] = grant
             else:
                 grant = self.sessions.get(identifier)
-                if grant is None or grant.token_id != token.id or not grant.ready:
+                if (grant is None or grant.token_id != token.id or not grant.ready
+                        or token.workflow is not None and token.workflow[0] != grant.workflow_id):
                     raise ListingError("console_closed")
                 registration = self.workspace.registrations.get(grant.vault)
                 session = grant.session

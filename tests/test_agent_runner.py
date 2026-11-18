@@ -9,7 +9,7 @@ from tempfile import TemporaryDirectory
 from threading import Thread
 from unittest import TestCase
 
-from keepassxc_agent_access.agent_runner import inherited_directory_fds, invocation
+from keepassxc_agent_access.agent_runner import AgentRunner, inherited_directory_fds, invocation
 from keepassxc_agent_access.protocol import decode, encode
 from keepassxc_agent_access.runner_token import credential
 
@@ -33,6 +33,21 @@ def payload(reply):
 
 
 class RunnerTests(TestCase):
+    def test_workflow_registration_cannot_replace_host_identity_or_fill_empty_host_values(self):
+        from unittest.mock import patch
+        from uuid import uuid4
+
+        for identity, project in (("Host assigned identity", "Fixture"), ("", "")):
+            with self.subTest(identity=identity), patch.dict(os.environ, KEEPASSXC_AGENT_IDENTITY=identity,
+                                                             KEEPASSXC_AGENT_PROJECT=project):
+                runner = AgentRunner(self.endpoint, self.profile)
+                reply = runner.call_tool({"name": "workflow_request", "arguments": {
+                    "request": {"id": str(uuid4())}, "registration": {"identity": "Other identity", "project": "Fixture"},
+                }})
+                self.assertTrue(reply["isError"])
+                self.assertIn("rejected", reply["content"][0]["text"])
+                self.assertFalse((self.profile / "token").exists())
+
     def setUp(self):
         directory = TemporaryDirectory(dir="/tmp")
         self.addCleanup(directory.cleanup)

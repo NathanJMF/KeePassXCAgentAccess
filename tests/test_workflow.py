@@ -1,13 +1,18 @@
 """One review of exact writes and task-local, server-supplied IDs."""
 
 import json
+import os
+from pathlib import Path
+import subprocess
 from unittest import TestCase
 from unittest.mock import patch
 from uuid import uuid4
 
 from keepassxc_agent_access.activity_grouping import activity_groups
 from keepassxc_agent_access.agent_cli import _validate
-from keepassxc_agent_access.protocol import ListingError
+from keepassxc_agent_access.broker import BrokerConfig, ListingBroker
+from keepassxc_agent_access.grants import Grants
+from keepassxc_agent_access.protocol import ListingError, decode, encode
 from keepassxc_agent_access.workflow import WorkflowAccess, parse_workflow
 import test_result_broker as broker_tests
 import test_console as consoles
@@ -203,3 +208,91 @@ class WorkflowTests(TestCase):
             self.assertEqual(self.invoke("guest_status", receipt=job["id"])["data"], [{"done": True, "code": 0}])
         self.assertEqual(self.engine.approvals.pending(), ())
         self.assertEqual(sum(row["decision"] == "Owner approved exact workflow" for row in self.activity.rows()), 1)
+
+    def test_fresh_cli_profile_registers_and_runs_with_one_decision(self):
+        manifest = self.manifest()
+        self.workspace.set_review_usage(True)
+        self.workspace.pause()
+        root = self.workspace.directory
+        profile = root / "fresh-profile"
+        profile.mkdir(mode=0o700)
+        token_file = profile / "token"
+        endpoint = root / "fixture.sock"
+        engine = self.engine
+        broker = ListingBroker(BrokerConfig(endpoint, 1500), lambda: engine, engine)
+        executable = Path(__file__).resolve().parents[1] / "keepassxc-agent"
+        environment = {**os.environ, "KEEPASSXC_AGENT_SOCKET": str(endpoint), "KEEPASSXC_AGENT_TOKEN_FILE": str(token_file),
+                       "KEEPASSXC_AGENT_IDENTITY": "Synthetic workflow agent", "KEEPASSXC_AGENT_PROJECT": "Fixture"}
+        seen = []
+
+        def cli(*arguments, data=None, succeeds=True):
+            result = subprocess.run([executable, *arguments, "--json"], cwd="/tmp", env=environment, capture_output=True,
+                                    input=encode(data) if data is not None else b"", timeout=8)
+            self.assertEqual(result.returncode == 0, succeeds, result.stderr.decode())
+            if token_file.exists():
+                self.assertNotIn(token_file.read_bytes().strip(), result.stdout + result.stderr)
+            return decode(result.stdout) if succeeds else result.stderr.decode()
+
+        def inspect(ticket):
+            self.assertTrue(ticket.workflow_enrollment)
+            self.assertTrue(ticket.resume_access)
+            self.assertFalse(engine.grants.records)
+            self.assertTrue(token_file.is_file())
+
+        def worker_use(action, gate, **_kwargs):
+            self.assertTrue(gate(lambda: None))
+            request = json.loads(action.result_request)["request"]
+            seen.append(request["path"])
+            return {"outcome": "succeeded", "http_status": 200, "data": [
+                {"guest_id": 103} if request["path"] == "/guests" else {"state": "running"}]}
+
+        worker = self.workspace.session(self.vaults[0]).worker
+        # Model a runner peer on this fixture socket only. This tests CLI and broker
+        # routing at wire level, independently of Linux namespace installation.
+        with patch("keepassxc_agent_access.broker.peer_uid", return_value=1500), patch.object(worker, "use", side_effect=worker_use):
+            broker.start()
+            try:
+                approved = self.reviewed(lambda: cli("workflows", "request", "--register", data=manifest), inspect=inspect)
+                self.assertFalse(self.workspace.paused)
+                self.assertEqual(cli("access", "status", "--details")["workflow"], manifest["id"])
+                for name in ("create", "start"):
+                    cli("workflows", "run", "--workflow", manifest["id"], "--step", name)
+                self.assertEqual(cli("results", "status", "--receipt", approved["receipts"]["start"])["status"], "succeeded")
+                direct_use = {"type": "https_results", "origin": manifest["origin"], "approve_write_once": True,
+                              "request": manifest["steps"][0]["request"], "result": manifest["steps"][0]["result"]}
+                self.assertIn("unavailable for this token", cli("use", "--entry", self.entry, "--vault", self.vaults[0],
+                                                                 data=direct_use, succeeds=False))
+                direct_enroll = {"items": [{"vault": self.vaults[0], "entry": self.entry, "metadata": True}]}
+                self.assertIn("unavailable for this token", cli("access", "request", data=direct_enroll, succeeds=False))
+                engine.grants = Grants(self.workspace, self.activity)
+                engine.workflows = WorkflowAccess(engine)
+                changed = {**manifest, "minutes": 15}
+                self.assertIn("already refers", cli("workflows", "request", data=changed, succeeds=False))
+                self.assertEqual(cli("access", "status", "--details")["workflow"], manifest["id"])
+            finally:
+                broker.stop()
+        self.assertEqual(seen, ["/guests", "/guests/103/state"])
+        rows = self.activity.rows()
+        self.assertEqual(sum(row["decision"] == "Owner approved workflow-only token" for row in rows), 1)
+        self.assertFalse(self.engine.approvals.pending())
+
+    def test_denial_and_racing_traditional_registration_grant_no_workflow(self):
+        manifest = self.manifest()
+        enrollment = {"identity": "Workflow agent", "project": "Fixture"}
+        self.workspace.pause()
+        with self.assertRaises(ListingError) as declined:
+            self.reviewed(lambda: self.invoke("workflow_request", request=manifest, enrollment=enrollment), approve=False)
+        self.assertEqual(declined.exception.code, "declined")
+        self.assertFalse(self.grants.records)
+        self.assertTrue(self.workspace.paused)
+
+        def register_during_review(_ticket):
+            self.enroll([{"vault": self.vaults[0], "entry": self.entry, "metadata": True}], identity="Normal agent")
+
+        with self.assertRaises(ListingError) as raced:
+            self.reviewed(lambda: self.invoke("workflow_request", request=manifest, enrollment=enrollment),
+                          inspect=register_during_review)
+        self.assertEqual(raced.exception.code, "revoked")
+        token, = self.grants.records.values()
+        self.assertEqual(token.status, "pending")
+        self.assertIsNone(token.workflow)

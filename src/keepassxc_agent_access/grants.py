@@ -224,6 +224,16 @@ class Grant:
     change: PermissionChange | None = None
     superseded_changes: tuple[str, ...] = ()
     released_entries: tuple[tuple[str, str], ...] = ()
+    workflow: tuple[str, str] | None = None
+
+    def __post_init__(self):
+        if self.workflow is not None:
+            if not isinstance(self.workflow, (list, tuple)) or len(self.workflow) != 2:
+                raise ValueError("Invalid workflow token restriction.")
+            identifier, digest = self.workflow
+            if not isinstance(digest, str) or not re.fullmatch(r"[a-f0-9]{64}", digest):
+                raise ValueError("Invalid workflow token restriction.")
+            object.__setattr__(self, "workflow", (uuid_text(identifier), digest))
 
     @property
     def pending_change(self):
@@ -267,12 +277,40 @@ class Grants:
         self.records = records
         self.credentials[record.verifier] = record.id
 
-    def authenticate(self, credential, uid):
+    def authenticate(self, credential, uid, *, allow_workflow=False):
         identifier = self.credentials.get(verifier(credential))
         record = self.records.get(identifier)
-        if record is None or record.uid != uid:
+        if record is None or record.uid != uid or record.workflow is not None and not allow_workflow:
             raise ListingError("ineligible")
         return record
+
+    def can_issue_workflow(self, draft):
+        if draft.verifier in self.credentials:
+            raise ListingError("ineligible")
+        if any(row.status in LIVE_GRANT_STATES and row.identity.strip().casefold() == draft.identity.casefold()
+               for row in self.records.values()):
+            raise ListingError("identity_in_use")
+        return True
+
+    def workflow_candidate(self, credential, uid, registration, context, item, workflow):
+        if not isinstance(registration, dict) or set(registration) != {"identity", "project"}:
+            raise ValueError("Provide a task identity and project.")
+        identity = label(registration["identity"]).strip()
+        project = label(registration["project"])
+        if not identity:
+            raise ValueError("Provide a readable identity for the task.")
+        request = Item.parse(item)
+        choices = self.choices(request)
+        if len(choices) != 1:
+            raise ListingError("ineligible")
+        draft = Grant(new_id(), verifier(credential), uid, time(), identity, project, context,
+                      (request,), status="active", scope=(choices[0].scope,), workflow=workflow)
+        self.can_issue_workflow(draft)
+        return draft
+
+    def issue_workflow(self, draft):
+        self.can_issue_workflow(draft)
+        self._put(draft)
 
     @staticmethod
     def result_certificate_pins(record, vault, entry, revision, origin):
@@ -333,6 +371,8 @@ class Grants:
             identifier = self.credentials.get(digest)
             if identifier:
                 record = self.records[identifier]
+                if record.workflow is not None:
+                    raise ListingError("ineligible")
                 if (record.uid, record.identity.strip(), record.project) != (uid, identity, project):
                     raise ListingError("ineligible")
                 if change_id:

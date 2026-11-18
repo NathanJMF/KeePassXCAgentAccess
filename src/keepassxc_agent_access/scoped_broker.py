@@ -42,7 +42,7 @@ def access_details(token):
         return result
 
     pending = token.pending_change
-    return {
+    result = {
         "status": token.status, "identity": token.identity, "project": token.project,
         **{key: getattr(token.context, key) for key in ("model", "chat", "chat_id")},
         "scope": [item(value) for value in token.scope],
@@ -50,6 +50,9 @@ def access_details(token):
         "pending_change": ({"id": pending.id, "items": [item(value, requested=True) for value in pending.items]}
                            if pending else None),
     }
+    if token.workflow:
+        result["workflow"] = token.workflow[0]
+    return result
 
 
 class ScopedBroker:
@@ -130,7 +133,9 @@ class ScopedBroker:
                 pass
             elif operation in WORKFLOW_OPERATIONS and upload is None:
                 if operation == "workflow_request":
-                    if keys != {"request"}:
+                    if not {"request"} <= keys <= {"request", "enrollment"}:
+                        raise ValueError
+                    if "enrollment" in keys and not isinstance(payload["enrollment"], dict):
                         raise ValueError
                 else:
                     if keys != ({"workflow", "step"} if operation == "workflow_run" else {"workflow"}):
@@ -219,7 +224,8 @@ class ScopedBroker:
         if operation in WORKFLOW_OPERATIONS:
             if operation == "workflow_request":
                 try:
-                    return self.workflows.propose(payload["request"], credential, uid, context, live, deliver)
+                    return self.workflows.propose(payload["request"], credential, uid, context, live, deliver,
+                                                  enrollment=payload.get("enrollment"))
                 except (ValueError, TypeError, KeyError, AttributeError, RecursionError):
                     raise ListingError("invalid_request") from None
             workflow, step_payload = self.workflows.resolve(identifier, name, payload, uid, live)
@@ -245,7 +251,8 @@ class ScopedBroker:
                 self._charge_request(verifier(credential), uid, active=False)
                 status = self.grants.enroll(credential, uid, payload["request"], context)
                 return encode({"status": status})
-            token = self.grants.authenticate(credential, uid)
+            token = self.grants.authenticate(credential, uid, allow_workflow=approved_step is not None
+                                             or operation in ("access_status", "release_entry"))
             if operation == "release_entry":
                 self._charge_request(token.verifier, uid, active=token.status == "active")
                 return encode(self.grants.release_entry(token, vault, entry, context))
@@ -656,7 +663,7 @@ class ScopedBroker:
         with self.workspace.mutex:
             if not live():
                 raise ListingError("revoked")
-            token = self.grants.authenticate(credential, uid)
+            token = self.grants.authenticate(credential, uid, allow_workflow=True)
             self._charge_request(token.verifier, uid, active=token.status == "active")
             row = self.activity.write_receipt(token.id, receipt)
             generation = self.workspace.generation

@@ -8,11 +8,12 @@ import re
 from time import monotonic, time
 from uuid import UUID, uuid5
 
-from .access_settings import Destination, uuid_text
+from .access_settings import Destination, label, uuid_text
 from .activity import entry_target_labels
 from .approvals import Approval
 from .console_request import parse_console
 from .guest_request import parse_guest_request
+from .grants import verifier
 from .protocol import ListingError, decode, encode
 from .result_delivery import parse_result_usage
 
@@ -163,41 +164,69 @@ class WorkflowAccess:
         self.active = {}
         self.pending = set()
 
-    def current(self, workflow):
+    def current(self, workflow, draft=None, *, allow_paused=False):
         token = self.broker.grants.records.get(workflow.token)
+        if token is None and draft is not None:
+            try:
+                self.broker.grants.can_issue_workflow(draft)
+            except ListingError:
+                return False
+            token = draft
         record = self.workspace.registrations.get(workflow.vault)
-        return (not self.workspace.paused and monotonic() < workflow.deadline
+        return ((not self.workspace.paused or allow_paused) and monotonic() < workflow.deadline
                 and self.workspace.generation == workflow.workspace_generation
                 and token is not None and token.status == "active" and token.generation == workflow.token_generation
                 and record is not None and record.credential_revision(workflow.entry) == workflow.revision
                 and self.workspace.session(workflow.vault) is workflow.session)
 
-    def propose(self, raw, credential, uid, context, live, deliver):
+    def propose(self, raw, credential, uid, context, live, deliver, *, enrollment=None):
         identifier, vault, entry, minutes, common, steps, digest = parse_workflow(raw)
         origin = Destination.parse(common["origin"]).url
         needed = {"https_results", "https_body"} if "login" in common else {"https_results"}
         with self.workspace.mutex:
             if not live():
                 raise ListingError("revoked")
-            if self.workspace.paused:
-                raise ListingError("paused")
-            token = self.broker.grants.authenticate(credential, uid)
-            self.broker._charge_request(token.verifier, uid, active=token.status == "active")
             registration = self.workspace.registrations.get(vault)
             session = self.workspace.session(vault) if registration else None
-            if session is None or token.status != "active":
+            if session is None:
                 raise ListingError("ineligible")
+            grants = self.broker.grants
+            hashed = verifier(credential)
+            draft = None
+            if enrollment is not None and hashed not in grants.credentials:
+                self.broker._charge_request(hashed, uid, active=False)
+                draft = grants.workflow_candidate(credential, uid, enrollment, context,
+                                                  {"vault": vault, "entry": entry, "uses": sorted(needed),
+                                                   "origins": [origin]}, (identifier, digest))
+                token = draft
+            else:
+                token = grants.authenticate(credential, uid, allow_workflow=True)
+                self.broker._charge_request(hashed, uid, active=token.status == "active")
+                if enrollment is not None and (not token.workflow or not isinstance(enrollment, dict)
+                        or set(enrollment) != {"identity", "project"}
+                        or (label(enrollment["identity"]).strip(), label(enrollment["project"])) != (
+                            token.identity, token.project)):
+                    raise ListingError("ineligible")
+            if token.status != "active":
+                raise ListingError("ineligible")
+            resume_access = self.workspace.paused and draft is not None
+            if self.workspace.paused and not resume_access:
+                raise ListingError("paused")
+            if token.workflow and token.workflow != (identifier, digest):
+                raise ListingError("receipt_conflict")
             revision = registration.credential_revision(entry)
             if not any((scope.vault, scope.entry, scope.use_revision) == (vault, entry, revision)
                        and needed <= set(scope.uses) and origin in scope.origins for scope in token.scope):
                 raise ListingError("ineligible")
             self.active = {key: value for key, value in self.active.items() if self.current(value)}
             key = (token.id, identifier)
-            if len(self.active) + len(self.pending) >= MAX_WORKFLOWS or key in self.pending:
+            pending_key = (hashed, None if draft else identifier)
+            if len(self.active) + len(self.pending) >= MAX_WORKFLOWS or pending_key in self.pending:
                 raise ListingError("busy")
-            failure = self.activity.claim_workflow(token.id, identifier, digest)
-            if failure:
-                raise ListingError(failure)
+            if draft is None:
+                failure = self.activity.claim_workflow(token.id, identifier, digest)
+                if failure:
+                    raise ListingError(failure)
             if key in self.active:
                 raise ListingError("receipt_exists")
             review_deadline = monotonic() + self.approvals.timeout
@@ -208,13 +237,15 @@ class WorkflowAccess:
             event = self.activity.begin(uid, context, action, origin, entry, vault=registration.name, vault_id=vault,
                                         token=token.id, agent=token.identity, project=token.project, folder=folder,
                                         entry_title=name, scope=f"{len(steps)} steps · SHA-256 {digest}", workflow_id=identifier)
-            self.pending.add(key)
+            self.pending.add(pending_key)
 
         def guard(effect):
             with self.workspace.mutex:
-                return self.current(workflow) and effect()
+                return self.current(workflow, draft, allow_paused=resume_access) and effect()
 
-        details = (" › ".join(part for part in (registration.name, folder, name) if part),
+        enrollment_detail = ("Register this identity for the exact workflow and its status checks.",) if draft else ()
+        details = (*enrollment_detail,
+                   " › ".join(part for part in (registration.name, folder, name) if part) + f" ({entry})",
                    f"Review these {len(steps)} exact steps. Each can run once within {minutes} minutes.",
                    "With Guest Consoles auto approval enabled, a listed console can reconnect within this window.",
                    "Independent steps can run in any order.",
@@ -229,16 +260,22 @@ class WorkflowAccess:
                                      ensure_ascii=True, indent=2)
                           for step in steps.values()))
         ticket = Approval(event, uid, context, action, details, origin, review_deadline, identity=token.identity,
-                          project=token.project, requested=time(), workflow_review=True)
+                          project=token.project, requested=time(), workflow_review=True,
+                          workflow_enrollment=draft is not None, resume_access=resume_access)
         outcome = "Revoked"
         try:
             answer = self.approvals.wait(ticket, lambda: guard(live))
             if answer != "approved":
                 outcome = {"declined": "Denied", "expired": "Expired"}.get(answer, "Revoked")
                 raise ListingError(answer)
-            self.activity.authorize(event, "Owner approved exact workflow")
+            self.activity.authorize(event, "Owner approved workflow-only token" if draft else "Owner approved exact workflow")
 
             def publish():
+                if draft is not None:
+                    grants.issue_workflow(draft)
+                    failure = self.activity.claim_workflow(token.id, identifier, digest)
+                    if failure:
+                        raise ListingError(failure)
                 for name, step in steps.items():
                     if not step.capture:
                         continue
@@ -253,6 +290,9 @@ class WorkflowAccess:
                             and (step.expected_id is None or value == step.expected_id)):
                         workflow.captures[name] = value
                 workflow.deadline = monotonic() + minutes * 60
+                if resume_access:
+                    self.workspace.pause(False)
+                    workflow.workspace_generation = self.workspace.generation
                 self.active[key] = workflow
                 return True
 
@@ -262,7 +302,7 @@ class WorkflowAccess:
             deliver(encode(self.detail(workflow)), guard)
         finally:
             with self.workspace.mutex:
-                self.pending.discard(key)
+                self.pending.discard(pending_key)
             self.activity.finish(event, outcome)
 
     @staticmethod
@@ -283,7 +323,9 @@ class WorkflowAccess:
         with self.workspace.mutex:
             if not live():
                 raise ListingError("revoked")
-            token = self.broker.grants.authenticate(payload["credential"], uid)
+            token = self.broker.grants.authenticate(payload["credential"], uid, allow_workflow=True)
+            if token.workflow and token.workflow[0] != identifier:
+                raise ListingError("workflow_unavailable")
             workflow = self.active.get((token.id, identifier))
             if workflow is None or not self.current(workflow):
                 raise ListingError("workflow_unavailable")
