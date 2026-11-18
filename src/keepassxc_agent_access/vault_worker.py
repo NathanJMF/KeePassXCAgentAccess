@@ -87,7 +87,8 @@ def load_vault():
             reply(encode(use_console(consoles, data, entry)))
         elif data["operation"] == "use_password":
             if data["kind"] == ActionType.RESULTS:
-                use_results(entry, data["result_request"], data["url"], allow_username=data.get("allow_username") is True)
+                use_results(entry, data["result_request"], data["url"],
+                            allow_username=data.get("allow_username") is True, private_result=data.get("private_result"))
             elif data["kind"] == ActionType.STDIN:
                 use_command(entry, data["command"], data["executable_sha256"])
             elif data["kind"] == ActionType.NETWORK_PROMPT:
@@ -136,7 +137,7 @@ def use(entry, url, kind, method, request_json, *, headers=(), query=()):
         reply(encode(failure()))
 
 
-def use_results(entry, descriptor, origin, *, allow_username=False):
+def use_results(entry, descriptor, origin, *, allow_username=False, private_result=None):
     if entry is None:
         reply(encode(failure()))
         return
@@ -147,7 +148,7 @@ def use_results(entry, descriptor, origin, *, allow_username=False):
         def dispatch():
             reply(encode({"ready": True}))
             return sys.stdin.buffer.readline(16) == b"dispatch\n"
-        reply(encode(deliver_results(request, entry, dispatch, allow_username=allow_username)))
+        reply(encode(deliver_results(request, entry, dispatch, allow_username=allow_username, private_result=private_result)))
     except (OSError, HTTPException, ValueError, TypeError, KeyError):
         reply(encode(failure()))
 

@@ -649,17 +649,25 @@ class AccessView(Gtk.Box):
 
     def _review_usage(self, ticket, *, standalone=False):
         queue = self.app.usage_approvals
-        title = "Review Guest Console" if ticket.opens_console else (
-            "Review HTTPS Write" if ticket.write_once else "Review Agent Usage")
+        if ticket.opens_console:
+            title = "Review Guest Console"
+        elif ticket.guest_command:
+            title = "Review Guest Commands"
+        else:
+            title = "Review HTTPS Write" if ticket.write_once else "Review Agent Usage"
         dialog, body = _dialog(self.app, title, 620, -1)
         dialog.set_name("keeper-access-review")
         dialog.set_position(Gtk.WindowPosition.CENTER_ON_PARENT)
         dialog.set_modal(True)
-        approve_label = (
-            f"Allow for {ticket.reuse_minutes} min" if ticket.reuse_minutes else "Open Console"
-        ) if ticket.opens_console else (
-            "Approve Write Once" if ticket.write_once else (
-                "Approve and Trust Certificate" if ticket.trusts_certificate else "Approve Once"))
+        if ticket.reuse_minutes:
+            approve_label = f"Allow for {ticket.reuse_minutes} min"
+        elif ticket.opens_console:
+            approve_label = "Open Console"
+        elif ticket.guest_command:
+            approve_label = "Run Command Once"
+        else:
+            approve_label = "Approve Write Once" if ticket.write_once else (
+                "Approve and Trust Certificate" if ticket.trusts_certificate else "Approve Once")
         dialog.add_buttons("Deny", Gtk.ResponseType.REJECT, approve_label, Gtk.ResponseType.ACCEPT)
         dialog.connect("key-press-event", lambda *_: True)
         dialog.connect("key-release-event", lambda *_: True)
@@ -669,9 +677,14 @@ class AccessView(Gtk.Box):
         add_label(body, "Requested by · agent-reported")
         body.pack_start(styled(_label(ticket.identity), "keeper-access-agent"), False, False, 0)
         add_label(body, ticket.project)
-        if ticket.write_once or ticket.opens_console:
-            add_label(body, "Allow screenshots and input for the guest shown below." if ticket.opens_console else
-                      "This request changes data on the destination. Review the method, path and request body below.")
+        if ticket.opens_console:
+            add_label(body, "Allow screenshots and input for the guest shown below.")
+        elif ticket.guest_command:
+            add_label(body, "Allow any command at this endpoint during the approved window." if ticket.reuse_minutes else
+                      "Run the command shown below and allow the agent to check its result.")
+        elif ticket.write_once:
+            add_label(body, "This request changes data on the destination. Review the method, path and request body below.")
+        if ticket.write_once or ticket.opens_console or ticket.guest_command:
             if ticket.context.note:
                 add_label(body, ticket.context.note)
         details = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
@@ -687,6 +700,8 @@ class AccessView(Gtk.Box):
             add_label(body, "The same connection can be reopened during this window. "
                       "Pause agent access or lock the vault before reassigning this console target."
                       if ticket.reuse_minutes else "Approval applies to this console session.")
+        elif ticket.guest_command:
+            add_label(body, "The command approval also covers its status checks and the listed result fields.")
         else:
             add_label(body, "Approves this operation and remembers its verified certificate for this token and resource."
                       if ticket.trusts_certificate else "Approval applies to this operation only.")

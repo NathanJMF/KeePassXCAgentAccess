@@ -11,7 +11,8 @@ import sys
 from uuid import UUID
 
 from .agent_cli import EDIT_OPERATIONS, ENTRY_FIELDS, CREDENTIAL_USE_TYPES, USE_TYPES, edit_request, edit_uuid, usage_request
-from .protocol import CLIENT_TIMEOUT, ERRORS, ListingError, REQUEST_LIMIT, UPLOAD_LIMIT, decode, encode, validate_command
+from .protocol import (CLIENT_TIMEOUT, ERRORS, ListingError, MAX_GUEST_REUSE_MINUTES, MAX_GUEST_TEXT, REQUEST_LIMIT, UPLOAD_LIMIT,
+                       decode, encode, validate_command)
 from .runner_token import UninitializedProfile, open_profile
 
 
@@ -22,7 +23,7 @@ PROTOCOLS = ("2025-06-18", "2025-03-26", "2024-11-05")
 
 def tool(name, description, properties=None, *, required=(), read_only=True):
     properties = dict(properties or {})
-    if name not in ("access_status", "edit_status", "write_status"):
+    if name not in ("access_status", "edit_status", "write_status", "guest_status"):
         properties["note"] = {"type": "string", "minLength": 1, "maxLength": 180,
                               "description": "Short audit reason. Keep credentials and private values out of notes."}
     return {
@@ -140,6 +141,22 @@ OPERATIONS = {
         "write_status", "Check a protected HTTPS write receipt without repeating the write.",
         {"receipt": REFERENCE}, required=("receipt",),
     )),
+    "guest_run": (("guest", "run"), tool(
+        "guest_run", "Submit a command to an owner-approved guest endpoint and retain its write receipt.",
+        {"vault": REFERENCE, "entry": REFERENCE, "receipt": REFERENCE,
+         "workflow": {"type": "object", "description": "Pinned command and status request template from the Keeper skill."},
+         "guest_command": {"type": "string", "minLength": 1, "maxLength": MAX_GUEST_TEXT},
+         "reuse_minutes": {"type": "integer", "minimum": 1, "maximum": MAX_GUEST_REUSE_MINUTES}},
+        required=("vault", "entry", "receipt", "workflow", "guest_command"), read_only=False,
+    )),
+    "guest_status": (("guest", "status"), tool(
+        "guest_status", "Check the result fields approved for this guest job.",
+        {"receipt": REFERENCE}, required=("receipt",),
+    )),
+    "guest_release": (("guest", "release"), tool(
+        "guest_release", "Give up this guest job's status handle. The write receipt stays available.",
+        {"receipt": REFERENCE}, required=("receipt",), read_only=False,
+    )),
     "list_vaults": (("vaults", "list"), tool("list_vaults", "List vaults available to the active token.")),
     "list_entries": (("entries", "list"), tool(
         "list_entries", "List approved entry metadata and optionally request approved username or URL fields.",
@@ -218,6 +235,15 @@ def invocation(name, arguments):
         raise ValueError
     if name == "request_edit":
         request = edit_request(request)
+    if name == "guest_run":
+        if not isinstance(arguments["workflow"], dict) or not isinstance(arguments["guest_command"], str):
+            raise ValueError
+        request = {"workflow": arguments["workflow"], "command": arguments["guest_command"]}
+        if "reuse_minutes" in arguments:
+            minutes = arguments["reuse_minutes"]
+            if type(minutes) is not int or not 1 <= minutes <= MAX_GUEST_REUSE_MINUTES:
+                raise ValueError
+            command.append(f"--reuse-for={minutes}")
     data = encode(request) if request is not None else encode(usage) if usage is not None else b""
     if usage is not None and "input_base64" in arguments:
         command.extend((f"--origin={usage['origin']}", f"--prompt-variable={usage['prompt_variable']}"))

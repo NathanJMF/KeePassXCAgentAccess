@@ -35,6 +35,7 @@ TOKEN_AUTO_APPROVAL_OPTIONS = {
 
 GUEST_AUTO_APPROVAL_OPTIONS = {
     "console_open": "Guest Consoles - Open and Reconnect",
+    "guest_run": "Guest Commands - Run",
 }
 
 REVIEW_ACTIONS = {

@@ -15,7 +15,8 @@ from urllib.parse import urlsplit
 
 from .runner_token import UninitializedProfile, credential
 from .protocol import (
-    CLIENT_TIMEOUT, CONSOLE_OPERATIONS, CONSOLE_SECONDS, ERRORS, LIST_REQUEST, ListingError, MAX_CONSOLE_REUSE_MINUTES,
+    CLIENT_TIMEOUT, CONSOLE_OPERATIONS, CONSOLE_SECONDS, ERRORS, GUEST_OPERATIONS, LIST_REQUEST, ListingError,
+    MAX_CONSOLE_REUSE_MINUTES, MAX_GUEST_REUSE_MINUTES, MAX_GUEST_TEXT,
     REQUEST_LIMIT, REQUEST_TIMEOUT, RESPONSE_LIMIT, UPLOAD_LIMIT,
     decode, encode, receive, remaining, validate_command,
 )
@@ -327,6 +328,21 @@ def _validate_access_details(reply):
         items(pending["items"], requested=True)
 
 
+def _validate_result_rows(rows, columns=None, *, scalar=False, text_limit=512):
+    if not isinstance(rows, list) or len(rows) > 256 or scalar and len(rows) != 1:
+        raise ListingError("invalid_response")
+    for row in rows:
+        if not isinstance(row, dict) or (columns is not None and set(row) != set(columns)):
+            raise ListingError("invalid_response")
+        if columns is None:
+            result_columns(list(row))
+        for value in row.values():
+            if (value is not None and type(value) not in (str, bool, int, float)
+                    or isinstance(value, str) and len(value) > text_limit
+                    or type(value) is float and not math.isfinite(value)):
+                raise ListingError("invalid_response")
+
+
 def _validate(reply, payload):
     operation = payload["operation"]
     if not isinstance(reply, dict):
@@ -360,6 +376,33 @@ def _validate(reply, payload):
                 or ("http_status" in reply and (type(code) is not int or not 100 <= code <= 599))
                 or (status in ("succeeded", "acknowledged") and (code is None or not 200 <= code < 300))
                 or (status not in ("succeeded", "acknowledged", "failed") and code is not None)):
+            raise ListingError("invalid_response")
+        return reply
+    if operation == "guest_release":
+        if reply != {"id": payload["receipt"], "outcome": "released"}:
+            raise ListingError("invalid_response")
+        return reply
+    if operation in GUEST_OPERATIONS:
+        outcome = reply.get("outcome")
+        code = reply.get("http_status")
+        success = outcome in ("succeeded", "acknowledged")
+        expected = {"id", "outcome"}
+        if success or "http_status" in reply:
+            expected.add("http_status")
+        if outcome == "succeeded" and operation == "guest_status":
+            expected.add("data")
+            _validate_result_rows(reply.get("data"), text_limit=MAX_GUEST_TEXT)
+        if payload.get("reuse_minutes"):
+            expected.add("reuse_expires_in")
+            reuse = reply.get("reuse_expires_in")
+            if type(reuse) is not int or not 0 <= reuse <= MAX_GUEST_REUSE_MINUTES * 60:
+                raise ListingError("invalid_response")
+        if (set(reply) != expected or reply["id"] != payload["receipt"]
+                or outcome not in ("succeeded", "acknowledged", "failed", "uncertain")
+                or (code is not None and (type(code) is not int or not 100 <= code <= 599))
+                or (success and (code is None or not 200 <= code < 300))
+                or (outcome == "uncertain" and code is not None)
+                or (operation == "guest_status" and outcome not in ("succeeded", "failed"))):
             raise ListingError("invalid_response")
         return reply
     if operation in CONSOLE_OPERATIONS:
@@ -447,20 +490,10 @@ def _validate(reply, payload):
             if reply.get("outcome") == "succeeded":
                 if set(reply) != {"outcome", "http_status", "data"} or type(reply["http_status"]) is not int or not 200 <= reply["http_status"] < 300:
                     raise ListingError("invalid_response")
-                rows = reply["data"]
                 projection = payload["usage"]["result"]
                 scalar = "scalar" in projection
                 columns = result_columns([projection["scalar"]] if scalar else projection["columns"])
-                if not isinstance(rows, list) or len(rows) > 256 or scalar and len(rows) != 1:
-                    raise ListingError("invalid_response")
-                for row in rows:
-                    if not isinstance(row, dict) or set(row) != set(columns):
-                        raise ListingError("invalid_response")
-                    for value in row.values():
-                        if (value is not None and type(value) not in (str, bool, int, float)
-                                or isinstance(value, str) and len(value) > 512
-                                or type(value) is float and not math.isfinite(value)):
-                            raise ListingError("invalid_response")
+                _validate_result_rows(reply["data"], columns, scalar=scalar)
                 return reply
             if (reply.get("outcome") == "acknowledged" and set(reply) == {"outcome", "http_status"}
                     and type(reply["http_status"]) is int and 200 <= reply["http_status"] < 300
@@ -619,6 +652,21 @@ def main(argv=None):
         else:
             command.add_argument("--json", action="store_true", required=True)
         command.set_defaults(operation="console_" + verb)
+    guest = topics.add_parser("guest", help="Run or check commands at an approved guest endpoint")
+    commands = guest.add_subparsers(required=True)
+    command = commands.add_parser("run", help="Read a guest workflow and command from stdin as JSON")
+    command.add_argument("--vault", required=True, type=_request_id)
+    command.add_argument("--entry", required=True, type=_request_id)
+    command.add_argument("--reuse-for", type=int, metavar="MINUTES",
+                         help=f"Ask to reuse this endpoint for up to {MAX_GUEST_REUSE_MINUTES} minutes")
+    command.set_defaults(operation="guest_run")
+    status = commands.add_parser("status", help="Read the approved result fields for a guest job")
+    status.set_defaults(operation="guest_status")
+    release = commands.add_parser("release", help="Give up this profile's job status handle")
+    release.set_defaults(operation="guest_release")
+    for subcommand in (command, status, release):
+        subcommand.add_argument("--receipt", required=True, type=_request_id)
+        subcommand.add_argument("--json", action="store_true", required=True)
     run = topics.add_parser("run", help="Use a Keeper credential with an approved isolated command")
     run.add_argument("--vault", help="Scoped vault ID")
     run.add_argument("--entry", required=True, help="Entry UUID")
@@ -673,11 +721,12 @@ def main(argv=None):
         payload["id"] = options.request
     if getattr(options, "receipt", None):
         payload["receipt"] = options.receipt
-    if options.operation in ("console_open", "release_entry"):
+    if options.operation in ("console_open", "release_entry", "guest_run"):
         payload["entry"] = options.entry
-        if options.operation == "console_open" and options.reuse_for is not None:
-            if not 1 <= options.reuse_for <= MAX_CONSOLE_REUSE_MINUTES:
-                parser.error(f"--reuse-for needs a duration from 1 to {MAX_CONSOLE_REUSE_MINUTES} minutes")
+        if options.operation in ("console_open", "guest_run") and options.reuse_for is not None:
+            maximum = MAX_CONSOLE_REUSE_MINUTES if options.operation == "console_open" else MAX_GUEST_REUSE_MINUTES
+            if not 1 <= options.reuse_for <= maximum:
+                parser.error(f"--reuse-for needs a duration from 1 to {maximum} minutes")
             payload["reuse_minutes"] = options.reuse_for
     elif options.operation in CONSOLE_OPERATIONS:
         payload["console"] = options.console
@@ -724,6 +773,17 @@ def main(argv=None):
                 payload["request" if options.operation == "console_open" else "events"] = decode(raw)
             except (ValueError, RecursionError):
                 raise ListingError("invalid_request") from None
+        if options.operation == "guest_run":
+            try:
+                raw = sys.stdin.buffer.read(REQUEST_LIMIT)
+                if not raw or len(raw) >= REQUEST_LIMIT:
+                    raise ValueError
+                guest = decode(raw)
+                if not isinstance(guest, dict) or set(guest) != {"workflow", "command"}:
+                    raise ValueError
+                payload.update(guest)
+            except (ValueError, RecursionError):
+                raise ListingError("invalid_request") from None
         if options.operation in ("request_access", "request_edit"):
             try:
                 raw = sys.stdin.buffer.read(REQUEST_LIMIT)
@@ -742,7 +802,7 @@ def main(argv=None):
                 payload["request"] = edit_request(submitted) if options.operation == "request_edit" else submitted
             except (ValueError, RecursionError):
                 raise ListingError("invalid_request") from None
-        if options.operation != "discover" and (token_file or options.operation in (
+        if options.operation != "discover" and (token_file or options.operation in GUEST_OPERATIONS or options.operation in (
             "request_access", "access_status", "release_entry", "list_vaults", "request_edit", "edit_status", "write_status",
         )):
             scope = payload.get("request")

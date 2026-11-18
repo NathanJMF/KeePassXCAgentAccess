@@ -20,6 +20,7 @@ from urllib.parse import quote, quote_plus, urlencode
 
 from .access_settings import Destination, HTTPS_METHODS, HTTPS_WRITE_METHODS, credential_headers, request_query
 from .command_network import approved_address
+from .protocol import MAX_GUEST_TEXT
 
 
 BODY_LIMIT = 256 * 1024
@@ -271,7 +272,7 @@ def result_fields(projection):
     return [projection["scalar"]] if "scalar" in projection else projection["columns"]
 
 
-def _project(document, projection, forbidden):
+def _project(document, projection, forbidden, private_number=None, *, guest_output=False):
     rows = _select(document, projection["path"])
     if "scalar" in projection:
         rows = [{projection["scalar"]: rows}]
@@ -286,11 +287,18 @@ def _project(document, projection, forbidden):
         item = {}
         for field in result_fields(projection):
             value = row.get(field)
+            if isinstance(value, str):
+                text_valid = (all(char.isprintable() or char in "\n\t\r" for char in value)
+                              if guest_output else value.isprintable())
+                if not text_valid or len(value) > (MAX_GUEST_TEXT if guest_output else 512):
+                    raise ValueError("Only bounded text result fields may be returned.")
             if (type(value) not in (str, int, float, bool, type(None))
-                    or isinstance(value, str) and (len(value) > 512 or not value.isprintable())
                     or isinstance(value, int) and not -(2**53) < value < 2**53
                     or isinstance(value, float) and not math.isfinite(value)):
                 raise ValueError("Only bounded scalar result fields may be returned.")
+            if private_number is not None and (type(value) in (int, float) and value == private_number
+                    or isinstance(value, str) and re.search(rf"(?<![0-9]){private_number}(?![0-9])", value)):
+                raise ValueError("The projected result contains a private job identifier.")
             item[field] = value
         result.append(item)
     encoded = _json(result)
@@ -431,7 +439,7 @@ def _private_strings(document):
     return result
 
 
-def deliver_results(config, entry, dispatch, *, allow_username=False):
+def deliver_results(config, entry, dispatch, *, allow_username=False, private_result=None):
     """Release only the concrete approved projection; dispatch gates every send."""
     sent_write = False
     write_status = None
@@ -445,6 +453,13 @@ def deliver_results(config, entry, dispatch, *, allow_username=False):
             return {"outcome": "failed"}
         values = {"password": password, "username": username}
         forbidden = [password, username + ":" + password]
+        private_number = None
+        if type(private_result) is int and 1 <= private_result < 2**53:
+            private_number = private_result
+        elif private_result is not None:
+            if not isinstance(private_result, str) or not 16 <= len(private_result) <= 64:
+                raise ValueError("Invalid private result value.")
+            forbidden.append(private_result)
         if username and not allow_username:
             forbidden.append(username)
         deadline = monotonic() + WORKFLOW_SECONDS
@@ -500,7 +515,7 @@ def deliver_results(config, entry, dispatch, *, allow_username=False):
         status, document = _http(data["origin"], pin, deadline, request["method"], path, headers, body, gate, forbidden, observe)
         if not 200 <= status < 300:
             return {"outcome": "failed", "http_status": status}
-        projected = _project(document, data["result"], forbidden)
+        projected = _project(document, data["result"], forbidden, private_number, guest_output=private_result is not None)
         return {"outcome": "succeeded", "http_status": status, "data": projected}
     except (OSError, HTTPException, ValueError, KeyError, IndexError, TypeError, AttributeError, RecursionError):
         if write_status is not None:

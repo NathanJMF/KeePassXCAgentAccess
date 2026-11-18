@@ -13,7 +13,8 @@ from .access_settings import ActionType, Destination, action_id, uuid_text
 from .activity import ActivityError, Attribution, entry_label, entry_target_labels
 from .console_access import ConsoleAccess
 from .grants import OPTIONAL_METADATA_FIELDS, verifier
-from .protocol import CONSOLE_OPERATIONS, RESPONSE_LIMIT, ListingError, decode, encode, validate_command, validate_upload
+from .guest_access import GuestAccess
+from .protocol import CONSOLE_OPERATIONS, GUEST_OPERATIONS, RESPONSE_LIMIT, ListingError, decode, encode, validate_command, validate_upload
 from .result_delivery import result_fields
 from .settings import SettingsError
 from .usage import requires_body_permission, requires_write_permission, usage_action, usage_origin
@@ -64,6 +65,7 @@ class ScopedBroker:
         self.command_slots = BoundedSemaphore(2)
         self.certificate_reviews = set()
         self.console_access = ConsoleAccess(self)
+        self.guest_access = GuestAccess(self)
 
     @contextmanager
     def _command_slot(self):
@@ -119,6 +121,8 @@ class ScopedBroker:
             usage = None
             receipt = None
             if operation in ("request_access", "request_edit") and keys == {"request"}:
+                pass
+            elif operation in GUEST_OPERATIONS and upload is None:
                 pass
             elif operation == "edit_status" and keys == {"id"}:
                 pass
@@ -184,6 +188,11 @@ class ScopedBroker:
         ).decode("ascii"):
             raise ListingError("invalid_request")
 
+        if operation in GUEST_OPERATIONS:
+            try:
+                return self.guest_access.handle(operation, keys, payload, uid, context, live, dispatch, deliver)
+            except (ValueError, TypeError, KeyError, AttributeError, RecursionError):
+                raise ListingError("invalid_request") from None
         if operation == "request_edit":
             with self.workspace.mutex:
                 if not live():

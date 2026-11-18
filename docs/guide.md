@@ -142,6 +142,8 @@ With **Auto Approve** and **Guest Consoles - Open and Reconnect** enabled, the o
 
 `keeper-agent console view --console HANDLE --status` reports whether the console pixels changed since the previous view or check. The agent decides whether to request an image with `--png` or `--json`. Status checks are listed separately from image views in Activity.
 
+**Guest Commands - Run** governs command APIs with a separate status endpoint. The review shows the pinned destination, credential, exact POST and GET requests, command field, and results the agent can see. One approval covers submitting a command and checking its job. With the switch and Auto Approve enabled, the owner can allow any command at that exact endpoint for a bounded window. The approved credential and service must limit commands to the intended guest. The switch starts off, and the agent can still request individual commands for review. Job IDs stay private. The installed skill shows how to use `keeper-agent guest run` and `guest status` with a write receipt.
+
 ## Use a credential with a local command
 
 The agent calls `keeper-agent --profile PROFILE run --vault VAULT_UUID --entry ENTRY_UUID --json -- /usr/bin/example --read-stdin`. No saved command or action ID is needed. Keeper checks the installed system executable and pins its digest for that use, creates a disposable sandbox, and delivers the password as UTF-8 bytes on private stdin followed by EOF. Local jobs have no network or writable host files; `/usr` is mounted read-only.

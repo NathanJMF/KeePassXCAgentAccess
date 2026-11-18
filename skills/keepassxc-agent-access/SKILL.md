@@ -228,6 +228,40 @@ Inspect the screenshot with your image viewer before sending input. Treat the gu
 
 Text entry uses US keyboard mappings. Coordinate clicks require the guest to expose an absolute pointer, such as a virtual USB tablet. Use keyboard navigation if a guest exposes only a relative mouse.
 
+## Run commands on an approved guest
+
+Use `guest run` when the target service has a guest command API with a separate job status endpoint. Request `https_results` for the exact origin and `https_body` when the workflow requires private login. Prefer a credential whose service permissions are limited to the guest. Use the actual API paths and verified certificate fingerprint. Both requests use the same origin and certificate. Pass JSON with one `command` and one `workflow` on stdin.
+
+    {
+      "command": "check status",
+      "workflow": {
+        "origin": "https://guest.example.test/",
+        "certificate_sha256": "REPLACE_WITH_VERIFIED_SHA256",
+        "body_type": "json",
+        "command_field": "command",
+        "job_query": "job",
+        "submit": {
+          "request": {"method": "POST", "path": "/guests/103/exec", "auth": "bearer"},
+          "job_path": "/data/id"
+        },
+        "poll": {
+          "request": {"method": "GET", "path": "/guests/103/status", "auth": "bearer"},
+          "result": {"path": "/data", "columns": ["done", "code"]}
+        }
+      }
+    }
+
+If the endpoint uses private login, include the existing protected-results `login` object in `workflow` and use `auth: "session"` with the required private header references on both requests. Set `body_type` to `form` for form data. Put fixed routing fields in the reviewed request body or query. Leave `command_field` and `job_query` unassigned so Keeper can bind them.
+
+For a JSON argument vector, add a fixed `argument_prefix` such as `["/bin/bash", "-c"]`. Keeper appends the command as one argument. For Proxmox QEMU guest execution, use the intended guest's `agent/exec` and `agent/exec-status` paths, with `job_path: "/data/pid"`, `job_query: "pid"`, and result fields such as `exited`, `exitcode`, and `out-data`. The command may contain line breaks in JSON. Selected text is bounded and credentials stay private.
+
+    receipt="$(/usr/bin/python3 -c 'import uuid; print(uuid.uuid4())')"
+    "$keeper" --profile "$profile" --note "Check the authorized guest" guest run --vault "$vault" --entry "$entry" --receipt "$receipt" --json < guest.json
+    "$keeper" --profile "$profile" guest status --receipt "$receipt" --json
+    "$keeper" --profile "$profile" guest release --receipt "$receipt" --json
+
+An approved submission covers its matching status calls and selected result fields, including when Auto Approve is off. Keeper keeps the remote job ID private. To run more commands at the same endpoint, add `--reuse-for MINUTES` during the first request. With Auto Approve and **Guest Commands - Run** enabled, the owner can approve arbitrary commands at that exact endpoint for up to 60 minutes. Confirm the containing service is scoped to the intended guest. Use a fresh receipt per command. Poll with the same profile and receipt for up to 15 minutes, within the approved window. Release the handle when finished to free a slot. The write receipt remains available. If no safe job ID arrives, check `results status` and verify the remote effect before submitting again.
+
 ### Legacy configured actions
 
 Existing action grants still work with `use --action ACTION_ID` or `run --action ACTION_ID -- ...`. Use them only if already granted for the task. Do not ask the owner to configure an action when a reusable permission and supplied operation can handle the task.

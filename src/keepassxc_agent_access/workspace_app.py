@@ -1097,7 +1097,9 @@ class WorkspaceApplication(Gtk.Application):
             actions.pack_start(Gtk.Separator(), False, False, 0)
             self._settings_switch(actions, caption, operation in self.workspace.auto_approve_guest_actions,
                                   lambda control, operation=operation: self._set_guest_auto_approval(control, operation),
-                                  operation, "Allow an agent to reuse a connection you approved for a limited time.")
+                                  operation, "Allow another command at an endpoint you approved for a limited time."
+                                  if operation == "guest_run" else
+                                  "Allow an agent to reuse a connection you approved for a limited time.")
         self._token_auto_approval_settings(approvals)
         vaults = page("vaults", "Vaults", "drive-harddisk-symbolic")
         self._settings_switch(self._settings_card(vaults), "Start Unlocked", self.start_unlocked, self._set_start_unlocked,

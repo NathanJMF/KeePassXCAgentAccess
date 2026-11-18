@@ -185,11 +185,12 @@ class VaultSession:
         with self._exchange(request, WORKER_TIMEOUT) as read:
             return decode(read())["entry"]
 
-    def use(self, action, gate, *, input_path=None, allow_username=False):
+    def use(self, action, gate, *, input_path=None, allow_username=False, private_result=None):
         request = encode({"operation": "use_password", "entry": action.entry,
                           "url": action.url, "kind": action.kind, "command": action.command,
                           "method": action.method, "request_json": action.request_json,
                           "result_request": action.result_request, "allow_username": bool(allow_username),
+                          "private_result": private_result,
                           "headers": action.headers, "query": action.query, "opaque": action.opaque, "environment": action.environment, "prompt_contains": action.prompt_contains,
                           "browser": asdict(action.browser) if action.browser else None,
                           "executable_sha256": action.executable_sha256, "prompt_variable": action.prompt_variable,
