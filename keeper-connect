@@ -1,0 +1,28 @@
+#!/bin/sh
+set -eu
+
+endpoint=/run/keeper-connect-$(/usr/bin/id -u).sock
+case $#:$* in
+    '0:') exec /usr/bin/socat STDIO "UNIX-CONNECT:$endpoint" ;;
+    '1:--help')
+        printf '%s\n' 'Usage: keeper-connect [--profile NAME]' 'Start Keeper MCP on standard input and output.'
+        exit 0 ;;
+esac
+if [ "$#" -ne 2 ] || [ "$1" != --profile ]; then
+    echo 'Usage: keeper-connect [--profile NAME]' >&2
+    exit 2
+fi
+profile=$2
+case $profile in
+    ''|[!A-Za-z0-9]*|*[!A-Za-z0-9_-]*)
+        echo 'Choose a profile name with letters, numbers, underscores, or hyphens.' >&2
+        exit 2 ;;
+esac
+if [ "${#profile}" -gt 64 ]; then
+    echo 'Choose a profile name of at most 64 characters.' >&2
+    exit 2
+fi
+{
+    printf '{"jsonrpc":"2.0","method":"keeper/profile","params":{"name":"%s"}}\n' "$profile"
+    /usr/bin/cat
+} | /usr/bin/socat STDIO "UNIX-CONNECT:$endpoint"

@@ -1,6 +1,7 @@
 """Install or remove Keeper's per-user desktop application."""
 
 import argparse
+from base64 import b64encode
 from contextlib import contextmanager
 from fcntl import LOCK_EX, flock
 from hashlib import sha256
@@ -18,6 +19,8 @@ from time import monotonic, sleep
 from gi.repository import Gio, GLib
 
 from .access_settings import AccessStore
+from .agent_connection import installed_connection
+from .agent_setup import RUNTIME
 from .isolated_runner import broker_path, owned, subordinate_ids
 from .launcher import DESKTOP_ID, SKILL_PATH, desktop_contents, skill_destination, skill_launcher_contents
 from .settings import SettingsError, SettingsStore
@@ -27,7 +30,8 @@ APP = DESKTOP_ID.removesuffix(".desktop")
 SERVICE = "keeper-agent.service"
 LEGACY_SERVICE = "keepassxc-agent-access.service"
 CHECKOUT = Path(__file__).resolve().parents[2]
-PROGRAMS = ("keeper-agent", "run-tray", "keepassxc-agent", "keeper-agent-runner", "keeper-run-agent", "keeper-open", "uninstall")
+PROGRAMS = ("keeper-agent", "keeper-connect", "run-tray", "keepassxc-agent", "keeper-agent-runner",
+            "keeper-run-agent", "keeper-open", "uninstall")
 
 
 def digest(data):
@@ -66,6 +70,10 @@ def external_broker_active():
         return systemctl("is-active", "--quiet", LEGACY_SERVICE, check=False).returncode == 0
     except FileNotFoundError:
         return False
+
+
+def external_broker_managed():
+    return bool(systemctl("show", "--property=FragmentPath", "--value", LEGACY_SERVICE).stdout.strip())
 
 
 def service_contents(app, uid):
@@ -142,6 +150,33 @@ def stop_application():
         sleep(.1)
 
 
+def administer_connection(action, broker=None):
+    owner = os.getuid()
+    command = ["/usr/bin/pkexec", "/usr/bin/python3", "-I"]
+    payload = None
+    if action == "install":
+        # Read and pin the release before authentication. The administrator process
+        # never imports Python or opens payload files from the desktop checkout.
+        helper = regular_file(CHECKOUT / "src/keepassxc_agent_access/agent_setup.py")
+        files = {name: (helper if name == "agent-setup" else regular_file(CHECKOUT / name)) for name in RUNTIME}
+        if any(data is None for data in files.values()):
+            raise ValueError("Keeper's runner source is incomplete.")
+        payload = json.dumps({name: b64encode(data).decode("ascii") for name, data in files.items()}).encode()
+        command.extend(("-c", helper.decode("utf-8"), action, str(owner), "--payload-sha256", digest(payload)))
+    else:
+        helper_path = Path(f"/usr/local/lib/keeper-connect-{owner}/agent-setup")
+        info = helper_path.lstat()
+        if not stat.S_ISREG(info.st_mode) or info.st_uid != 0 or info.st_mode & 0o022:
+            raise ValueError("The installed administrator helper is unavailable or unsafe.")
+        command.extend((str(helper_path), action, str(owner)))
+    if broker is not None:
+        command.extend(("--broker", str(broker.path), "--runner-uid", str(broker.agent_uid)))
+    try:
+        subprocess.run(command, input=payload, check=True)
+    except subprocess.CalledProcessError:
+        raise ValueError("Keeper's administrator setup did not complete.") from None
+
+
 class Installation:
     def __init__(self):
         data = Path(GLib.get_user_data_dir())
@@ -177,10 +212,22 @@ class Installation:
             raise ValueError("Keeper’s installation record could not be read.")
         return state
 
+    def connection_update_needed(self):
+        if not installed_connection():
+            return False
+        runtime = Path(f"/usr/local/lib/keeper-connect-{os.getuid()}")
+        try:
+            for name in RUNTIME:
+                app_path = "src/keepassxc_agent_access/agent_setup.py" if name == "agent-setup" else name
+                if regular_file(runtime / name) != regular_file(self.app / app_path):
+                    return True
+        except (OSError, ValueError):
+            return True
+        return False
+
     def agent_unit(self):
         try:
-            legacy = systemctl("show", "--property=FragmentPath", "--value", LEGACY_SERVICE)
-            if legacy.stdout.strip():
+            if external_broker_managed():
                 raise ValueError("An existing Keeper broker service is managed separately. "
                                  "Run ./install for desktop setup, or retire that service before using --agent.")
         except subprocess.CalledProcessError as error:
@@ -193,7 +240,7 @@ class Installation:
                              "Keep that configuration, or clear it in Keeper before enabling the bundled runner.")
         return service_contents(self.app, uid)
 
-    def install(self, enable_agent):
+    def install(self, enable_agent, *, stop_existing=False):
         previous = self.installed()
         if self.app.exists() or self.app.is_symlink():
             owned(self.app, private=True)
@@ -291,7 +338,7 @@ class Installation:
                 if old_unit is not None and "unit" in previous:
                     systemctl("stop", SERVICE)
                     stopped_service = True
-                if agent or (previous and not external_broker_active()):
+                if agent or ((previous or stop_existing) and not external_broker_active()):
                     stop_application()
                 if self.app.exists():
                     self.app.rename(backup)
@@ -385,7 +432,9 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
     install = commands.add_parser("install")
-    install.add_argument("--agent", action="store_true")
+    agent = install.add_mutually_exclusive_group()
+    agent.add_argument("--agent", action="store_true")
+    agent.add_argument("--connect-agent", action="store_true")
     install.add_argument("--no-launch", action="store_true")
     commands.add_parser("uninstall")
     opening = commands.add_parser("open")
@@ -399,8 +448,25 @@ def main():
             open_application()
         elif args.command == "install":
             with installation.lock():
-                launcher, runner = installation.install(args.agent)
+                previous = installation.installed()
+                broker = None
+                if args.connect_agent:
+                    if "unit" in previous:
+                        raise ValueError("This installation uses the legacy runner. Keep it for existing grants, "
+                                         "or uninstall it before setting up the dedicated connection.")
+                    saved = AccessStore(SettingsStore().path.parent / "access.json").read()
+                    if not saved.endpoint and not installed_connection() and external_broker_managed():
+                        raise ValueError("The separately managed broker has no saved endpoint. "
+                                         "Save its current endpoint and runner in Keeper's Broker Settings before connecting.")
+                    broker = saved.broker_config()
+                elif args.agent and "unit" not in previous and installed_connection():
+                    raise ValueError("The dedicated Keeper connection is already installed. Use --connect-agent.")
+                launcher, runner = installation.install(args.agent, stop_existing=args.connect_agent)
+                if args.connect_agent:
+                    administer_connection("install", broker)
             print("Keeper is installed. Open Keeper from the application menu.")
+            if args.connect_agent:
+                print("Open Keeper Settings → Connect an Agent for the skill and MCP command.")
             if runner:
                 print(f"Agent skill: {skill_destination()}")
                 print(f"Agent command: {skill_destination().with_name('keeper-agent')}")
@@ -414,6 +480,8 @@ def main():
             removed = False
             if installation.base.exists() or installation.base.is_symlink():
                 with installation.lock():
+                    if installed_connection():
+                        administer_connection("remove")
                     removed = installation.uninstall()
             if removed:
                 print("Keeper was removed. Vaults, keyring entries, settings and Activity were kept.")

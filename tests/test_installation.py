@@ -8,10 +8,20 @@ import unittest
 from unittest.mock import patch
 
 from keepassxc_agent_access.installation import Installation, SERVICE
+from keepassxc_agent_access.agent_setup import unit_contents
 from keepassxc_agent_access.launcher import desktop_contents, skill_launcher_contents, _install_skill
 
 
 class InstallationTests(unittest.TestCase):
+    def test_agent_connection_uses_desktop_socket_and_protected_dedicated_service(self):
+        listener, runner = unit_contents(1000, "keeper-agent-1000", Path('/run/keeper-broker-1000/broker.sock'),
+                                         Path('/usr/local/lib/keeper-connect-1000'))
+        self.assertIn(b"ListenStream=/run/keeper-connect-1000.sock\nSocketUser=1000\nSocketMode=0600\nAccept=yes", listener)
+        self.assertIn(b"User=keeper-agent-1000", runner)
+        self.assertIn(b"--project-profiles /var/lib/keeper-connect-1000 --connection-profiles", runner)
+        for setting in (b"NoNewPrivileges=yes", b"ProtectHome=yes", b"RestrictAddressFamilies=AF_UNIX"):
+            self.assertIn(setting, runner)
+
     def setUp(self):
         directory = TemporaryDirectory()
         self.addCleanup(directory.cleanup)

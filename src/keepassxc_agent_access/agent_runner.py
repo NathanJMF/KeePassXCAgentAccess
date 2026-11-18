@@ -10,6 +10,7 @@ import re
 import stat
 import subprocess
 import sys
+from tempfile import TemporaryDirectory
 from uuid import UUID
 
 from .agent_cli import EDIT_OPERATIONS, ENTRY_FIELDS, CREDENTIAL_USE_TYPES, USE_TYPES, edit_request, edit_uuid, usage_request
@@ -481,18 +482,37 @@ class AgentRunner:
 class ProjectRunner(AgentRunner):
     """Route a project's MCP calls to runner-owned profiles by host-supplied chat ID."""
 
-    def __init__(self, socket, profiles):
+    def __init__(self, socket, profiles, *, connection_profile=None):
         self.socket = socket
         self.profiles = profiles
+        self.connection_profile = connection_profile
+        self.named_profile = None
+        self.initialized = False
+
+    def dispatch(self, message):
+        if self.connection_profile is not None and isinstance(message, dict):
+            method = message.get("method")
+            if method == "keeper/profile" and "id" not in message and not self.initialized:
+                params = message.get("params")
+                name = params.get("name") if isinstance(params, dict) else None
+                if isinstance(name, str) and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}", name):
+                    self.named_profile = self.profiles / sha256(("connection:" + name).encode("ascii")).hexdigest()
+                return None
+            if method in ("initialize", "tools/call"):
+                self.initialized = True
+        return super().dispatch(message)
 
     def call_tool(self, params):
         metadata = params.get("_meta")
         chat_id = metadata.get("threadId") if isinstance(metadata, dict) else None
-        if not isinstance(chat_id, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,127}", chat_id):
+        if chat_id is None and self.connection_profile is not None:
+            profile = self.named_profile or self.connection_profile
+        elif isinstance(chat_id, str) and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,127}", chat_id):
+            profile = self.profiles / sha256(chat_id.encode("ascii")).hexdigest()
+        else:
             return tool_result("Keeper needs the Codex thread ID on this project connection.", True)
         if not isinstance(params.get("name"), str) or params["name"] not in OPERATIONS:
             return tool_result("Invalid Keeper tool or arguments.", True)
-        profile = self.profiles / sha256(chat_id.encode("ascii")).hexdigest()
         try:
             profile.mkdir(mode=0o700, exist_ok=True)
             os.close(open_profile(profile))
@@ -507,6 +527,7 @@ def main(argv=None):
     profiles = parser.add_mutually_exclusive_group(required=True)
     profiles.add_argument("--profile-dir", type=Path, help="Absolute runner-owned profile directory")
     profiles.add_argument("--project-profiles", type=Path, help="Private profile root for a trusted project MCP connection")
+    parser.add_argument("--connection-profiles", action="store_true", help="Support MCP clients without thread metadata")
     parser.add_argument("--inherit-directory-fd", type=int, action="append", default=[],
                         help="Trusted launcher directory descriptor referenced by a configured path")
     options = parser.parse_args(argv)
@@ -515,6 +536,8 @@ def main(argv=None):
         parser.error("Socket and profile paths must be absolute.")
     if options.project_profiles and options.inherit_directory_fd:
         parser.error("Project connections require fixed socket and profile paths.")
+    if options.connection_profiles and not options.project_profiles:
+        parser.error("Connection profiles require a private project profile root.")
     try:
         pass_fds = inherited_directory_fds(options.socket, profile_path, options.inherit_directory_fd)
     except (OSError, OverflowError, ValueError):
@@ -524,6 +547,11 @@ def main(argv=None):
         os.close(open_profile(profile_path))
     except (OSError, ListingError):
         parser.exit(1, "Keeper runner profile is unavailable or unsafe. Use a private runner-owned directory.\n")
+    if options.connection_profiles:
+        with TemporaryDirectory(prefix="connection-", dir=profile_path) as connection:
+            ProjectRunner(options.socket, profile_path, connection_profile=Path(connection)).serve(
+                sys.stdin.buffer, sys.stdout.buffer)
+        return 0
     runner = (ProjectRunner(options.socket, profile_path) if options.project_profiles
               else AgentRunner(options.socket, profile_path, pass_fds=pass_fds))
     runner.serve(sys.stdin.buffer, sys.stdout.buffer)

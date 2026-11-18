@@ -59,6 +59,25 @@ class RunnerTests(TestCase):
         self.assertEqual(stat.S_IMODE(first_profile.stat().st_mode), 0o700)
         self.assertFalse((first_profile / "token").exists())
 
+    def test_generic_mcp_profile_names_are_optional_and_persist_across_connections(self):
+        from hashlib import sha256
+
+        def run(*messages):
+            result = subprocess.run(
+                [RUNNER, "--socket", self.endpoint, "--project-profiles", self.profile, "--connection-profiles"],
+                input=b"".join(encode(message) for message in messages), capture_output=True, check=True, timeout=12,
+            )
+            return [decode(line) for line in result.stdout.splitlines()]
+
+        self.assertEqual(payload(run(call_tool("access_status"))[0]), MISSING)
+        self.assertEqual(list(self.profile.iterdir()), [])
+        select = {"jsonrpc": "2.0", "method": "keeper/profile", "params": {"name": "Workspace-One"}}
+        for _ in range(2):
+            self.assertEqual(payload(run(select, frame("initialize"), call_tool("access_status"))[-1]), MISSING)
+        named = self.profile / sha256(b"connection:Workspace-One").hexdigest()
+        self.assertEqual(list(self.profile.iterdir()), [named])
+        self.assertEqual(stat.S_IMODE(named.stat().st_mode), 0o700)
+
     def test_workflow_registration_cannot_replace_host_identity_or_fill_empty_host_values(self):
         from unittest.mock import patch
         from uuid import uuid4

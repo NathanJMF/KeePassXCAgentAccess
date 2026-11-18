@@ -18,6 +18,7 @@ from gi.repository import Gdk, Gio, GLib, Gtk, Pango
 
 from .access_settings import GUEST_AUTO_APPROVAL_OPTIONS, REVIEW_ACTIONS, TOKEN_AUTO_APPROVAL_OPTIONS
 from .activity import ActivityError, ActivityStore
+from .agent_connection import connection_socket, installed_connection
 from .approvals import ApprovalQueue
 from .broker import BrokerConfig, ListingBroker
 from .desktop import DesktopSession
@@ -25,6 +26,7 @@ from .edit_requests import EditRequests
 from .grants import Grants
 from .installation import Installation
 from .keyring import KeyringError, SystemKeyring
+from .launcher import skill_destination
 from .legacy_tray import ACTIVE_ICON as TRAY_ACTIVE_ICON, ICON_DIRECTORY as TRAY_ICON_DIRECTORY
 from .legacy_tray import PAUSED_ICON as TRAY_PAUSED_ICON, LegacyTray
 from .owner_views import _dialog, _label, _scroll, table_time
@@ -95,7 +97,8 @@ class WorkspaceApplication(Gtk.Application):
             self.edit_requests = EditRequests(self.workspace, self.grants, self.activity)
             engine = ScopedBroker(self.workspace, self.grants, self.activity, edits=self.edit_requests,
                                   approvals=self.usage_approvals)
-            self.broker = ListingBroker(previous.broker_config(BrokerConfig.from_environment()), lambda: engine, engine)
+            fallback = BrokerConfig.from_environment() or installed_connection()
+            self.broker = ListingBroker(previous.broker_config(fallback), lambda: engine, engine)
             if self.broker.config:
                 self.broker.start()
         except OWNER_ERRORS as error:
@@ -1131,10 +1134,56 @@ class WorkspaceApplication(Gtk.Application):
                               "start-unlocked", "Use saved keyring passwords to unlock vaults when Keeper starts.")
         updates = page("updates", "Updates", "system-software-update-symbolic")
         self._updates_settings_page(self._settings_card(updates))
+        connect = page("connect-agent", "Connect an Agent", "network-wired-symbolic")
+        self._connect_agent_page(connect)
         broker = page("broker", "Broker Settings", "network-server-symbolic")
         self._broker_settings_page(self._settings_card(broker))
         stack.set_visible_child_name("auto-approve")
         return dialog
+
+    def _connect_agent_page(self, page):
+        def field(title, value, description):
+            card = self._settings_card(page)
+            card.pack_start(styled(_label(title), "keeper-settings-caption"), False, False, 0)
+            card.pack_start(styled(_label(description), "keeper-settings-description"), False, False, 0)
+            row = Gtk.Box(spacing=8)
+            entry = Gtk.Entry(text=str(value), editable=False, hexpand=True)
+            entry.get_accessible().set_name(title)
+            row.pack_start(entry, True, True, 0)
+            copy = Gtk.Button(label="Copy")
+            copy.get_accessible().set_name(f"Copy {title}")
+            copy.connect("clicked", lambda *_: Gtk.Clipboard.get(Gdk.SELECTION_CLIPBOARD).set_text(str(value), -1))
+            row.pack_start(copy, False, False, 0)
+            card.pack_start(row, False, False, 0)
+
+        field("Keeper Skill", skill_destination(), "Give this file to your agent for instructions on using Keeper.")
+        configured = installed_connection()
+        if not configured or not connection_socket(os.getuid()).is_socket():
+            card = self._settings_card(page)
+            card.pack_start(styled(_label("Run ./install --connect-agent once to enable the local MCP connection."),
+                                               "keeper-settings-description"), False, False, 0)
+            return
+        if not self.broker or self.broker.config != configured:
+            card = self._settings_card(page)
+            card.pack_start(styled(_label("The active broker differs from the installed connection. "
+                                          "Check Broker Settings before connecting an agent."),
+                                               "keeper-settings-description"), False, False, 0)
+            return
+        if not self.broker.enabled:
+            card = self._settings_card(page)
+            card.pack_start(styled(_label("The Keeper broker is unavailable. Check Broker Settings."),
+                                               "keeper-settings-description"), False, False, 0)
+            return
+        field("MCP Command", Installation().app / "keeper-connect",
+              "Add this command as a local standard input/output MCP server in your agent client.")
+        if Installation().connection_update_needed():
+            card = self._settings_card(page)
+            card.pack_start(styled(_label("To update the local runner, run ./install --connect-agent from your "
+                                          "trusted Keeper checkout."), "keeper-settings-description"), False, False, 0)
+        if self.workspace.paused:
+            card = self._settings_card(page)
+            card.pack_start(styled(_label("Agent Access is paused. Resume it in Keeper when you are ready."),
+                                               "keeper-settings-description"), False, False, 0)
 
     def _token_auto_approval_settings(self, page):
         card = self._settings_card(page)

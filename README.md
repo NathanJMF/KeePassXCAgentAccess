@@ -11,11 +11,11 @@ On Ubuntu GNOME, clone this repository and run one of these commands from the ch
 | Setup | Command |
 | --- | --- |
 | Desktop app and tray icon | `./install` |
-| Desktop app, broker, and isolated agent runner | `./install --agent` |
+| Desktop app and local agent connection | `./install --connect-agent` |
 
 1. Open **Keeper** and select **Add Vault…** to open an existing KeePass database.
 2. To remember a vault password, select **Remember on This Device**. Keeper stores it in the OS keyring.
-3. For agent access, give the agent the installed [Keeper skill](skills/keepassxc-agent-access/SKILL.md) at `Documents/Skills/Keeper/SKILL.md`. Its companion `keeper-agent` command connects through the isolated runner and creates a fresh profile with a readable identity for each task. Open **Access** to review requests for entries and permissions.
+3. For agent access, open **Settings → Connect an Agent**. Add the MCP command to your agent client and give the agent the installed [Keeper skill](skills/keepassxc-agent-access/SKILL.md). Open **Access** to review requests for entries and permissions.
 
 ## Agent Access
 

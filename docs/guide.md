@@ -16,13 +16,15 @@ Keeper installs the missing Ubuntu packages, adds **Keeper** to the application 
 
 Minimize the window to keep Keeper running in the tray. On Ubuntu GNOME with legacy tray icons enabled, left-click the tray icon to reopen Keeper. Right-click for **Open Keeper**. When only AppIndicator is available, select **Open Keeper** from its menu or middle-click the icon. **X** and **Ctrl+Q** both quit Keeper.
 
-To set up the isolated agent runner and start Keeper’s broker at sign-in, run:
+To set up the local agent connection on Ubuntu, run:
 
 ```sh
-./install --agent
+./install --connect-agent
 ```
 
-Run as your desktop user. Setup asks for sudo if it needs Ubuntu packages. Agent setup also needs a systemd user session and subordinate UID/GID mappings for your account. Give each agent the installed Keeper skill. It runs the adjacent `keeper-agent begin --identity "Readable Agent Role" --project "Task Project"` command, then uses the returned profile handle for discovery, registration and approved operations. Each task starts with a fresh profile; the broker binds its identity and project at enrollment and attributes protected operations to that grant. Detailed status reports the registered identity and currently approved scope separately from pending changes. If an identity is already in use, start a fresh profile with a different readable identity. No client restart or shared MCP connection is needed for this workflow. Agent access starts paused. If you already have a separately managed broker service, use `./install` and configure that service and its runner to start from your protected installation. For the default Ubuntu data location, use `~/.local/share/keeper/app/run-tray` for the service and `~/.local/share/keeper/app/keeper-run-agent` for the runner.
+Run as your desktop user and approve the administrator prompt. Open **Settings → Connect an Agent** and copy the MCP command into your client's local (stdio) MCP settings. Give the agent the skill shown on that page. Clients that send a thread ID get one profile per thread. Other clients get a profile for the lifetime of their connection. To reuse a connection's grant after reconnecting, add `--profile WORKSPACE_NAME` to the command in that client. Use a different profile name for each workspace. Resume Agent Access in Keeper when you're ready to accept requests.
+
+The setup can reuse a saved broker endpoint with a Keeper-only, non-login runner account and a socket outside home directories. Use an agent client that isolates its shell and desktop tools from the owner account. The local MCP socket gives that client the Keeper tools, and the client needs its own boundary around other host capabilities. Existing `./install --agent` installations continue to use their legacy runner and the `keeper-agent` CLI. Uninstall the legacy app before switching to the dedicated connection. Changing the broker account requires new grants. Run `./install --connect-agent` again from a trusted Keeper release when the Connect an Agent page reports a runner update.
 
 To remove the managed installation, use `./uninstall` or the uninstall command printed by setup. It removes the installed app, launcher and managed broker service, and any unmodified skill and companion helper installed by setup. It keeps your vaults, remembered credentials, settings, tokens, runner profiles, Activity and shared Ubuntu packages.
 
