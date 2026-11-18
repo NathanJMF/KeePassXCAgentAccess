@@ -39,6 +39,7 @@ from .tray import APP_ID, APP_TITLE, SetupDialog, password_entry
 from .updates import UpdateError, check_for_update, start_update, update_result
 from .vault import UnlockCancelled, VaultError
 from .workspace import Workspace, ordered_groups
+from .workspace_clipboard import PasswordClipboard
 from .workspace_context import DELETE_LABEL, attach_row_context
 from .workspace_editor import delete_entry, delete_group, edit_entry, edit_group
 from .workspace_style import install_style, styled
@@ -77,6 +78,7 @@ class WorkspaceApplication(Gtk.Application):
         self.tree_signature = None
         self.tree_open_vaults = set()
         self.entry_rows = {}
+        self.password_clipboard = None
         self.review_popups = ReviewPopups(Path(self.directory) / "desktop-notifications.json")
         self.popup_source = None
 
@@ -141,6 +143,7 @@ class WorkspaceApplication(Gtk.Application):
 
     def _build_window(self):
         self.window = Gtk.ApplicationWindow(application=self, title=APP_TITLE)
+        self.password_clipboard = PasswordClipboard(self.window.get_screen())
         self.window.set_default_size(1120, 700)
         self.window.connect("delete-event", self._window_closed)
         self.window.connect("key-press-event", self._keyboard)
@@ -439,6 +442,8 @@ class WorkspaceApplication(Gtk.Application):
             self.activity_view.refresh()
 
     def _refresh(self):
+        if self.password_clipboard:
+            self.password_clipboard.check()
         if self.window and not self.exiting:
             if self.workspace:
                 self._refresh_tree()
@@ -746,6 +751,7 @@ class WorkspaceApplication(Gtk.Application):
         return self._actions_for(target, [
             [("View Entry Details…", lambda: with_entry(lambda entry: entry_details(self, vault, entry))),
              ("Edit Entry…", lambda: with_entry(lambda entry: edit_entry(self, vault, group, entry))),
+             ("Copy Password", lambda: with_entry(lambda _: self._copy_password(vault, identifier))),
              ("Copy Entry Reference", lambda: with_entry(lambda _: self.copy_reference(vault, "entry", identifier)))],
             [(DELETE_LABEL, lambda: with_entry(lambda entry: delete_entry(self, vault, group, entry)))],
         ])
@@ -753,6 +759,26 @@ class WorkspaceApplication(Gtk.Application):
     def _activity_context(self, row):
         identifier = row[self.activity_view.RECORD_ID]
         return [[("View Details…", lambda: self.activity_view.open_record(identifier))]]
+
+    def _copy_password(self, vault, identifier):
+        session = self.workspace.session(vault)
+        if not session:
+            return
+
+        def is_current():
+            return not self.exiting and not self.desktop.locked and self.workspace.session(vault) is session
+
+        def copy(password):
+            if not is_current():
+                self.message = "The vault changed before the password could be copied."
+            elif not password:
+                self.message = "This entry has no password."
+            elif self.password_clipboard.copy(password, is_current):
+                self.message = "Password copied."
+            else:
+                self.message = "Could not copy the entry password."
+
+        self._background(lambda: session.worker.owner_entry_password(identifier), after=copy)
 
     def copy_reference(self, vault, field, identifier):
         if not self.desktop.locked and self.workspace.owner_session(vault):
@@ -1445,6 +1471,8 @@ class WorkspaceApplication(Gtk.Application):
         body.pack_start(status, False, False, 0)
 
     def _desktop_lock(self, *_):
+        if self.password_clipboard:
+            self.password_clipboard.clear()
         dialog = self.dialog
         while isinstance(dialog, Gtk.Dialog):
             parent = dialog.get_transient_for()
@@ -1471,6 +1499,8 @@ class WorkspaceApplication(Gtk.Application):
         return GLib.SOURCE_REMOVE
 
     def do_shutdown(self):
+        if self.password_clipboard:
+            self.password_clipboard.close()
         if self.legacy_tray:
             self.legacy_tray.close()
         if self.popup_source is not None:

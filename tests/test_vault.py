@@ -5,6 +5,7 @@ import tempfile
 from threading import Event
 import unittest
 from unittest.mock import patch
+from uuid import uuid4
 
 from pykeepass import create_database
 
@@ -38,6 +39,22 @@ class VaultTests(unittest.TestCase):
         with self.assertRaisesRegex(VaultError, "key file is missing"):
             open_vault(VaultTarget(self.database, self.root / "missing.key"), self.password, Event())
         self.assertEqual(self.database.read_bytes(), before)
+
+    def test_owner_can_read_password_from_an_active_entry(self):
+        vault = create_database(self.database, self.password)
+        secret = " Synthetic entry password \u2603\n"
+        entry = vault.add_entry(vault.root_group, "Fixture", "", secret)
+        empty = vault.add_entry(vault.root_group, "Empty", "", "")
+        removed = vault.add_entry(vault.root_group, "Removed", "", "Removed synthetic password")
+        vault.trash_entry(removed)
+        vault.save()
+        with open_vault(VaultTarget(self.database), self.password, Event()) as session:
+            self.assertEqual(session.owner_entry_password(str(entry.uuid)), secret)
+            self.assertEqual(session.owner_entry_password(str(empty.uuid)), "")
+            self.assertNotIn(secret.strip(), str(session.owner_snapshot()))
+            for identifier in (removed.uuid, uuid4()):
+                with self.assertRaisesRegex(VaultError, "Could not load the entry password"):
+                    session.owner_entry_password(str(identifier))
 
     def test_wrong_password_and_invalid_database(self):
         create_database(self.database, self.password)

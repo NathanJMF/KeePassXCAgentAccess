@@ -130,6 +130,17 @@ class VaultSession:
             pass
         raise VaultError("Could not load the entry notes.")
 
+    def owner_entry_password(self, identifier):
+        request = encode({"operation": "owner_entry_password", "entry": identifier})
+        try:
+            with self._exchange(request, WORKER_TIMEOUT) as read:
+                response = decode(read())
+                if isinstance(response.get("password"), str):
+                    return response["password"]
+        except (ListingError, ValueError, AttributeError):
+            pass
+        raise VaultError("Could not load the entry password.")
+
     def owner_edit(self, change, gate):
         request = encode({"operation": "owner_edit", **change})
         if len(request) > EDIT_LIMIT:

@@ -42,6 +42,7 @@ STORED_URL = "https://fixture.example.test/owner-preview"
 BEARER_AUTHORIZATION = f"Bearer {PASSWORD}"
 EDIT_PASSWORD = "synthetic-owner-edit-password"
 REQUESTED_PASSWORD = "synthetic-approval-only-password"
+COPY_PASSWORD = " synthetic clipboard password \u2603 "
 
 
 def monitor_notifications():
@@ -82,6 +83,7 @@ def main(root):
     credential = primary.find_entries(uuid=UUID(first_entry), first=True)
     credential.username, credential.password = USERNAME, PASSWORD
     credential.url = STORED_URL
+    primary.find_entries(uuid=UUID(nested_entry), first=True).password = COPY_PASSWORD
     primary.save()
     second_path = private / "second.kdbx"
     shutil.copyfile(target.database, second_path)
@@ -1131,11 +1133,32 @@ def main(root):
                 first_path = next(row.path for row in entry_table.get_model() if row[ENTRY_ID_COLUMN] == first_entry)
                 nested_path = next(row.path for row in entry_table.get_model() if row[ENTRY_ID_COLUMN] == nested_entry)
                 entry_table.get_selection().select_path(first_path)
-                assert context_menu(entry_table, nested_path) == [
-                    "View Entry Details…", "Edit Entry…", "Copy Entry Reference", "Delete…",
-                ]
+                clipboard = Gtk.Clipboard.get(Gdk.SELECTION_CLIPBOARD)
+                with patch("keepassxc_agent_access.workspace_clipboard.PASSWORD_CLIPBOARD_TIMEOUT_MS", 1000):
+                    assert context_menu(entry_table, nested_path, activate="Copy Password") == [
+                        "View Entry Details…", "Edit Entry…", "Copy Password", "Copy Entry Reference", "Delete…",
+                    ]
+                    wait_for(lambda: not app.busy, "Password copy did not finish")
+                assert clipboard.wait_for_text() == COPY_PASSWORD
+                wait_for(lambda: clipboard.wait_for_text() is None, "Copied password did not expire")
                 entry_model, selected = entry_table.get_selection().get_selected()
                 assert entry_model[selected][ENTRY_ID_COLUMN] == nested_entry
+
+                select_tree(first, app.entry_rows[nested_entry]["group"])
+                copy_path, = (row.path for row in entry_table.get_model() if row[ENTRY_ID_COLUMN] == nested_entry)
+                context_menu(entry_table, copy_path, activate="Copy Password")
+                wait_for(lambda: not app.busy, "Copy Password in the group did not finish")
+                assert clipboard.wait_for_text() == COPY_PASSWORD
+                clipboard.set_text("newer clipboard content", -1)
+                app.password_clipboard.clear()
+                assert clipboard.wait_for_text() == "newer clipboard content"
+                context_menu(entry_table, copy_path, activate="Copy Password")
+                wait_for(lambda: not app.busy, "Second Copy Password did not finish")
+                app.vault_buttons["lock"].clicked()
+                assert clipboard.wait_for_text() is None
+                select_tree(first)
+                app.vault_buttons["unlock"].clicked()
+                wait_for(lambda: not app.busy and app.workspace.session(first), "Vault did not reopen")
 
                 title_column = next(column for column in entry_table.get_columns() if column.get_title() == "Title")
                 original = [tuple(row) for row in entry_table.get_model()]

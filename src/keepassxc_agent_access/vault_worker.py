@@ -87,7 +87,9 @@ def load_vault():
         if data["operation"] == "entry":
             reply(encode({"entry": metadata}))
         elif data["operation"] == "owner_entry_notes":
-            reply(entry_notes_frame(entry))
+            reply(entry_text_frame(entry, "notes"))
+        elif data["operation"] == "owner_entry_password":
+            reply(entry_text_frame(entry, "password"))
         elif data["operation"] in ("console_open", "console_view", "console_input", "console_close"):
             reply(encode(use_console(consoles, data, entry)))
         elif data["operation"] == "use_password":
@@ -114,12 +116,12 @@ def load_vault():
             return
 
 
-def entry_notes_frame(entry):
+def entry_text_frame(entry, field):
     if entry is None:
         return encode({"error": "unavailable"})
-    notes = entry.notes or ""
-    if len(notes) <= RESPONSE_LIMIT:
-        frame = encode({"notes": notes})
+    value = getattr(entry, field) or ""
+    if len(value) <= RESPONSE_LIMIT:
+        frame = encode({field: value})
         if len(frame) <= RESPONSE_LIMIT:
             return frame
     return encode({"error": "too_large"})
