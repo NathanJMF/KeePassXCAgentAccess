@@ -111,6 +111,16 @@ class ResultContractTests(TestCase):
         for reply in ({"outcome": "failed"}, {"outcome": "failed", "http_status": 401}, {"outcome": "uncertain"}):
             self.assertEqual(_validate(reply, request), reply)
 
+    def test_write_receipt_status_is_bound_to_requested_id_and_contains_no_output(self):
+        receipt = str(uuid4())
+        request = {"operation": "write_status", "receipt": receipt}
+        reply = {"id": receipt, "status": "acknowledged", "http_status": 204}
+        self.assertEqual(_validate(reply, request), reply)
+        for changes in ({"id": str(uuid4())}, {"status": "uncertain"}, {"data": []}, {"http_status": 404}):
+            with self.assertRaises(ListingError):
+                _validate({**reply, **changes}, request)
+        command, _ = invocation("write_status", {"receipt": receipt})
+        self.assertIn("--receipt=" + receipt, command)
 
 import test_dynamic_cli as dynamic_cli
 

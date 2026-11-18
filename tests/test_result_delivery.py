@@ -165,7 +165,7 @@ class ResultDeliveryTests(TestCase):
             data['approve_write_once'] = True
             data['request']['method'] = 'POST'
             data['result'] = {'path': '/data', 'scalar': 'task_id'}
-            self.assertEqual(deliver_results(data, site.entry, lambda: True), {'outcome': 'uncertain'})
+            self.assertEqual(deliver_results(data, site.entry, lambda: True), {'outcome': 'acknowledged', 'http_status': 200})
             self.assertEqual([row[:2] for row in site.seen], [('POST', '/login'), ('POST', '/write-echo')])
 
     def test_wrong_certificate_pin_sends_no_credential_or_request(self):

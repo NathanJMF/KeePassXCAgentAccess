@@ -76,7 +76,21 @@ CREATE TABLE IF NOT EXISTS activity (
     status INTEGER
 );
 CREATE INDEX IF NOT EXISTS activity_requested ON activity(requested DESC, id DESC);
+CREATE TABLE IF NOT EXISTS write_receipts (
+    token TEXT NOT NULL,
+    id TEXT NOT NULL,
+    generation INTEGER NOT NULL,
+    vault TEXT NOT NULL,
+    entry TEXT NOT NULL,
+    revision TEXT NOT NULL,
+    digest TEXT NOT NULL,
+    stage TEXT NOT NULL,
+    http_status INTEGER,
+    PRIMARY KEY (token, id)
+);
 """
+
+WRITE_RECEIPTS_PER_TOKEN = 512
 
 
 class ActivityStore:
@@ -117,6 +131,8 @@ class ActivityStore:
                 WHERE completed IS NULL""",
                 (time(),),
             )
+            db.execute("UPDATE write_receipts SET stage='not_sent' WHERE stage='pending'")
+            db.execute("UPDATE write_receipts SET stage='uncertain' WHERE stage='dispatching'")
         self.prune(days)
 
     def prune(self, days):
@@ -171,6 +187,32 @@ class ActivityStore:
                     entry_title=coalesce(?, entry_title) WHERE id=?""",
                 (now, now, outcome, status, entry, group_id, folder, entry_title, event),
             )
+
+    def claim_write(self, token, identifier, generation, vault, entry, revision, digest):
+        with self.connection() as db:
+            previous = db.execute("SELECT digest FROM write_receipts WHERE token=? AND id=?",
+                                  (token, identifier)).fetchone()
+            if previous is not None:
+                return "receipt_exists" if previous["digest"] == digest else "receipt_conflict"
+            count = db.execute("SELECT count(*) FROM write_receipts WHERE token=?", (token,)).fetchone()[0]
+            if count >= WRITE_RECEIPTS_PER_TOKEN:
+                return "receipt_limit"
+            db.execute("""INSERT INTO write_receipts(token, id, generation, vault, entry, revision, digest, stage)
+                          VALUES (?, ?, ?, ?, ?, ?, ?, 'pending')""",
+                       (token, identifier, generation, vault, entry, revision, digest))
+            return None
+
+    def write_receipt(self, token, identifier):
+        with self.connection() as db:
+            return db.execute("SELECT * FROM write_receipts WHERE token=? AND id=?", (token, identifier)).fetchone()
+
+    def advance_write(self, token, identifier, expected, stage, status=None):
+        with self.connection() as db:
+            changed = db.execute("""UPDATE write_receipts SET stage=?, http_status=?
+                                    WHERE token=? AND id=? AND stage=?""",
+                                 (stage, status, token, identifier, expected)).rowcount
+            if changed != 1:
+                raise ActivityError()
 
     def rows(self, *, model="", chat="", action="", outcome="", vault="", agent="", limit=1000):
         with self.connection() as db:

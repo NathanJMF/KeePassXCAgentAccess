@@ -351,6 +351,17 @@ def _validate(reply, payload):
                 or type(reply["cancelled_change"]) is not bool):
             raise ListingError("invalid_response")
         return reply
+    if operation == "write_status":
+        status = reply.get("status")
+        code = reply.get("http_status")
+        if (not {"id", "status"} <= reply.keys() <= {"id", "status", "http_status"}
+                or reply["id"] != payload["receipt"]
+                or status not in ("pending", "dispatching", "not_sent", "succeeded", "failed", "uncertain", "acknowledged")
+                or ("http_status" in reply and (type(code) is not int or not 100 <= code <= 599))
+                or (status in ("succeeded", "acknowledged") and (code is None or not 200 <= code < 300))
+                or (status not in ("succeeded", "acknowledged", "failed") and code is not None)):
+            raise ListingError("invalid_response")
+        return reply
     if operation in CONSOLE_OPERATIONS:
         if operation == "console_open":
             expected = {"console", "expires_in"}
@@ -450,6 +461,10 @@ def _validate(reply, payload):
                                 or isinstance(value, str) and len(value) > 512
                                 or type(value) is float and not math.isfinite(value)):
                             raise ListingError("invalid_response")
+                return reply
+            if (reply.get("outcome") == "acknowledged" and set(reply) == {"outcome", "http_status"}
+                    and type(reply["http_status"]) is int and 200 <= reply["http_status"] < 300
+                    and payload["usage"]["request"].get("method") in ("POST", "PUT", "PATCH", "DELETE")):
                 return reply
             if (reply not in ({"outcome": "failed"}, {"outcome": "uncertain"})
                     and not (set(reply) == {"outcome", "http_status"} and reply["outcome"] == "failed"
@@ -559,6 +574,11 @@ def main(argv=None):
     progress.add_argument("--request", required=True, type=_request_id, help="Request UUID")
     progress.add_argument("--json", action="store_true", required=True, help="Emit JSON")
     progress.set_defaults(operation="edit_status")
+    results = topics.add_parser("results", help="Check a protected HTTPS write receipt")
+    receipt_status = results.add_subparsers(required=True).add_parser("status")
+    receipt_status.add_argument("--receipt", required=True, type=_request_id, help="Write receipt UUID")
+    receipt_status.add_argument("--json", action="store_true", required=True)
+    receipt_status.set_defaults(operation="write_status")
     vaults = topics.add_parser("vaults", help="Discover vaults in this token's scope")
     catalog = vaults.add_subparsers(required=True).add_parser("list")
     catalog.add_argument("--json", action="store_true", required=True, help="Emit JSON")
@@ -576,6 +596,7 @@ def main(argv=None):
     use.add_argument("--vault", help="Scoped vault ID")
     use.add_argument("--entry", required=True, help="Entry UUID")
     use.add_argument("--action", help="Legacy owner-configured action ID; omit to read a usage descriptor")
+    use.add_argument("--receipt", type=_request_id, help="Track a protected HTTPS write under this UUID")
     use.add_argument("--json", action="store_true", required=True, help="Emit JSON")
     use.set_defaults(operation="use_password")
     console = topics.add_parser("console", help="Open or use an owner-approved guest console")
@@ -650,6 +671,8 @@ def main(argv=None):
         payload["include_reviewed"] = True
     if options.operation == "edit_status":
         payload["id"] = options.request
+    if getattr(options, "receipt", None):
+        payload["receipt"] = options.receipt
     if options.operation in ("console_open", "release_entry"):
         payload["entry"] = options.entry
         if options.operation == "console_open" and options.reuse_for is not None:
@@ -720,7 +743,7 @@ def main(argv=None):
             except (ValueError, RecursionError):
                 raise ListingError("invalid_request") from None
         if options.operation != "discover" and (token_file or options.operation in (
-            "request_access", "access_status", "release_entry", "list_vaults", "request_edit", "edit_status",
+            "request_access", "access_status", "release_entry", "list_vaults", "request_edit", "edit_status", "write_status",
         )):
             scope = payload.get("request")
             create = options.operation == "request_access" and isinstance(scope, dict) and "change_id" not in scope
@@ -743,7 +766,7 @@ def main(argv=None):
     except ListingError as error:
         print(error, file=sys.stderr)
         return 1
-    return int(result.get("outcome") in ("failed", "uncertain"))
+    return int(result.get("outcome") in ("failed", "uncertain", "acknowledged"))
 
 
 if __name__ == "__main__":

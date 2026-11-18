@@ -232,6 +232,7 @@ ACCESS_STATES = {
 ACTIVITY_STATES = {
     "Approved": ("emblem-ok-symbolic", "keeper_success"),
     "Succeeded": ("emblem-ok-symbolic", "keeper_success"),
+    "Acknowledged · result unavailable": ("dialog-warning-symbolic", "keeper_warning"),
     "Results Not Delivered": ("dialog-warning-symbolic", "keeper_warning"),
     "Dispatched": ("mail-send-symbolic", "keeper_accent"),
     "Pending approval": ("appointment-soon-symbolic", "keeper_warning"),

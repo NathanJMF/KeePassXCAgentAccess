@@ -117,10 +117,13 @@ class ScopedBroker:
             command = None
             input_info = None
             usage = None
+            receipt = None
             if operation in ("request_access", "request_edit") and keys == {"request"}:
                 pass
             elif operation == "edit_status" and keys == {"id"}:
                 pass
+            elif operation == "write_status" and keys == {"receipt"}:
+                receipt = uuid_text(payload["receipt"])
             elif operation == "release_entry" and keys == {"vault", "entry"}:
                 vault, entry = uuid_text(payload["vault"]), uuid_text(payload["entry"])
             elif operation == "discover" and keys <= {"vault", "summary"}:
@@ -139,13 +142,17 @@ class ScopedBroker:
                         or any(field not in OPTIONAL_METADATA_FIELDS for field in fields)
                         or len(set(fields)) != len(fields)):
                     raise ValueError
-            elif operation == "use_password" and {"entry", "usage"} <= keys <= {"entry", "usage", "vault", "upload"}:
+            elif operation == "use_password" and {"entry", "usage"} <= keys <= {"entry", "usage", "vault", "upload", "receipt"}:
                 entry = uuid_text(payload["entry"])
                 vault = uuid_text(payload["vault"]) if "vault" in keys else None
                 if not isinstance(payload["usage"], dict):
                     raise ValueError
                 # Own a detached descriptor before review or dispatch can wait.
                 usage = decode(encode(payload["usage"]))
+                if "receipt" in keys:
+                    receipt = uuid_text(payload["receipt"])
+                    if usage.get("type") != "https_results":
+                        raise ValueError
                 if "upload" in keys:
                     if upload is None:
                         raise ValueError
@@ -186,6 +193,8 @@ class ScopedBroker:
                     raise ListingError("ineligible")
                 self._charge_request(token.verifier, uid, active=True)
             return encode(self.edits.submit(token, payload["request"], context, live=live))
+        if operation == "write_status":
+            return self._write_status(credential, uid, receipt, live, deliver)
 
         with self.workspace.mutex:
             if not live():
@@ -284,6 +293,10 @@ class ScopedBroker:
                     scope_summary += " · " + workflow["request"]["method"]
                     if write_required:
                         scope_summary += " " + workflow["request"]["path"]
+                    if receipt:
+                        if not write_required:
+                            raise ListingError("invalid_request")
+                        scope_summary += f" · Write receipt {receipt}"
                     scope_summary += " · Fields: " + ", ".join(result_fields(workflow["result"]))
                     if certificate_pin:
                         previous_pins = sorted({pin for pin in certificate_expected if pin})
@@ -334,6 +347,8 @@ class ScopedBroker:
                 return effect()
 
         dispatch_started = False
+        receipt_stage = None
+        result_steps = 0
         certificate_reservation = None
         try:
             if token.status != "active":
@@ -366,6 +381,19 @@ class ScopedBroker:
                         raise ListingError("ineligible") from None
             if not guard(live):
                 raise ListingError("revoked")
+            if receipt:
+                digest = sha256(encode([chosen, entry, binding.action.result_request])).hexdigest()
+
+                def claim():
+                    failure = self.activity.claim_write(token.id, receipt, token.generation,
+                                                        chosen, entry, credential_revision, digest)
+                    if failure:
+                        raise ListingError(failure)
+                    return True
+
+                if not guard(lambda: live(claim)):
+                    raise ListingError("revoked")
+                receipt_stage = "pending"
             if certificate_pin and not review_policy:
                 with self.workspace.mutex:
                     certificate_expected = self.grants.result_certificate_pins(
@@ -447,7 +475,7 @@ class ScopedBroker:
             else:
                 def gate(send):
                     def audit_and_send():
-                        nonlocal dispatch_started, certificate_committed
+                        nonlocal dispatch_started, certificate_committed, receipt_stage, result_steps
                         if not dispatch_started:
                             if remember_certificate:
                                 # The trusted worker reaches this gate only after
@@ -459,12 +487,21 @@ class ScopedBroker:
                                 certificate_committed = True
                             self.activity.dispatched(event)
                             dispatch_started = True
+                        if receipt:
+                            result_steps += 1
+                            if result_steps == (2 if "login" in workflow else 1):
+                                self.activity.advance_write(token.id, receipt, "pending", "dispatching")
+                                receipt_stage = "dispatching"
                         send()
                     return guard(lambda: dispatch(audit_and_send))
 
                 if binding.action.kind == ActionType.RESULTS:
                     username_allowed = any((s.vault, s.entry) == (chosen, entry) and s.username for s in token.scope)
                     result = session.worker.use(binding.action, gate, allow_username=username_allowed)
+                    if receipt_stage == "dispatching":
+                        self.activity.advance_write(token.id, receipt, "dispatching", result["outcome"],
+                                                    result.get("http_status"))
+                        receipt_stage = None
                 elif binding.action.is_command or binding.action.browser:
                     with self._command_slot():
                         if input_info is None:
@@ -478,7 +515,10 @@ class ScopedBroker:
             if binding is not None and binding.action.opaque and dispatch_started:
                 result = {"outcome": "dispatched"}
             succeeded = result.get("outcome", "succeeded") in ("succeeded", "dispatched")
-            frame = encode(result)
+            # Older saved-action callers accept an uncertain write response.
+            # Keep the observed status in Activity for the owner.
+            frame = encode({"outcome": "uncertain"} if usage is None
+                           and result.get("outcome") == "acknowledged" else result)
             if len(frame) > RESPONSE_LIMIT:
                 raise ListingError("too_large")
             delivered = deliver(frame, guard)
@@ -488,7 +528,8 @@ class ScopedBroker:
             if operation == "use_password":
                 # Already-dispatched remote work can still complete after revocation.
                 outcome = {"succeeded": "Succeeded", "failed": "Failed", "dispatched": "Dispatched",
-                           "uncertain": "Interrupted · outcome unknown"}[result["outcome"]]
+                           "uncertain": "Interrupted · outcome unknown",
+                           "acknowledged": "Acknowledged · result unavailable"}[result["outcome"]]
                 if result["outcome"] == "dispatched" and private_outcome in ("succeeded", "failed", "uncertain"):
                     outcome = {"succeeded": "Succeeded", "failed": "Failed", "uncertain": "Interrupted · outcome unknown"}[private_outcome]
                 self.activity.finish(event, outcome, result.get("http_status"))
@@ -517,9 +558,45 @@ class ScopedBroker:
             self.activity.finish(event, outcome)
             raise
         finally:
+            if receipt_stage:
+                self.activity.advance_write(token.id, receipt, receipt_stage,
+                                            "uncertain" if receipt_stage == "dispatching" else "not_sent")
             if certificate_reservation is not None:
                 with self.workspace.mutex:
                     self.certificate_reviews.discard(certificate_reservation)
+
+    def _write_status(self, credential, uid, receipt, live, deliver):
+        with self.workspace.mutex:
+            if not live():
+                raise ListingError("revoked")
+            token = self.grants.authenticate(credential, uid)
+            self._charge_request(token.verifier, uid, active=token.status == "active")
+            row = self.activity.write_receipt(token.id, receipt)
+            generation = self.workspace.generation
+            session = self.workspace.session(row["vault"]) if row is not None else None
+
+        def guard(effect):
+            with self.workspace.mutex:
+                current = self.grants.records.get(token.id)
+                if (self.workspace.paused or self.workspace.generation != generation or row is None
+                        or current is None or current.status != "active"):
+                    return False
+                if row["generation"] != current.generation:
+                    return False
+                registration = self.workspace.registrations.get(row["vault"])
+                if (registration is None or session is None or self.workspace.session(row["vault"]) is not session
+                        or registration.credential_revision(row["entry"]) != row["revision"]):
+                    return False
+                return effect()
+
+        if not guard(live):
+            raise ListingError("ineligible")
+        result = {"id": receipt, "status": row["stage"]}
+        if row["http_status"] is not None:
+            result["http_status"] = row["http_status"]
+        if not deliver(encode(result), guard):
+            raise ListingError("revoked")
+        return None
 
     @staticmethod
     def _usage_destination(action):

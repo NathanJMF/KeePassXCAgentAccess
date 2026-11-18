@@ -22,7 +22,7 @@ PROTOCOLS = ("2025-06-18", "2025-03-26", "2024-11-05")
 
 def tool(name, description, properties=None, *, required=(), read_only=True):
     properties = dict(properties or {})
-    if name not in ("access_status", "edit_status"):
+    if name not in ("access_status", "edit_status", "write_status"):
         properties["note"] = {"type": "string", "minLength": 1, "maxLength": 180,
                               "description": "Short audit reason. Keep credentials and private values out of notes."}
     return {
@@ -136,6 +136,10 @@ OPERATIONS = {
         "edit_status", "Check an edit request by its UUID.",
         {"id": REFERENCE}, required=("id",),
     )),
+    "write_status": (("results", "status"), tool(
+        "write_status", "Check a protected HTTPS write receipt without repeating the write.",
+        {"receipt": REFERENCE}, required=("receipt",),
+    )),
     "list_vaults": (("vaults", "list"), tool("list_vaults", "List vaults available to the active token.")),
     "list_entries": (("entries", "list"), tool(
         "list_entries", "List approved entry metadata and optionally request approved username or URL fields.",
@@ -144,6 +148,7 @@ OPERATIONS = {
     "use_password": (("use",), tool(
         "use_password", "Use an approved secret with a supplied command, HTTPS request, or browser form. Credential values and command output are not returned.",
         {"vault": REFERENCE, "entry": REFERENCE, "usage": USAGE, "action": {"type": "string", "description": "Legacy configured action; mutually exclusive with usage."},
+         "receipt": {**REFERENCE, "description": "Track one protected HTTPS write under this UUID."},
          "command": {"type": "array", "items": {"type": "string"}, "minItems": 1, "maxItems": 33,
                      "description": "The exact approved executable and arguments for an isolated command."},
          "input_base64": {"type": "string", "description": "Optional base64 input file for a command that permits it."}},
@@ -192,6 +197,11 @@ def invocation(name, arguments):
                 command.append(f"--{flag}")
     if name == "edit_status":
         command.append(f"--request={edit_uuid(arguments['id'])}")
+    if "receipt" in arguments:
+        if name == "use_password" and (usage is None or usage["type"] != "https_results"
+                or usage["request"].get("method") not in ("POST", "PUT", "PATCH", "DELETE")):
+            raise ValueError
+        command.append(f"--receipt={edit_uuid(arguments['receipt'])}")
     if "action" in arguments:
         action = arguments["action"]
         if not isinstance(action, str) or not action or len(action) > 160 or not action.isprintable():

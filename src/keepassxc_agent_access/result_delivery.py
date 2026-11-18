@@ -353,7 +353,7 @@ def _connection(origin, pin, deadline):
         _close(connection)
 
 
-def _http(origin, pin, deadline, method, path, headers, body, dispatch, private_headers=None):
+def _http(origin, pin, deadline, method, path, headers, body, dispatch, private_headers=None, observed=None):
     if monotonic() >= deadline:
         raise TimeoutError
     with _connection(origin, pin, deadline) as connection:
@@ -364,6 +364,8 @@ def _http(origin, pin, deadline, method, path, headers, body, dispatch, private_
         connection.request(method, path, body=body, headers=headers)
         with connection.getresponse() as response:
             status = response.status
+            if observed is not None:
+                observed(status)
             if private_headers is not None:
                 private_count = 0
                 private_size = 0
@@ -432,6 +434,7 @@ def _private_strings(document):
 def deliver_results(config, entry, dispatch, *, allow_username=False):
     """Release only the concrete approved projection; dispatch gates every send."""
     sent_write = False
+    write_status = None
     try:
         config = parse_result_usage(config.data if isinstance(config, ResultRequest) else config)
         data = config.data
@@ -488,10 +491,19 @@ def deliver_results(config, entry, dispatch, *, allow_username=False):
             if permitted and request["method"] in HTTPS_WRITE_METHODS:
                 sent_write = True
             return permitted
-        status, document = _http(data["origin"], pin, deadline, request["method"], path, headers, body, gate, forbidden)
+
+        def observe(status):
+            nonlocal write_status
+            if sent_write:
+                write_status = status
+
+        status, document = _http(data["origin"], pin, deadline, request["method"], path, headers, body, gate, forbidden, observe)
         if not 200 <= status < 300:
             return {"outcome": "failed", "http_status": status}
         projected = _project(document, data["result"], forbidden)
         return {"outcome": "succeeded", "http_status": status, "data": projected}
     except (OSError, HTTPException, ValueError, KeyError, IndexError, TypeError, AttributeError, RecursionError):
+        if write_status is not None:
+            outcome = "acknowledged" if 200 <= write_status < 300 else "failed"
+            return {"outcome": outcome, "http_status": write_status}
         return {"outcome": "uncertain" if sent_write else "failed"}

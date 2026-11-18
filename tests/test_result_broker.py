@@ -4,10 +4,12 @@ from concurrent.futures import ThreadPoolExecutor
 from time import monotonic, sleep
 import unittest
 from unittest.mock import patch
+from uuid import uuid4
 
 import test_scoped_broker as base
 from keepassxc_agent_access.protocol import ListingError
 from keepassxc_agent_access.grants import Grants
+from keepassxc_agent_access.usage import usage_action
 
 
 class ResultBrokerTests(unittest.TestCase):
@@ -55,6 +57,79 @@ class ResultBrokerTests(unittest.TestCase):
     def test_old_credential_scope_cannot_release_results(self):
         self.approve([self.item(("https", "https_body"))])
         self.assert_code("ineligible", "use_password", entry=self.entry, vault=self.vaults[0], usage=self.request())
+
+    def test_write_receipt_reserves_once_before_review_and_survives_lost_delivery(self):
+        self.approve([self.item(("https_results", "https_body"))])
+        self.approve([self.item(("https_results", "https_body"))], index=1)
+        receipt = str(uuid4())
+        usage = self.request(login=True, approve_write_once=True)
+        usage["request"].update(method="POST", form={"name": "job"})
+        worker = self.workspace.session(self.vaults[0]).worker
+
+        def inspect(ticket):
+            self.assertEqual(self.invoke("write_status", receipt=receipt), {"id": receipt, "status": "pending"})
+            with self.assertRaises(ListingError) as error:
+                self.use(usage, receipt=receipt)
+            self.assertEqual(error.exception.code, "receipt_exists")
+            self.assertIn("/inventory", " ".join(ticket.scope))
+
+        # Revoke response delivery after the worker has acknowledged the write.
+        with patch.object(worker, "use", side_effect=self.fake_worker) as worker_use:
+            self.assertIsNone(self.reviewed(lambda: self.use(usage, receipt=receipt, before=lambda: self.workspace.pause()),
+                                            inspect=inspect))
+            self.workspace.pause(False)
+            self.activity.recover(30)
+            self.assertEqual(self.invoke("write_status", receipt=receipt),
+                             {"id": receipt, "status": "succeeded", "http_status": 200})
+
+            def interrupt():
+                self.workspace.pause()
+                self.workspace.pause(False)
+
+            with self.assertRaises(ListingError) as error:
+                self.invoke("write_status", receipt=receipt, before=interrupt)
+            self.assertEqual(error.exception.code, "revoked")
+            with self.assertRaises(ListingError) as error:
+                self.use(usage, receipt=receipt)
+            self.assertEqual(error.exception.code, "receipt_exists")
+            changed = {**usage, "request": {**usage["request"], "form": {"name": "unrelated"}}}
+            with self.assertRaises(ListingError) as error:
+                self.use(changed, receipt=receipt)
+            self.assertEqual(error.exception.code, "receipt_conflict")
+            worker_use.assert_called_once()
+        with self.assertRaises(ListingError) as error:
+            self.invoke("write_status", receipt=receipt, index=1)
+        self.assertEqual(error.exception.code, "ineligible")
+
+    def test_write_receipt_distinguishes_login_abort_from_unknown_write_outcome(self):
+        self.approve([self.item(("https_results", "https_body"))])
+        usage = self.request(login=True, approve_write_once=True)
+        usage["request"].update(method="POST", form={"name": "job"})
+        worker = self.workspace.session(self.vaults[0]).worker
+        for send_write, expected in ((False, "not_sent"), (True, "uncertain")):
+            receipt = str(uuid4())
+
+            def lose_worker(_action, gate, **_kwargs):
+                self.assertTrue(gate(lambda: None))
+                if send_write:
+                    self.assertTrue(gate(lambda: None))
+                raise ListingError("unavailable")
+
+            with patch.object(worker, "use", side_effect=lose_worker), self.assertRaises(ListingError):
+                self.reviewed(lambda: self.use(usage, receipt=receipt))
+            self.assertEqual(self.invoke("write_status", receipt=receipt), {"id": receipt, "status": expected})
+
+    def test_saved_result_action_keeps_previous_reply_shape(self):
+        usage = self.request()
+        usage["request"]["method"] = "POST"
+        action = usage_action(self.entry, usage)
+        self.workspace.save_binding(self.vaults[0], action)
+        self.approve([{"vault": self.vaults[0], "entry": self.entry, "action": action.id}])
+        worker = self.workspace.session(self.vaults[0]).worker
+        with patch.object(worker, "use", return_value={"outcome": "acknowledged", "http_status": 204}):
+            reply = self.reviewed(lambda: self.invoke("use_password", entry=self.entry,
+                                                      vault=self.vaults[0], action=action.id))
+        self.assertEqual(reply, {"outcome": "uncertain"})
 
     def test_default_review_binds_request_projection_and_audits_without_data(self):
         self.approve([self.item(("https_results", "https_body"))])
