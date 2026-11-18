@@ -24,6 +24,7 @@ class Approval:
     trusts_certificate: bool = False
     write_once: bool = False
     opens_console: bool = False
+    reuse_minutes: int = 0
     ready: Event = field(default_factory=Event)
 
 

@@ -1,20 +1,23 @@
-"""One owner decision authorizes a short, task-token-bound guest console."""
+"""Owner decisions for guest consoles and exact, short-lived reconnects."""
 from dataclasses import dataclass, replace
+from hashlib import sha256
 import json
+from math import ceil
 from threading import Thread
 from time import monotonic, sleep, time
 
 from .access_settings import uuid_text
 from .activity import entry_target_labels
 from .approvals import Approval
-from .console_request import CONSOLE_SECONDS, parse_console
+from .console_request import parse_console
 from .console_transport import validate_inputs
 from .grants import verifier
-from .protocol import CONSOLE_OPERATIONS, ListingError, encode
+from .protocol import CONSOLE_OPERATIONS, CONSOLE_SECONDS, MAX_CONSOLE_REUSE_MINUTES, ListingError, encode
 from .workspace import new_id
 
 
 MAX_CONSOLES = 4
+MAX_REUSABLE_CONSOLES = 32
 
 
 @dataclass(frozen=True)
@@ -38,6 +41,7 @@ class ConsoleAccess:
         self.workspace = broker.workspace
         self.activity = broker.activity
         self.sessions = {}
+        self.reusable = {}
 
     def current(self, grant):
         token = self.broker.grants.records.get(grant.token_id)
@@ -80,13 +84,22 @@ class ConsoleAccess:
     def handle(self, operation, keys, payload, uid, context, live, dispatch, deliver):
         credential = payload.get("credential")
         status_only = False
+        requested_minutes = 0
+        reuse_until = None
+        reuse_key = None
         try:
             if isinstance(credential, str) and credential and credential in encode(
                     {key: value for key, value in payload.items() if key != "credential"}).decode("ascii"):
                 raise ValueError
-            if operation == "console_open" and keys == {"vault", "entry", "request"}:
+            required = {"vault", "entry", "request"}
+            if operation == "console_open" and required <= keys <= required | {"reuse_minutes"}:
                 vault, entry = uuid_text(payload["vault"]), uuid_text(payload["entry"])
                 descriptor = parse_console(payload["request"])
+                if "reuse_minutes" in keys:
+                    requested_minutes = payload["reuse_minutes"]
+                    if (type(requested_minutes) is not int or not 1 <= requested_minutes <= MAX_CONSOLE_REUSE_MINUTES
+                            or "certificate_sha256" not in descriptor):
+                        raise ValueError
             elif operation in CONSOLE_OPERATIONS - {"console_open"}:
                 expected = {"console", "events"} if operation == "console_input" else {"console"}
                 if operation == "console_view" and "status_only" in keys:
@@ -131,6 +144,15 @@ class ConsoleAccess:
                 grant = ConsoleGrant(token.id, token.generation, self.workspace.generation,
                                      vault, entry, revision, origin, descriptor["socket"]["path"], session,
                                      monotonic() + CONSOLE_SECONDS + self.broker.approvals.timeout)
+                reuse_minutes = 0
+                if self.workspace.guest_auto_approval_enabled(operation) and "certificate_sha256" in descriptor:
+                    digest = sha256(encode(descriptor)).hexdigest()
+                    reuse_key = (token.id, vault, entry, digest)
+                    self.reusable = {key: permit for key, permit in self.reusable.items() if self.current(permit)}
+                    if permit := self.reusable.get(reuse_key):
+                        reuse_until = permit.expires
+                    elif len(self.reusable) + len(self.sessions) < MAX_REUSABLE_CONSOLES:
+                        reuse_minutes = requested_minutes
                 self.sessions[identifier] = grant
             else:
                 grant = self.sessions.get(identifier)
@@ -144,6 +166,8 @@ class ConsoleAccess:
             if status_only:
                 label = "Check Guest Console"
             scope = f"Console {identifier} · {grant.endpoint}"
+            if reuse_key is not None and (reuse_until is not None or reuse_minutes):
+                scope += f" · Connection SHA-256 {reuse_key[-1]}"
             if operation == "console_input":
                 scope += f" · {len(events)} input events"
             try:
@@ -160,27 +184,37 @@ class ConsoleAccess:
             with self.workspace.mutex:
                 if self.sessions.get(identifier) is not grant or not self.current(grant):
                     return False
+                if reuse_until is not None and monotonic() >= reuse_until:
+                    return False
                 return effect()
 
         open_started = False
         keep_console = False
         dispatched = False
         try:
-            if operation == "console_open":
+            authorization = "Approved console session"
+            if operation == "console_open" and reuse_until is None:
                 details = (" › ".join(part for part in (registration.name, folder, title) if part),
                            f"Private login: POST {descriptor['login']['path']}",
-                           f"Approve this one-time POST: {descriptor['connect']['path']}",
+                           f"Console setup: POST {descriptor['connect']['path']}",
                            f"Guest console: {descriptor['socket']['path']}",
                            f"Allow screenshots and keyboard/mouse input for up to {CONSOLE_SECONDS // 60} minutes.",
                            "Review the target guest and the POST payload below. Input can change the guest, and the guest screen may contain private data.",
                            "Exact connection details:\n" + json.dumps(descriptor, ensure_ascii=True, indent=2))
                 ticket = Approval(event, uid, context, label, details, grant.origin,
                                   monotonic() + self.broker.approvals.timeout, identity=token.identity,
-                                  project=token.project, requested=time(), opens_console=True)
+                                  project=token.project, requested=time(), opens_console=True, reuse_minutes=reuse_minutes)
                 result = self.broker.approvals.wait(ticket, lambda: guard(live))
                 if result != "approved":
                     raise ListingError(result)
-            self.activity.authorize(event, "Approved console once" if operation == "console_open" else "Approved console session")
+                if reuse_minutes:
+                    reuse_until = monotonic() + reuse_minutes * 60
+                    authorization = f"Owner approved console for {reuse_minutes} min"
+                else:
+                    authorization = "Approved console once"
+            elif operation == "console_open":
+                authorization = "Used approved console connection"
+            self.activity.authorize(event, authorization)
             def gate(send):
                 def authorize():
                     nonlocal dispatched
@@ -195,6 +229,8 @@ class ConsoleAccess:
             request = {"operation": operation, "console": identifier, "entry": grant.entry}
             if operation == "console_open":
                 request["request"] = descriptor
+                if reuse_until is not None:
+                    request["expires_at"] = reuse_until
                 open_started = True
             elif operation == "console_input":
                 request["events"] = events
@@ -207,13 +243,20 @@ class ConsoleAccess:
                 # Binding state changes under the same predicate as authorization.
                 def publish():
                     nonlocal grant
-                    grant = replace(grant, ready=True, expires=monotonic() + CONSOLE_SECONDS)
+                    expires = monotonic() + CONSOLE_SECONDS
+                    if reuse_until is not None:
+                        expires = min(expires, reuse_until)
+                    grant = replace(grant, ready=True, expires=expires)
                     self.sessions[identifier] = grant
+                    if reuse_minutes:
+                        self.reusable[reuse_key] = replace(grant, ready=False, expires=reuse_until)
                     return True
                 if not guard(lambda: live(publish)):
                     raise ListingError("revoked")
                 Thread(target=self.watch, args=(identifier, grant), daemon=True).start()
-                result = {"console": identifier, "expires_in": CONSOLE_SECONDS}
+                result = {"console": identifier, "expires_in": max(1, ceil(grant.expires - monotonic()))}
+                if requested_minutes:
+                    result["reuse_expires_in"] = max(0, ceil(reuse_until - monotonic())) if reuse_until else 0
             if not deliver(encode(result), guard):
                 raise ListingError("revoked")
             self.activity.finish(event, "Succeeded")

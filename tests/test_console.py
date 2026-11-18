@@ -1,6 +1,7 @@
 """Exercise a private console from an installed runner to a synthetic TLS peer."""
 from base64 import b64encode
 from contextlib import closing
+from dataclasses import replace
 from hashlib import sha1, sha256
 from http.server import BaseHTTPRequestHandler
 import json
@@ -13,6 +14,7 @@ from struct import pack, unpack
 import subprocess
 from tempfile import TemporaryDirectory
 from threading import Event, Thread
+from time import monotonic
 from types import SimpleNamespace
 from unittest import TestCase
 from unittest.mock import patch
@@ -31,6 +33,7 @@ from keepassxc_agent_access.protocol import ListingError
 from keepassxc_agent_access.scoped_broker import ScopedBroker
 from keepassxc_agent_access.workspace import Workspace
 from tls_fixture import tls_service
+import test_result_broker as broker_tests
 
 
 def console_site(state):
@@ -338,7 +341,9 @@ class ConsoleValidationTests(TestCase):
             pin = sha256(ssl.PEM_cert_to_DER_cert(certificate.read_text())).hexdigest()
             entry = SimpleNamespace(username=state["user"], password=state["password"])
             config = descriptor(url + "/", pin)
-            with closing(open_console(config, entry, lambda: True)) as console:
+            deadline = monotonic() + 30
+            with closing(open_console(config, entry, lambda: True, expires_at=deadline)) as console:
+                self.assertEqual(console.expires, deadline)
                 payload = {"operation": "console_view", "status_only": True}
                 with patch("keepassxc_agent_access.console_transport._png",
                            side_effect=AssertionError("Status checks must not encode screenshots.")):
@@ -363,6 +368,90 @@ class ConsoleValidationTests(TestCase):
                 altered = {**request, "socket": {**request["socket"], **modified}}
                 with self.assertRaises(ValueError):
                     parse_console(altered)
+
+
+class ConsoleReuseTests(TestCase):
+    setUp = broker_tests.ResultBrokerTests.setUp
+    invoke = broker_tests.ResultBrokerTests.invoke
+    enroll = broker_tests.ResultBrokerTests.enroll
+    approve = broker_tests.ResultBrokerTests.approve
+    reviewed = broker_tests.ResultBrokerTests.reviewed
+
+    def setup_token(self, index=0):
+        return self.approve([{
+            "vault": self.vaults[0], "entry": self.entry, "uses": ["https_results", "https_body"],
+            "origins": ["https://console.test/"],
+        }], index=index)
+
+    def open(self, **changes):
+        options = {"vault": self.vaults[0], "entry": self.entry, "request": descriptor("https://console.test/", "a" * 64)}
+        return self.invoke("console_open", **{**options, **changes})
+
+    def close(self, reply):
+        self.invoke("console_close", console=reply["console"])
+
+    def worker_exchange(self, request, gate):
+        self.assertTrue(gate(lambda: None))
+        return {"outcome": "succeeded"}
+
+    def test_reconnect_requires_exact_live_permission_and_does_not_extend_it(self):
+        self.setup_token()
+        self.setup_token(index=1)
+        self.workspace.set_guest_auto_approval("console_open", True)
+        self.assertTrue(Workspace(self.workspace.directory, None).guest_auto_approval_enabled("console_open"))
+        worker = self.workspace.session(self.vaults[0]).worker
+        with patch.object(worker, "console", side_effect=self.worker_exchange, create=True) as exchange:
+            def inspect(ticket):
+                self.assertEqual(ticket.reuse_minutes, 3)
+                self.assertIn("/vm/103/console", " ".join(ticket.scope))
+            first = self.reviewed(lambda: self.open(reuse_minutes=3), inspect=inspect)
+            self.assertLessEqual(first["expires_in"], 180)
+            deadline = exchange.call_args[0][0]["expires_at"]
+            self.close(first)
+            second = self.open(reuse_minutes=60)
+            self.assertEqual(exchange.call_args[0][0]["expires_at"], deadline)
+            self.assertLessEqual(second["reuse_expires_in"], first["reuse_expires_in"])
+            self.close(second)
+            changed = descriptor("https://console.test/", "a" * 64)
+            changed["socket"]["path"] = "/vm/104/stream"
+            reordered = descriptor("https://console.test/", "a" * 64)
+            reordered["socket"]["query"] = dict(reversed(reordered["socket"]["query"].items()))
+            for changes in ({"request": changed}, {"request": reordered}, {"index": 1},
+                            {"request": descriptor("https://console.test/", "b" * 64)}):
+                with self.subTest(changes=changes), self.assertRaises(ListingError) as denied:
+                    self.reviewed(lambda: self.open(**changes), approve=False)
+                self.assertEqual(denied.exception.code, "declined")
+            reuse = self.engine.console_access.reusable
+            for key, grant in reuse.items():
+                reuse[key] = replace(grant, expires=monotonic() - 1)
+            with self.assertRaises(ListingError) as denied:
+                self.reviewed(self.open, approve=False)
+            self.assertEqual(denied.exception.code, "declined")
+            self.assertFalse(self.engine.console_access.reusable)
+        events = self.activity.rows(action="Open Guest Console")
+        self.assertIn("Used approved console connection", {row["decision"] for row in events})
+        self.assertIn("Owner approved console for 3 min", {row["decision"] for row in events})
+
+    def test_no_reuse_when_disabled_or_first_connection_failed(self):
+        self.setup_token()
+        self.assertFalse(self.workspace.guest_auto_approval_enabled("console_open"))
+        worker = self.workspace.session(self.vaults[0]).worker
+        with patch.object(worker, "console", side_effect=self.worker_exchange, create=True):
+            reply = self.reviewed(lambda: self.open(reuse_minutes=3))
+            self.assertEqual(reply["reuse_expires_in"], 0)
+            self.close(reply)
+        self.workspace.set_guest_auto_approval("console_open", True)
+        with patch.object(worker, "console", return_value={"error": "console_failed"}, create=True):
+            with self.assertRaises(ListingError) as failed:
+                self.reviewed(lambda: self.open(reuse_minutes=3))
+            self.assertEqual(failed.exception.code, "console_failed")
+        self.assertFalse(self.engine.console_access.reusable)
+        for invalid in (True, 0, 61):
+            with self.assertRaises(ListingError) as error:
+                self.open(reuse_minutes=invalid)
+            self.assertEqual(error.exception.code, "invalid_request")
+        self.workspace.set_review_usage(True)
+        self.assertFalse(self.workspace.guest_auto_approval_enabled("console_open"))
 
 
 if __name__ == "__main__":

@@ -183,7 +183,9 @@ For a form that redirects after POST, add its exact `success_url`. Login, submit
 
 ## Operate an approved guest console
 
-Use `console open` for a guest that offers RFB (VNC) over a TLS WebSocket, such as a Proxmox QEMU guest. Keeper signs in, requests a console ticket and opens the socket privately. It requires `https_results` and `https_body` on the entry and exact origin. The owner reviews both console paths and authorizes one guest console session, even when Auto Approve is on. Keeper never returns the login response, cookie, CSRF value, console ticket or VNC password.
+Use `console open` for a guest that offers RFB (VNC) over a TLS WebSocket, such as a Proxmox QEMU guest. Keeper signs in, requests a console ticket and opens the socket privately. It requires `https_results` and `https_body` on the entry and exact origin. Keeper never returns the login response, cookie, CSRF value, console ticket or VNC password.
+
+If you expect to reconnect to the same guest, add the verified `certificate_sha256` to the descriptor and request a short window with `console open --reuse-for MINUTES` (1–60). With Auto Approve and **Guest Consoles - Open and Reconnect** enabled, the owner reviews the exact connection and window once. Reopen with the same profile, entry and descriptor. `reuse_expires_in` reports the remaining seconds when you supply `--reuse-for`. A zero means the owner authorized this session only, such as when either switch is off. Reopening leaves the deadline unchanged. Request a fresh review after the window expires or if the guest is replaced at the same endpoint. Pause or lock the vault before reassigning that endpoint.
 
 Use the service's documented API for the descriptor. For example, replace the origin, node and VM ID below with the authorized target. Set the login realm to match the stored account. For a private certificate, add `certificate_sha256` with the exact server fingerprint for owner verification.
 

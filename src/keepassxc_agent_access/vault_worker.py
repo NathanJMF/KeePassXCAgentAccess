@@ -179,7 +179,7 @@ def use_console(consoles, data, entry):
         if operation == "console_open":
             if entry is None or identifier in consoles or len(consoles) >= 4:
                 return {"error": "console_failed"}
-            consoles[identifier] = open_console(data["request"], entry, dispatch)
+            consoles[identifier] = open_console(data["request"], entry, dispatch, expires_at=data.get("expires_at"))
             return {"outcome": "succeeded"}
         console = consoles.get(identifier)
         if console is None:

@@ -654,7 +654,9 @@ class AccessView(Gtk.Box):
         dialog.set_name("keeper-access-review")
         dialog.set_position(Gtk.WindowPosition.CENTER_ON_PARENT)
         dialog.set_modal(True)
-        approve_label = "Open Console" if ticket.opens_console else (
+        approve_label = (
+            f"Allow for {ticket.reuse_minutes} min" if ticket.reuse_minutes else "Open Console"
+        ) if ticket.opens_console else (
             "Approve Write Once" if ticket.write_once else (
                 "Approve and Trust Certificate" if ticket.trusts_certificate else "Approve Once"))
         dialog.add_buttons("Deny", Gtk.ResponseType.REJECT, approve_label, Gtk.ResponseType.ACCEPT)
@@ -681,7 +683,9 @@ class AccessView(Gtk.Box):
         scroll.add(details)
         body.pack_start(scroll, True, True, 0)
         if ticket.opens_console:
-            add_label(body, "Approval applies to this console session.")
+            add_label(body, "The same connection can be reopened during this window. "
+                      "Pause agent access or lock the vault before reassigning this console target."
+                      if ticket.reuse_minutes else "Approval applies to this console session.")
         else:
             add_label(body, "Approves this operation and remembers its verified certificate for this token and resource."
                       if ticket.trusts_certificate else "Approval applies to this operation only.")

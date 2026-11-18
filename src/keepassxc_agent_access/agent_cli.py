@@ -15,7 +15,8 @@ from urllib.parse import urlsplit
 
 from .runner_token import UninitializedProfile, credential
 from .protocol import (
-    CLIENT_TIMEOUT, CONSOLE_OPERATIONS, ERRORS, LIST_REQUEST, ListingError, REQUEST_LIMIT, REQUEST_TIMEOUT, RESPONSE_LIMIT, UPLOAD_LIMIT,
+    CLIENT_TIMEOUT, CONSOLE_OPERATIONS, CONSOLE_SECONDS, ERRORS, LIST_REQUEST, ListingError, MAX_CONSOLE_REUSE_MINUTES,
+    REQUEST_LIMIT, REQUEST_TIMEOUT, RESPONSE_LIMIT, UPLOAD_LIMIT,
     decode, encode, receive, remaining, validate_command,
 )
 
@@ -352,8 +353,14 @@ def _validate(reply, payload):
         return reply
     if operation in CONSOLE_OPERATIONS:
         if operation == "console_open":
-            if (set(reply) != {"console", "expires_in"} or edit_uuid(reply["console"]) != reply["console"]
-                    or type(reply["expires_in"]) is not int or not 1 <= reply["expires_in"] <= 900):
+            expected = {"console", "expires_in"}
+            if "reuse_minutes" in payload:
+                expected.add("reuse_expires_in")
+            if (set(reply) != expected or edit_uuid(reply["console"]) != reply["console"]
+                    or type(reply["expires_in"]) is not int or not 1 <= reply["expires_in"] <= CONSOLE_SECONDS):
+                raise ListingError("invalid_response")
+            if "reuse_expires_in" in reply and (type(reply["reuse_expires_in"]) is not int
+                    or not 0 <= reply["reuse_expires_in"] <= MAX_CONSOLE_REUSE_MINUTES * 60):
                 raise ListingError("invalid_response")
         elif operation == "console_view":
             fields = {"width", "height"}
@@ -576,6 +583,8 @@ def main(argv=None):
     opening = commands.add_parser("open", help="Read the console connection descriptor from stdin")
     opening.add_argument("--vault", required=True, type=_request_id)
     opening.add_argument("--entry", required=True, type=_request_id)
+    opening.add_argument("--reuse-for", type=int, metavar="MINUTES",
+                         help=f"Ask to reopen this pinned connection for up to {MAX_CONSOLE_REUSE_MINUTES} minutes")
     opening.add_argument("--json", action="store_true", required=True)
     opening.set_defaults(operation="console_open")
     for verb in ("view", "input", "close"):
@@ -643,6 +652,10 @@ def main(argv=None):
         payload["id"] = options.request
     if options.operation in ("console_open", "release_entry"):
         payload["entry"] = options.entry
+        if options.operation == "console_open" and options.reuse_for is not None:
+            if not 1 <= options.reuse_for <= MAX_CONSOLE_REUSE_MINUTES:
+                parser.error(f"--reuse-for needs a duration from 1 to {MAX_CONSOLE_REUSE_MINUTES} minutes")
+            payload["reuse_minutes"] = options.reuse_for
     elif options.operation in CONSOLE_OPERATIONS:
         payload["console"] = options.console
         if options.operation == "console_view" and options.status:

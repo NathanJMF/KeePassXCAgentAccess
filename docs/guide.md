@@ -136,6 +136,8 @@ The browser worker requires Bubblewrap, the systemd user manager, WebKitGTK 4.1 
 
 For an interactive VM installer, **Review Guest Console** can authorize a session to an exact RFB console over a TLS WebSocket. Keeper performs login and ticket exchange in the vault worker. The agent can request a PNG and send keyboard or mouse input through `keeper-agent console`. The session is bound to the token that opened it and lasts up to 15 minutes. Pausing access, locking the vault or changing the token closes that session. Console pixels and keystrokes stay out of Activity. The installed skill includes a Proxmox QEMU descriptor. RFB console delivery does not create a general signed-in browser session.
 
+With **Auto Approve** and **Guest Consoles - Open and Reconnect** enabled, the owner can approve an exact, certificate-pinned console connection for up to 60 minutes. Within that window, the same agent can reopen the connection without another popup, and each session ends by the approved deadline. The console switch starts off. Pause access or lock the vault before reassigning the console endpoint to a replacement guest.
+
 `keeper-agent console view --console HANDLE --status` reports whether the console pixels changed since the previous view or check. The agent decides whether to request an image with `--png` or `--json`. Status checks are listed separately from image views in Activity.
 
 ## Use a credential with a local command

@@ -6,11 +6,10 @@ from urllib.parse import urlencode
 
 from .access_settings import credential_headers
 from .console_transport import Console
-from .protocol import decode, encode
+from .protocol import CONSOLE_SECONDS, decode, encode
 from .result_delivery import _NAME, _http, _path, _pointer, _references, _render, _request_body, _select, parse_result_usage
 
 
-CONSOLE_SECONDS = 900
 OPEN_SECONDS = 20
 
 
@@ -79,13 +78,15 @@ def _capture(document, pointers, values):
         values["session." + key] = value
 
 
-def open_console(config, entry, dispatch):
+def open_console(config, entry, dispatch, *, expires_at=None):
     config = parse_console(config)
     origin, pin = config["origin"], config.get("certificate_sha256")
     values = {"username": entry.username or "", "password": entry.password}
     if any(not isinstance(item, str) or not item or len(item.encode("utf-8")) > 4096 for item in values.values()):
         raise ValueError("The target requires a username and password.")
     deadline = monotonic() + OPEN_SECONDS
+    if expires_at is not None:
+        deadline = min(deadline, expires_at)
     for name in ("login", "connect"):
         stage = config[name]
         headers, body = _request_body(stage, values)
@@ -101,6 +102,9 @@ def open_console(config, entry, dispatch):
             raise HTTPException("The private console setup failed.")
         _capture(document, stage["capture"], values)
     socket = config["socket"]
-    return Console(origin, pin, monotonic() + CONSOLE_SECONDS, socket["path"],
+    expires = monotonic() + CONSOLE_SECONDS
+    if expires_at is not None:
+        expires = min(expires, expires_at)
+    return Console(origin, pin, expires, socket["path"],
                    _render(socket["headers"], values), _render(socket["query"], values),
                    _render(socket.get("password"), values), dispatch)

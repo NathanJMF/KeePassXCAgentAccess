@@ -10,7 +10,7 @@ from pathlib import Path
 from threading import Event, RLock
 from uuid import uuid4
 
-from .access_settings import Action, AccessStore, TOKEN_AUTO_APPROVAL_OPTIONS, label, uuid_text
+from .access_settings import Action, AccessStore, GUEST_AUTO_APPROVAL_OPTIONS, TOKEN_AUTO_APPROVAL_OPTIONS, label, uuid_text
 from .discovery import DiscoveryCatalog
 from .keyring import KeyringError
 from .settings import SettingsError, SettingsStore, write_private_json
@@ -106,6 +106,7 @@ class Workspace:
         if preferences.review_results:
             self.review_actions |= {"read_results"}
         self.auto_approve_tokens = preferences.auto_approve_tokens
+        self.auto_approve_guest_actions = preferences.auto_approve_guest_actions
         self.auto_approve_token_changes = preferences.auto_approve_token_changes
         self.token_auto_approval_acknowledged = preferences.token_auto_approval_acknowledged
         self.generation = 0
@@ -432,6 +433,20 @@ class Workspace:
 
     def token_auto_approval_enabled(self, setting):
         return not self.review_usage and self.token_auto_approval_acknowledged and getattr(self, setting)
+
+    def guest_auto_approval_enabled(self, operation):
+        return not self.review_usage and operation in self.auto_approve_guest_actions
+
+    def set_guest_auto_approval(self, operation, enabled):
+        if operation not in GUEST_AUTO_APPROVAL_OPTIONS:
+            raise ValueError("Choose a supported guest operation.")
+        with self.mutex:
+            previous = self.auto_approve_guest_actions
+            actions = previous | {operation} if enabled else previous - {operation}
+            if previous != actions:
+                self.legacy_access.write(replace(self.legacy_access.read(), auto_approve_guest_actions=actions))
+                self.auto_approve_guest_actions = actions
+                self.generation += 1
 
     def acknowledge_token_auto_approval(self, acknowledged):
         with self.mutex:
