@@ -356,10 +356,17 @@ def _validate(reply, payload):
                     or type(reply["expires_in"]) is not int or not 1 <= reply["expires_in"] <= 900):
                 raise ListingError("invalid_response")
         elif operation == "console_view":
-            if (set(reply) != {"png_base64", "width", "height", "scale"}
-                    or type(reply["width"]) is not int or not 1 <= reply["width"] <= 2048
-                    or type(reply["height"]) is not int or not 1 <= reply["height"] <= 1536
-                    or type(reply["scale"]) is not int or reply["scale"] not in (1, 2, 4, 8)
+            fields = {"width", "height"}
+            status_only = payload.get("status_only") is True
+            expected = fields | ({"changed"} if status_only else {"png_base64", "scale"})
+            if (set(reply) != expected or type(reply["width"]) is not int or not 1 <= reply["width"] <= 2048
+                    or type(reply["height"]) is not int or not 1 <= reply["height"] <= 1536):
+                raise ListingError("invalid_response")
+            if status_only:
+                if type(reply["changed"]) is not bool:
+                    raise ListingError("invalid_response")
+                return reply
+            if (type(reply["scale"]) is not int or reply["scale"] not in (1, 2, 4, 8)
                     or not isinstance(reply["png_base64"], str)):
                 raise ListingError("invalid_response")
             png = b64decode(reply["png_base64"], validate=True)
@@ -578,6 +585,7 @@ def main(argv=None):
             output = command.add_mutually_exclusive_group(required=True)
             output.add_argument("--png", action="store_true")
             output.add_argument("--json", action="store_true")
+            output.add_argument("--status", action="store_true", help="Report screen changes without returning an image")
         else:
             command.add_argument("--json", action="store_true", required=True)
         command.set_defaults(operation="console_" + verb)
@@ -637,6 +645,8 @@ def main(argv=None):
         payload["entry"] = options.entry
     elif options.operation in CONSOLE_OPERATIONS:
         payload["console"] = options.console
+        if options.operation == "console_view" and options.status:
+            payload["status_only"] = True
     if getattr(options, "vault", None):
         payload["vault"] = options.vault
     if getattr(options, "field", None):

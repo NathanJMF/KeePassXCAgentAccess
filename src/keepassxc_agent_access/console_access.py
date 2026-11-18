@@ -79,6 +79,7 @@ class ConsoleAccess:
 
     def handle(self, operation, keys, payload, uid, context, live, dispatch, deliver):
         credential = payload.get("credential")
+        status_only = False
         try:
             if isinstance(credential, str) and credential and credential in encode(
                     {key: value for key, value in payload.items() if key != "credential"}).decode("ascii"):
@@ -87,7 +88,13 @@ class ConsoleAccess:
                 vault, entry = uuid_text(payload["vault"]), uuid_text(payload["entry"])
                 descriptor = parse_console(payload["request"])
             elif operation in CONSOLE_OPERATIONS - {"console_open"}:
-                if keys != ({"console", "events"} if operation == "console_input" else {"console"}):
+                expected = {"console", "events"} if operation == "console_input" else {"console"}
+                if operation == "console_view" and "status_only" in keys:
+                    if payload["status_only"] is not True:
+                        raise ValueError
+                    expected.add("status_only")
+                    status_only = True
+                if keys != expected:
                     raise ValueError
                 identifier = uuid_text(payload["console"])
                 events = validate_inputs(payload["events"]) if operation == "console_input" else None
@@ -134,6 +141,8 @@ class ConsoleAccess:
             folder, title = entry_target_labels(session.entries, grant.entry)
             label = {"console_open": "Open Guest Console", "console_view": "View Guest Console",
                      "console_input": "Send Guest Console Input", "console_close": "Close Guest Console"}[operation]
+            if status_only:
+                label = "Check Guest Console"
             scope = f"Console {identifier} · {grant.endpoint}"
             if operation == "console_input":
                 scope += f" · {len(events)} input events"
@@ -189,6 +198,8 @@ class ConsoleAccess:
                 open_started = True
             elif operation == "console_input":
                 request["events"] = events
+            elif status_only:
+                request["status_only"] = True
             result = session.worker.console(request, gate)
             if result.get("error"):
                 raise ListingError("console_closed" if result["error"] == "console_closed" else "console_failed")

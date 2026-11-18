@@ -1,5 +1,6 @@
 """Exercise a private console from an installed runner to a synthetic TLS peer."""
 from base64 import b64encode
+from contextlib import closing
 from hashlib import sha1, sha256
 from http.server import BaseHTTPRequestHandler
 import json
@@ -12,6 +13,7 @@ from struct import pack, unpack
 import subprocess
 from tempfile import TemporaryDirectory
 from threading import Event, Thread
+from types import SimpleNamespace
 from unittest import TestCase
 from unittest.mock import patch
 from urllib.parse import parse_qs, urlsplit
@@ -150,15 +152,20 @@ def descriptor(origin, pin):
     }
 
 
+def fixture_state():
+    state = {key: key + "-" + secrets.token_hex(16) for key in ("user", "password", "cookie", "csrf", "ticket")}
+    state["ticket"] += ":/+%?=&"
+    state["vnc_password"] = secrets.token_hex(4)
+    state.update(logins=0, created=0, opened=0, input=[], closed=Event())
+    return state
+
+
 def exercise_console(root):
     target, _, private, _ = prepare(root)
     runtime, state_path = root / "runtime", root / "state"
     runtime.mkdir(mode=0o700)
     uid, gid = subordinate_ids()
-    state = {key: key + "-" + secrets.token_hex(16) for key in ("user", "password", "cookie", "csrf", "ticket")}
-    state["ticket"] += ":/+%?=&"
-    state["vnc_password"] = secrets.token_hex(4)
-    state.update(logins=0, created=0, opened=0, input=[], closed=Event())
+    state = fixture_state()
     secrets_to_check = [value.encode("ascii") for value in
                         [state[key] for key in ("password", "cookie", "csrf", "ticket", "vnc_password")]]
     workspace = Workspace(private, None)
@@ -252,12 +259,17 @@ def exercise_console(root):
             assert result["expires_in"] == 900 and decisions == [False, True, True, True]
             assert (state["logins"], state["created"], state["opened"]) == (1, 1, 1)
             view_args = ("console", "view", "--console", console, "--png")
+            status_args = ("console", "view", "--console", console, "--status")
             input_args = ("console", "input", "--console", console, "--json")
             call(foreign, *view_args, error="unavailable to this token")
+            call(foreign, *status_args, error="unavailable to this token")
             call(foreign, *input_args, data=[{"key": "Enter"}], error="unavailable to this token")
             before = call(profile, *view_args, png=True)
             assert before.startswith(b"\x89PNG\r\n\x1a\n")
+            assert call(profile, *status_args) == {"changed": False, "width": 8, "height": 4}
             assert call(profile, *input_args, data=[{"key": "Enter"}, {"text": "Aa!"}, {"x": 3, "y": 1}]) == {"outcome": "succeeded"}
+            assert call(profile, *status_args) == {"changed": True, "width": 8, "height": 4}
+            assert call(profile, *status_args) == {"changed": False, "width": 8, "height": 4}
             after = call(profile, *view_args, png=True)
             assert before != after
             received = [
@@ -316,6 +328,30 @@ def exercise_console(root):
 
 
 class ConsoleValidationTests(TestCase):
+    def test_status_checks_report_changes_without_encoding_images(self):
+        from keepassxc_agent_access.agent_cli import _validate
+        from keepassxc_agent_access.console_request import open_console
+
+        state = fixture_state()
+        with TemporaryDirectory(prefix="keeper-console-status-") as base, \
+                tls_service(Path(base), handler=console_site(state)) as (certificate, url, _):
+            pin = sha256(ssl.PEM_cert_to_DER_cert(certificate.read_text())).hexdigest()
+            entry = SimpleNamespace(username=state["user"], password=state["password"])
+            config = descriptor(url + "/", pin)
+            with closing(open_console(config, entry, lambda: True)) as console:
+                payload = {"operation": "console_view", "status_only": True}
+                with patch("keepassxc_agent_access.console_transport._png",
+                           side_effect=AssertionError("Status checks must not encode screenshots.")):
+                    self.assertEqual(_validate(console.view(status_only=True), payload),
+                                     {"changed": True, "width": 8, "height": 4})
+                    self.assertFalse(_validate(console.view(status_only=True), payload)["changed"])
+                    console.input([{"key": "Enter"}])
+                    self.assertTrue(_validate(console.view(status_only=True), payload)["changed"])
+                image = console.view()
+                self.assertIn("png_base64", _validate(image, {"operation": "console_view"}))
+                with self.assertRaises(ListingError):
+                    _validate(image, payload)
+
     def test_console_query_cannot_include_password_or_change_origin(self):
         from keepassxc_agent_access.console_request import parse_console
         request = descriptor("https://console.test:443/", "a" * 64)

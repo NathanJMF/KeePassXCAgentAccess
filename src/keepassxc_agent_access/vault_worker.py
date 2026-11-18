@@ -191,7 +191,7 @@ def use_console(consoles, data, entry):
         elif entry is None:
             raise ValueError
         elif operation == "console_view":
-            return console.view()
+            return console.view(status_only=data.get("status_only") is True)
         else:
             console.input(data["events"])
         return {"outcome": "succeeded"}

@@ -1,7 +1,7 @@
 """A bounded RFB client over an approved TLS WebSocket. Agent I/O is pixels and input."""
 from base64 import b64encode
 from contextlib import ExitStack
-from hashlib import sha1
+from hashlib import sha1, sha256
 import os
 from struct import pack, unpack
 from time import monotonic
@@ -260,8 +260,9 @@ class Console:
         ws.send(pack("!BBBBBBBBHHHBBBxxx", 0, 0, 0, 0, 32, 24, 0, 1, 255, 255, 255, 16, 8, 0))
         ws.send(pack("!BBHii", 2, 0, 2, 0, -223))  # Raw pixels and desktop resizing.
         self.rgb = bytearray(self.width * self.height * 3)
+        self.previous_frame = None
 
-    def view(self):
+    def view(self, *, status_only=False):
         ws = self.ws
         ws.deadline = min(self.expires, monotonic() + 6)
         ws.send(pack("!BBHHHH", 3, 0, 0, 0, self.width, self.height))
@@ -269,11 +270,16 @@ class Console:
             kind = ws.read(1)[0]
             if kind == 0:
                 self._update()
+                dimensions = {"width": self.width, "height": self.height}
+                frame = (self.width, self.height, sha256(self.rgb).digest())
+                changed = frame != self.previous_frame
+                self.previous_frame = frame
+                if status_only:
+                    return {"changed": changed, **dimensions}
                 for step in (1, 2, 4, 8):
                     png = _png(self.width, self.height, self.rgb, step)
                     if len(png) <= MAX_PNG:
-                        return {"png_base64": b64encode(png).decode("ascii"),
-                                "width": self.width, "height": self.height, "scale": step}
+                        return {"png_base64": b64encode(png).decode("ascii"), **dimensions, "scale": step}
                 raise ValueError("Console image exceeds the output limit.")
             if kind == 2:  # bell
                 continue
