@@ -82,6 +82,26 @@ keeper-agent-runner --socket /run/keepassxc-agent-access/entries.sock \
   --profile-dir /absolute/path/to/private/profile
 ```
 
+### Connect a single Codex project
+
+The owner can expose Keeper MCP tools in one trusted Codex workspace through the project's local `.codex/config.toml`. Keep machine-specific connector settings out of version control. With a dedicated Linux account admitted in Keeper's Broker Settings, run the runner as that account from an administrator-controlled installation. Use a private, runner-owned state directory and the fixed owner-controlled broker socket.
+
+```sh
+keeper-agent-runner --socket /absolute/owner/broker.sock \
+  --project-profiles /absolute/runner/project-profiles
+```
+
+For example, a systemd connection service can launch that command with socket input and output, protected home directories, and only Unix sockets. Bind the listening socket to the desktop owner with mode `0600`. Set a private state directory for the runner account. Point the Codex project at the local relay.
+
+```toml
+[mcp_servers.keeper_project]
+command = "/usr/bin/socat"
+args = ["STDIO", "UNIX-CONNECT:/run/keeper-project-example.sock"]
+tool_timeout_sec = 100
+```
+
+The owner must trust the checkout in Codex before it loads project-local MCP settings. Trust is recorded for that checkout in the user's Codex configuration. Open a fresh chat in the trusted project and give the agent the installed Keeper skill. The connector uses the thread ID from MCP tool metadata to select the profile. Projects sharing the listening socket share its trust boundary. A client able to connect directly can claim another thread ID, so use this only for mutually trusted agents. Keeper continues to apply the token's resource scope and the owner's review settings. Keep the socket and service configuration outside agent-writable locations.
+
 The runner creates a private profile in an existing parent directory and keeps the token inside it. A new profile reports `uninitialized` until an agent submits an access request. Use a separate profile for each token. Processes sharing an OS UID need a runtime boundary that prevents them from reading each other's profiles. The runner exposes only Keeper operations. This custom endpoint flow is separate from the installed helper's fixed desktop endpoint. Give the agent the [Keeper skill](../skills/keepassxc-agent-access/SKILL.md) and use its advanced stdio instructions with a host-assigned profile.
 
 For direct CLI use under the isolated account, provide `KEEPASSXC_AGENT_SOCKET` and an absolute `KEEPASSXC_AGENT_TOKEN_FILE` inside a private directory owned by that account.

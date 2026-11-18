@@ -1165,7 +1165,8 @@ def activity_dialog(app, row):
     add_activity_section(details, "Execution", activity_execution(row))
     add_activity_section(details, "Audit Note", (("Agent Note", row.get("note") or "No note provided."),))
     technical = activity_facts((
-        ("Linux UID (verified)", row.get("uid")), ("Chat ID", row.get("chat_id")), ("Vault ID", row.get("vault_id")),
+        ("Linux UID (verified)", row.get("uid")), ("Chat ID (reported)", row.get("chat_id")),
+        ("Vault ID", row.get("vault_id")),
         ("Group ID", row.get("group_id")), ("Entry ID", row.get("entry")),
         ("Token Record", row.get("token")), ("Edit Request ID", row.get("edit_request_id")),
         ("Recorded Scope", row.get("scope")),

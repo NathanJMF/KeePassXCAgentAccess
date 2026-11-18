@@ -33,6 +33,32 @@ def payload(reply):
 
 
 class RunnerTests(TestCase):
+    def test_project_profiles_follow_thread_metadata_and_reject_missing_ids(self):
+        from hashlib import sha256
+
+        def request(thread):
+            message = call_tool("access_status")
+            if thread is not None:
+                message["params"]["_meta"] = {"threadId": thread}
+            return message
+
+        def run(*messages):
+            result = subprocess.run(
+                [RUNNER, "--socket", self.endpoint, "--project-profiles", self.profile],
+                input=b"".join(encode(message) for message in messages), capture_output=True, check=True, timeout=12,
+            )
+            return [decode(line) for line in result.stdout.splitlines()]
+
+        first, second = "thread-project-one", "thread-project-two"
+        first_profile = self.profile / sha256(first.encode("ascii")).hexdigest()
+        replies = run(request(None), request("../profile"), request(first), request(second), request(first))
+        self.assertTrue(replies[0]["result"]["isError"])
+        self.assertTrue(replies[1]["result"]["isError"])
+        self.assertEqual([payload(reply) for reply in replies[2:]], [MISSING] * 3)
+        self.assertEqual(len(list(self.profile.iterdir())), 2)
+        self.assertEqual(stat.S_IMODE(first_profile.stat().st_mode), 0o700)
+        self.assertFalse((first_profile / "token").exists())
+
     def test_workflow_registration_cannot_replace_host_identity_or_fill_empty_host_values(self):
         from unittest.mock import patch
         from uuid import uuid4

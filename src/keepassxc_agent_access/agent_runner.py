@@ -2,6 +2,7 @@
 
 import argparse
 from base64 import b64decode
+from hashlib import sha256
 import json
 import os
 from pathlib import Path
@@ -387,7 +388,7 @@ def inherited_directory_fds(socket, profile, supplied):
 
 
 class AgentRunner:
-    def __init__(self, socket, profile, *, pass_fds=()):
+    def __init__(self, socket, profile, *, pass_fds=(), chat_id=None):
         self.pass_fds = pass_fds
         self.environment = {
             "PATH": "/usr/bin:/bin",
@@ -398,6 +399,8 @@ class AgentRunner:
                     "KEEPASSXC_AGENT_IDENTITY", "KEEPASSXC_AGENT_PROJECT"):
             if key in os.environ:
                 self.environment[key] = os.environ[key]
+        if chat_id is not None:
+            self.environment["KEEPASSXC_AGENT_CHAT_ID"] = chat_id
 
     def call_tool(self, params):
         try:
@@ -475,25 +478,55 @@ class AgentRunner:
         return {"result": result, "id": identifier}
 
 
+class ProjectRunner(AgentRunner):
+    """Route a project's MCP calls to runner-owned profiles by host-supplied chat ID."""
+
+    def __init__(self, socket, profiles):
+        self.socket = socket
+        self.profiles = profiles
+
+    def call_tool(self, params):
+        metadata = params.get("_meta")
+        chat_id = metadata.get("threadId") if isinstance(metadata, dict) else None
+        if not isinstance(chat_id, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,127}", chat_id):
+            return tool_result("Keeper needs the Codex thread ID on this project connection.", True)
+        if not isinstance(params.get("name"), str) or params["name"] not in OPERATIONS:
+            return tool_result("Invalid Keeper tool or arguments.", True)
+        profile = self.profiles / sha256(chat_id.encode("ascii")).hexdigest()
+        try:
+            profile.mkdir(mode=0o700, exist_ok=True)
+            os.close(open_profile(profile))
+        except (OSError, ListingError):
+            return tool_result("Keeper runner profile is unavailable or unsafe.", True)
+        return AgentRunner(self.socket, profile, chat_id=chat_id).call_tool(params)
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(prog="keeper-agent-runner", description=__doc__)
     parser.add_argument("--socket", required=True, type=Path, help="Absolute path to the owner's broker socket")
-    parser.add_argument("--profile-dir", required=True, type=Path, help="Absolute runner-owned profile directory")
+    profiles = parser.add_mutually_exclusive_group(required=True)
+    profiles.add_argument("--profile-dir", type=Path, help="Absolute runner-owned profile directory")
+    profiles.add_argument("--project-profiles", type=Path, help="Private profile root for a trusted project MCP connection")
     parser.add_argument("--inherit-directory-fd", type=int, action="append", default=[],
                         help="Trusted launcher directory descriptor referenced by a configured path")
     options = parser.parse_args(argv)
-    if not options.socket.is_absolute() or not options.profile_dir.is_absolute():
+    profile_path = options.profile_dir or options.project_profiles
+    if not options.socket.is_absolute() or not profile_path.is_absolute():
         parser.error("Socket and profile paths must be absolute.")
+    if options.project_profiles and options.inherit_directory_fd:
+        parser.error("Project connections require fixed socket and profile paths.")
     try:
-        pass_fds = inherited_directory_fds(options.socket, options.profile_dir, options.inherit_directory_fd)
+        pass_fds = inherited_directory_fds(options.socket, profile_path, options.inherit_directory_fd)
     except (OSError, OverflowError, ValueError):
         parser.error("Inherit only open directories referenced by the socket and profile paths.")
     try:
-        options.profile_dir.mkdir(mode=0o700, exist_ok=True)
-        os.close(open_profile(options.profile_dir))
+        profile_path.mkdir(mode=0o700, exist_ok=True)
+        os.close(open_profile(profile_path))
     except (OSError, ListingError):
         parser.exit(1, "Keeper runner profile is unavailable or unsafe. Use a private runner-owned directory.\n")
-    AgentRunner(options.socket, options.profile_dir, pass_fds=pass_fds).serve(sys.stdin.buffer, sys.stdout.buffer)
+    runner = (ProjectRunner(options.socket, profile_path) if options.project_profiles
+              else AgentRunner(options.socket, profile_path, pass_fds=pass_fds))
+    runner.serve(sys.stdin.buffer, sys.stdout.buffer)
     return 0
 
 

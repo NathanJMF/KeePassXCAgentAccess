@@ -7,6 +7,10 @@ Use Keeper to discover vault resources, request narrowly scoped permissions, and
 
 ## Start a fresh agent task
 
+If this workspace exposes `keeper_project` MCP tools, start there with `discover` and include a short `note`. The connection selects the profile for this chat. Use the returned resource IDs with `request_access`, including a readable identity and project in `request`. Use `access_status` to check approval, then continue with the Keeper tools. The operation descriptors below also apply to MCP. Keep using the same connection throughout the task.
+
+When Keeper MCP tools are unavailable, use the installed launcher below.
+
 The installer puts an executable named `keeper-agent` beside this `SKILL.md`. Use its absolute path, derived from the location of the skill you just read. It connects through Keeper's isolated runner automatically; no broker socket or token-file environment variables are needed. In the examples below, `keeper` is that executable's absolute path and `profile` is the handle returned by `begin`. Retain both values across shell calls.
 
     "$keeper" begin --identity "Forgejo Installer" --project "Forgejo Setup" --model "Your Model" --chat "Current Task"
