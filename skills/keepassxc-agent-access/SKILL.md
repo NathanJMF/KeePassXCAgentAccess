@@ -9,6 +9,10 @@ Use Keeper to discover vault resources, request narrowly scoped permissions, and
 
 If the workspace exposes Keeper MCP tools, start with `discover` and include a short `note`. Use the connection the owner configured for this workspace. Use the returned resource IDs with `request_access`, including a readable identity and project in `request`. Use `access_status` to check approval, then continue with the Keeper tools. The operation descriptors below also apply to MCP. Keep using the same connection throughout the task.
 
+**Deployments and VM setup.** Request HTTPS write access in the first token grant. For a Proxmox deployment with private login, request `uses: ["https", "https_results", "https_body"]` for the Proxmox entry and exact origin. Include any needed vault entry creation scopes in the same request. VM creation, ISO uploads, and starting guest commands are writes, including guest commands that only check status.
+
+Create any needed Keeper login entries first. Submit the final token update with those entries and all existing permissions still needed. Before requesting or starting the VM workflow, confirm with `access_status` and `details: true` that the update was approved and the active scope includes every required permission. An `active` token can still have a pending change. Once the update is approved, do any pinned HTTPS reads needed to establish trust, then submit and run the workflow. Use read-only discovery and planning while approval is pending.
+
 When Keeper MCP tools are unavailable, use the installed launcher below.
 
 The installer puts an executable named `keeper-agent` beside this `SKILL.md`. Use its absolute path, derived from the location of the skill you just read. It connects through Keeper's isolated runner automatically; no broker socket or token-file environment variables are needed. In the examples below, `keeper` is that executable's absolute path and `profile` is the handle returned by `begin`. Retain both values across shell calls.
@@ -69,6 +73,7 @@ Use the exact discovered vault and entry UUIDs. Request only the permissions nee
 | Local credential command | `uses: ["local_command"]` |
 | Networked credential command | `uses: ["networked_command"]` and `origins` |
 | HTTPS API authentication | `uses: ["https"]` and `origins` |
+| HTTPS writes and selected results | `uses: ["https", "https_results"]` and `origins` |
 | Credential in an API request body | `uses: ["https", "https_body"]` and `origins` |
 | Selected HTTPS response fields | `uses: ["https_results"]` and `origins` |
 | Private password login followed by selected results | `uses: ["https_results", "https_body"]` and `origins` |
@@ -153,7 +158,7 @@ If a job ID embeds a private login value, select a safe field from the response 
 
 Results require owner review by default, including installations whose Auto Approve was already on. The owner can explicitly enable **Results - Read** auto approval. This trusts the approved server and fields chosen by agents, while existing HTTPS review rules still apply.
 
-For a service with a private certificate, add `certificate_sha256` containing the exact SHA-256 fingerprint in lowercase hexadecimal. The owner first reviews the fingerprint and endpoint using **Approve and Trust Certificate**. After Keeper verifies that certificate, it remembers the fingerprint for this token, entry, credential revision and destination; subsequent requests follow the owner's Auto Approve, Results - Read and HTTPS settings. A changed fingerprint requires review again, and approving a replacement replaces the previous fingerprint. Permission changes reset this remembered trust. Ordinary requests without a pin still require system-trusted TLS with hostname verification. Keeper checks TLS before sending credentials; do not use a blanket TLS-verification bypass. If a request is pending, wait for its decision instead of repeatedly submitting it.
+For a service with a private certificate, add `certificate_sha256` containing the exact SHA-256 fingerprint in lowercase hexadecimal. A pinned read establishes trust for the current token, entry, credential revision, and destination. Keeper may accept the first verified fingerprint automatically with **TLS Certificates - First Use** enabled. Otherwise wait for **Approve and Trust Certificate**. A changed fingerprint requires review. Token updates reset remembered trust, so do the pinned read after the final update. Ordinary requests without a pin still require system-trusted TLS with hostname verification. Keeper checks TLS before sending credentials. Avoid blanket TLS-verification bypasses. If a request is pending, wait for its decision instead of repeatedly submitting it.
 
 ### Commands
 
@@ -236,7 +241,7 @@ Text entry uses US keyboard mappings. Coordinate clicks require the guest to exp
 
 ## Run commands on an approved guest
 
-Use `guest run` when the target service has a guest command API with a separate job status endpoint. Request `https_results` for the exact origin and `https_body` when the workflow requires private login. Prefer a credential whose service permissions are limited to the guest. Use the actual API paths and verified certificate fingerprint. Both requests use the same origin and certificate. Pass JSON with one `command` and one `workflow` on stdin.
+Use `guest run` when the target service has a guest command API with a separate job status endpoint. For scoped auto approval, request `https` and `https_results` for the exact origin up front, and add `https_body` for private login. Prefer a credential whose service permissions are limited to the guest. Use the actual API paths and verified certificate fingerprint. Both requests use the same origin and certificate. Pass JSON with one `command` and one `workflow` on stdin.
 
     {
       "command": "check status",
@@ -272,7 +277,7 @@ Use `guest wait --receipt UUID --until exited --equals-json true --timeout 30 --
 
 ## Review a known workflow together
 
-For related planned actions using one entry and destination, submit one manifest with `workflows request --json`. Keeper reviews up to eight steps together. If this is a fresh profile, use `workflows request --register --json` to include enrollment in the same review. The profile identity and project come from `begin`. The resulting token is limited to this exact workflow, its issued console and job handles, and its receipts. Use normal access requests for tasks that need wider reusable permissions.
+For related planned actions using one entry and destination, submit one manifest with `workflows request --json` after the final token approval. Token updates invalidate existing workflows. Keeper covers up to eight steps together. With **Workflows - Run** enabled, standing HTTPS write permission and an already trusted pin can satisfy the review. For a task limited to one exact workflow, use `workflows request --register --json` to include enrollment in the same review. The profile identity and project come from `begin`. The resulting token is limited to this exact workflow, its console and job handles, and its receipts.
 
     {
       "id": "WORKFLOW_UUID",
@@ -323,7 +328,9 @@ A pending request awaits an owner decision. Report the status to the user. With 
 
 ## Provision a new account
 
-Use a scoped administrative entry and the account entry returned by the vault edit. Both entries must be in the same vault. Send the protected, pinned HTTPS write and identify the destination body fields. Keeper reviews the transfer once and substitutes the values inside the vault worker.
+Use a scoped administrative entry and the account entry returned by the vault edit. Both entries must be in the same vault. Send the protected, pinned HTTPS write and identify the destination body fields. Keeper substitutes both credentials inside the vault worker.
+
+To use **Accounts - Provision** Auto Approve, include `https` and `https_results` for the administrator entry and `https_results` and `https_body` for the account entry in the final token request. All permissions must cover the same exact destination. Include `https_body` for the administrator when using private login. Wait for the token approval and establish trust with a pinned administrative read after the update. Keeper offers a one-time review when the auto approval requirements are missing.
 
     "$keeper" --profile "$profile" --note "Create the approved service account" accounts provision --vault "$vault" --entry "$admin" --account "$account" --receipt "$receipt" --json <<'JSON'
     {

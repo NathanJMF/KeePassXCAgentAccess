@@ -43,6 +43,7 @@ SCOPED_AUTO_APPROVAL_OPTIONS = {
     "https_write_once": ("HTTPS - One-Time Writes", "Allow writes already covered by the token’s HTTPS permission."),
     "workflow": ("Workflows - Run", "Allow exact workflows whose steps and pinned destination are already covered."),
     "guest_first_use": ("Guest Connections - First Use", "Start a scoped guest command or console at a trusted endpoint when its switch is on."),
+    "provision_account": ("Accounts - Provision", "Send a scoped account credential in an approved admin write to a trusted HTTPS destination."),
 }
 
 REVIEW_ACTIONS = {

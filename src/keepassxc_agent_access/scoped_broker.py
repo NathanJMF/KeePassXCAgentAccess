@@ -302,6 +302,7 @@ class ScopedBroker:
             certificate_expected = ()
             write_once = False
             automatic_write = False
+            automatic_provision = False
             write_approval_required = False
             credential_revision = registration.credential_revision(entry) if registration and entry else None
             if binding is not None and binding.action.kind == ActionType.RESULTS:
@@ -329,10 +330,17 @@ class ScopedBroker:
                                    and (origin is None or origin in s.origins)
                                    and (not body_required or "https_body" in s.uses))
                 candidates = tuple(s for s in matching if not write_required or write_once or "https" in s.uses)
-                automatic_write = (write_once and write_required and not provision
-                                   and self.workspace.scoped_auto_approval_enabled("https_write_once")
-                                   and any("https" in s.uses and s.use_revision == credential_revision
-                                           for s in matching))
+                standing_write = (write_once and write_required and any(
+                    "https" in s.uses and s.use_revision == credential_revision for s in matching))
+                if standing_write:
+                    if provision:
+                        automatic_provision = (
+                            certificate_trusted and self.workspace.scoped_auto_approval_enabled("provision_account")
+                            and any((s.vault, s.entry, s.use_revision) == (chosen, account, account_revision)
+                                    and "https_body" in s.uses and origin in s.origins for s in token.scope)
+                        )
+                    else:
+                        automatic_write = self.workspace.scoped_auto_approval_enabled("https_write_once")
                 permitted = registration is not None and any(
                     s.use_revision is not None and s.use_revision == credential_revision
                     for s in candidates)
@@ -345,7 +353,7 @@ class ScopedBroker:
                     any((s.vault, s.entry, s.action, s.revision) == (chosen, entry, binding_id, binding.revision)
                         for s in token.scope)
                 )
-            review_policy = review_policy or write_once and not automatic_write
+            review_policy = review_policy or write_once and not (automatic_write or automatic_provision)
             review_usage = review_policy or bool(certificate_pin and not certificate_trusted)
             recognized = permitted or usage is not None and credential_changed
             folder, title = entry_target_labels(session.entries, entry) if recognized and session else (None, None)
@@ -480,7 +488,7 @@ class ScopedBroker:
                         pin == certificate_pin for pin in certificate_expected)
                     certificate_committed = certificate_trusted
                     first_pin = bool(certificate_expected) and not any(certificate_expected)
-                    auto_pin = first_pin and self.workspace.scoped_auto_approval_enabled("tls_first_pin")
+                    auto_pin = first_pin and not provision and self.workspace.scoped_auto_approval_enabled("tls_first_pin")
                     review_usage = not certificate_trusted and not auto_pin
                     remember_certificate = not certificate_trusted and not write_once
                     if review_usage or remember_certificate:
@@ -550,7 +558,8 @@ class ScopedBroker:
                     raise ListingError(result)
             decision = "Approved token"
             if provision:
-                decision = "Approved account provisioning once"
+                decision = ("Auto approved scoped account provisioning" if automatic_provision and not review_usage
+                            else "Approved account provisioning once")
             elif approved_step:
                 decision = approved_step[0].step_authorization
             elif write_once:

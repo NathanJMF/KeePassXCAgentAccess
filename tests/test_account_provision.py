@@ -91,6 +91,7 @@ class ProvisionTests(TestCase):
             self.engine = ScopedBroker(workspace, grants, activity, edits=edits)
             self.credential = "7b" * 32
             workspace.pause(False)
+            workspace.set_scoped_auto_approval("provision_account", True)
             grants.enroll(self.credential, 123, {"identity": "Synthetic provisioner", "project": "Fixture",
                                                   "items": [
                                                       {"vault": vault, "group": str(group.uuid), "edits": ["create_entry"]},
@@ -170,6 +171,48 @@ class ProvisionTests(TestCase):
                 provision(str(uuid4()))
             self.assertEqual(already_released.exception.code, "ineligible")
             self.assertEqual(len(posts), 1)
+
+            # Use a fresh account credential and token to exercise the scoped
+            # path through an actual pinned HTTPS write.
+            scoped_secret = "Synthetic scoped account password"
+            workspace.put_entry(vault, str(group.uuid), entry=account, title="Generated Service Account",
+                                username="scoped-agent", password=scoped_secret)
+            self.credential = "7c" * 32
+            request = {"identity": "Scoped synthetic provisioner", "project": "Fixture", "items": [
+                {"vault": vault, "entry": admin, "uses": ["https", "https_results"], "origins": [origin]},
+                {"vault": vault, "entry": account, "uses": ["https_results", "https_body"],
+                 "origins": ["https://wrong.example.test/"]},
+            ]}
+            grants.enroll(self.credential, 123, request, Attribution())
+            pending = grants.authenticate(self.credential, 123)
+            grants.decide(pending.id, [grants.choices(item)[0] for item in pending.items])
+            workspace.set_review_action("read_results", False)
+            workspace.set_scoped_auto_approval("tls_first_pin", True)
+            self.assertEqual(self.invoke("use_password", vault=vault, entry=admin, usage=read)["outcome"], "succeeded")
+
+            with self.assertRaises(ListingError) as wrong_origin:
+                self.reviewed(lambda: provision(str(uuid4())), inspect=inspect, approve=False)
+            self.assertEqual(wrong_origin.exception.code, "declined")
+            request["items"][1]["origins"] = [origin]
+            request["change_id"] = str(uuid4())
+            grants.enroll(self.credential, 123, request, Attribution())
+            pending = grants.authenticate(self.credential, 123).pending_change
+            grants.decide(grants.authenticate(self.credential, 123).id,
+                          [grants.choices(item)[0] for item in pending.items], change_id=pending.id)
+
+            with self.assertRaises(ListingError) as untrusted:
+                self.reviewed(lambda: provision(str(uuid4())), inspect=inspect, approve=False)
+            self.assertEqual(untrusted.exception.code, "declined")
+            self.assertEqual(self.invoke("use_password", vault=vault, entry=admin, usage=read)["outcome"], "succeeded")
+            scoped_receipt = str(uuid4())
+            response = provision(scoped_receipt)
+            self.assertEqual(response["outcome"], "succeeded")
+            self.assertEqual(remote["scoped-agent"], scoped_secret)
+            self.assertEqual(len(posts), 2)
+            self.assertEqual(self.invoke("write_status", receipt=scoped_receipt)["status"], "succeeded")
+            self.assertNotIn(scoped_secret, repr(response) + repr(activity.rows()))
+            decisions = {row["decision"] for row in activity.rows(action="Provision Account")}
+            self.assertIn("Auto approved scoped account provisioning", decisions)
 
     def test_field_collision_and_unpinned_writes_are_rejected(self):
         proposed = {"entry": str(uuid4()), "body_type": "json", "fields": {"password": "password"}}
