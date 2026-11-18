@@ -38,6 +38,13 @@ GUEST_AUTO_APPROVAL_OPTIONS = {
     "guest_run": "Guest Commands - Run",
 }
 
+SCOPED_AUTO_APPROVAL_OPTIONS = {
+    "tls_first_pin": ("TLS Certificates - First Use", "Accept the agent’s first fingerprint for an approved destination when the server presents it."),
+    "https_write_once": ("HTTPS - One-Time Writes", "Allow writes already covered by the token’s HTTPS permission."),
+    "workflow": ("Workflows - Run", "Allow exact workflows whose steps and pinned destination are already covered."),
+    "guest_first_use": ("Guest Connections - First Use", "Start a scoped guest command or console at a trusted endpoint when its switch is on."),
+}
+
 REVIEW_ACTIONS = {
     "list_vaults": "Vaults - List",
     "create_group": "Groups - Create",
@@ -495,6 +502,7 @@ class AccessSettings:
     token_auto_approval_acknowledged: bool = False
     review_results: bool = True
     auto_approve_guest_actions: frozenset[str] = frozenset()
+    auto_approve_scoped_actions: frozenset[str] = frozenset()
 
     def for_vault(self, identity):
         return dict(self.vaults).get(identity, VaultPolicy())
@@ -528,6 +536,7 @@ class AccessStore:
             auto_approve_token_changes = data.get("auto_approve_token_changes", False)
             token_auto_approval_acknowledged = data.get("token_auto_approval_acknowledged", False)
             guest_actions = data.get("auto_approve_guest_actions", [])
+            scoped_actions = data.get("auto_approve_scoped_actions", [])
             if (type(retention) is not int or not 1 <= retention <= 365 or type(review_usage) is not bool or type(review_results) is not bool
                     or type(start_unlocked) is not bool or type(auto_approve_tokens) is not bool
                     or type(auto_approve_token_changes) is not bool or type(token_auto_approval_acknowledged) is not bool
@@ -535,7 +544,9 @@ class AccessStore:
                     or any(not isinstance(action, str) for action in review_actions)
                     or not isinstance(guest_actions, list)
                     or any(not isinstance(action, str) or action not in GUEST_AUTO_APPROVAL_OPTIONS
-                           for action in guest_actions)):
+                           for action in guest_actions) or not isinstance(scoped_actions, list)
+                    or any(not isinstance(action, str) or action not in SCOPED_AUTO_APPROVAL_OPTIONS
+                           for action in scoped_actions)):
                 raise ValueError
             vaults = tuple(
                 (uuid_text(identity), VaultPolicy(
@@ -547,7 +558,7 @@ class AccessStore:
             return AccessSettings(AccessMode(data["mode"]), endpoint, uid, retention, vaults, review_usage,
                                   normalize_review_actions(review_actions), start_unlocked,
                                   auto_approve_tokens, auto_approve_token_changes, token_auto_approval_acknowledged,
-                                  review_results, frozenset(guest_actions))
+                                  review_results, frozenset(guest_actions), frozenset(scoped_actions))
         except FileNotFoundError:
             return AccessSettings()
         except (OSError, AttributeError, ValueError, TypeError, KeyError):
@@ -562,6 +573,8 @@ class AccessStore:
             raise ValueError("Choose whether result reads require review.")
         if not settings.auto_approve_guest_actions <= GUEST_AUTO_APPROVAL_OPTIONS.keys():
             raise ValueError("Choose a supported guest operation.")
+        if not settings.auto_approve_scoped_actions <= SCOPED_AUTO_APPROVAL_OPTIONS.keys():
+            raise ValueError("Choose a supported scoped operation.")
         if not 1 <= settings.retention_days <= 365:
             raise ValueError("Choose a retention period between 1 and 365 days.")
         write_private_json(self.path, {
@@ -570,6 +583,7 @@ class AccessStore:
             "review_results": settings.review_results,
             "review_actions": sorted(review_actions),
             "auto_approve_guest_actions": sorted(settings.auto_approve_guest_actions),
+            "auto_approve_scoped_actions": sorted(settings.auto_approve_scoped_actions),
             "start_unlocked": settings.start_unlocked,
             "auto_approve_tokens": settings.auto_approve_tokens,
             "auto_approve_token_changes": settings.auto_approve_token_changes,

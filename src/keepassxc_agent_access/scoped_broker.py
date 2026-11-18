@@ -301,6 +301,7 @@ class ScopedBroker:
             certificate_committed = False
             certificate_expected = ()
             write_once = False
+            automatic_write = False
             write_approval_required = False
             credential_revision = registration.credential_revision(entry) if registration and entry else None
             if binding is not None and binding.action.kind == ActionType.RESULTS:
@@ -315,8 +316,7 @@ class ScopedBroker:
                     certificate_trusted = bool(certificate_expected) and all(
                         pin == certificate_pin for pin in certificate_expected)
                     certificate_committed = certificate_trusted
-                review_policy = write_once or review_usage or self.workspace.requires_review("use_https")
-                review_usage = review_policy or certificate_pin is not None and not certificate_trusted
+                review_policy = review_usage or self.workspace.requires_review("use_https")
             remember_certificate = bool(certificate_pin and not certificate_trusted and not write_once)
             if usage is not None:
                 origin = None
@@ -329,6 +329,10 @@ class ScopedBroker:
                                    and (origin is None or origin in s.origins)
                                    and (not body_required or "https_body" in s.uses))
                 candidates = tuple(s for s in matching if not write_required or write_once or "https" in s.uses)
+                automatic_write = (write_once and write_required and not provision
+                                   and self.workspace.scoped_auto_approval_enabled("https_write_once")
+                                   and any("https" in s.uses and s.use_revision == credential_revision
+                                           for s in matching))
                 permitted = registration is not None and any(
                     s.use_revision is not None and s.use_revision == credential_revision
                     for s in candidates)
@@ -341,6 +345,8 @@ class ScopedBroker:
                     any((s.vault, s.entry, s.action, s.revision) == (chosen, entry, binding_id, binding.revision)
                         for s in token.scope)
                 )
+            review_policy = review_policy or write_once and not automatic_write
+            review_usage = review_policy or bool(certificate_pin and not certificate_trusted)
             recognized = permitted or usage is not None and credential_changed
             folder, title = entry_target_labels(session.entries, entry) if recognized and session else (None, None)
             scope_summary = f"Requested entry fields · {', '.join(fields)}" if fields else None
@@ -473,9 +479,11 @@ class ScopedBroker:
                     certificate_trusted = bool(certificate_expected) and all(
                         pin == certificate_pin for pin in certificate_expected)
                     certificate_committed = certificate_trusted
-                    review_usage = not certificate_trusted
-                    remember_certificate = not certificate_trusted
-                    if review_usage:
+                    first_pin = bool(certificate_expected) and not any(certificate_expected)
+                    auto_pin = first_pin and self.workspace.scoped_auto_approval_enabled("tls_first_pin")
+                    review_usage = not certificate_trusted and not auto_pin
+                    remember_certificate = not certificate_trusted and not write_once
+                    if review_usage or remember_certificate:
                         key = (token.id, token.generation, chosen, entry, credential_revision,
                                usage_origin(binding.action.url), certificate_pin)
                         if key in self.certificate_reviews:
@@ -544,11 +552,12 @@ class ScopedBroker:
             if provision:
                 decision = "Approved account provisioning once"
             elif approved_step:
-                decision = "Approved in workflow review"
+                decision = approved_step[0].step_authorization
             elif write_once:
-                decision = "Approved write once"
+                decision = "Auto approved scoped HTTPS write" if automatic_write and not review_usage else "Approved write once"
             elif remember_certificate:
-                decision = "Approved once; trust certificate on verified dispatch"
+                decision = ("Approved once; trust certificate on verified dispatch" if review_usage
+                            else "Auto approved first certificate pin on verified dispatch")
             elif review_usage:
                 decision = "Approved once"
             self.activity.authorize(event, decision)

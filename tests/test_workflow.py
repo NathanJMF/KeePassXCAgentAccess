@@ -47,6 +47,37 @@ class WorkflowTests(TestCase):
     def run_step(self, manifest, name, **kwargs):
         return self.invoke("workflow_run", workflow=manifest["id"], step=name, **kwargs)
 
+    def test_auto_approved_workflow_requires_trusted_pin_and_standing_write_access(self):
+        manifest = self.manifest()
+        self.register(manifest)
+        identifier = self.approve([{"vault": manifest["vault"], "entry": manifest["entry"],
+                                    "uses": ["https_results", "https"], "origins": [manifest["origin"]]}], index=1)
+        token = self.grants.records[identifier]
+        revision = self.workspace.registrations[manifest["vault"]].credential_revision(manifest["entry"])
+        self.grants.trust_result_certificate(token.id, token.generation, manifest["vault"], manifest["entry"],
+                                             revision, token.scope[0].origins[0], manifest["certificate_sha256"], (None,))
+        self.workspace.set_review_action("read_results", False)
+        self.workspace.set_scoped_auto_approval("workflow", True)
+        with self.assertRaises(ListingError) as denied:
+            self.reviewed(lambda: self.invoke("workflow_request", request=manifest), approve=False)
+        self.assertEqual(denied.exception.code, "declined")
+        allowed = self.invoke("workflow_request", request=manifest, index=1)
+        self.assertEqual(allowed["id"], manifest["id"])
+        self.assertIn("Auto approved scoped workflow", {r["decision"] for r in self.activity.rows()})
+
+        def worker_use(_action, gate, **_kwargs):
+            self.assertTrue(gate(lambda: None))
+            return {"outcome": "succeeded", "http_status": 200, "data": [{"guest_id": 842}]}
+
+        worker = self.workspace.session(manifest["vault"]).worker
+        with patch.object(worker, "use", side_effect=worker_use):
+            self.assertEqual(self.run_step(manifest, "create", index=1)["data"], [{"guest_id": 842}])
+        self.assertIn("Auto approved workflow step", {r["decision"] for r in self.activity.rows()})
+        self.workspace.set_review_usage(True)
+        with self.assertRaises(ListingError) as revoked:
+            self.run_step(manifest, "start", index=1)
+        self.assertEqual(revoked.exception.code, "workflow_unavailable")
+
     def test_two_writes_share_one_review_and_one_immutable_dependency(self):
         manifest = self.manifest()
         self.register(manifest)

@@ -10,7 +10,8 @@ from pathlib import Path
 from threading import Event, RLock
 from uuid import uuid4
 
-from .access_settings import Action, AccessStore, GUEST_AUTO_APPROVAL_OPTIONS, TOKEN_AUTO_APPROVAL_OPTIONS, label, uuid_text
+from .access_settings import (Action, AccessStore, GUEST_AUTO_APPROVAL_OPTIONS, SCOPED_AUTO_APPROVAL_OPTIONS,
+                              TOKEN_AUTO_APPROVAL_OPTIONS, label, uuid_text)
 from .discovery import DiscoveryCatalog
 from .keyring import KeyringError
 from .settings import SettingsError, SettingsStore, write_private_json
@@ -107,6 +108,7 @@ class Workspace:
             self.review_actions |= {"read_results"}
         self.auto_approve_tokens = preferences.auto_approve_tokens
         self.auto_approve_guest_actions = preferences.auto_approve_guest_actions
+        self.auto_approve_scoped_actions = preferences.auto_approve_scoped_actions
         self.auto_approve_token_changes = preferences.auto_approve_token_changes
         self.token_auto_approval_acknowledged = preferences.token_auto_approval_acknowledged
         self.generation = 0
@@ -436,6 +438,21 @@ class Workspace:
 
     def guest_auto_approval_enabled(self, operation):
         return not self.review_usage and operation in self.auto_approve_guest_actions
+
+    def scoped_auto_approval_enabled(self, operation):
+        return (not self.requires_review("use_https") and not self.requires_review("read_results")
+                and operation in self.auto_approve_scoped_actions)
+
+    def set_scoped_auto_approval(self, operation, enabled):
+        if operation not in SCOPED_AUTO_APPROVAL_OPTIONS:
+            raise ValueError("Choose a supported scoped operation.")
+        with self.mutex:
+            previous = self.auto_approve_scoped_actions
+            actions = previous | {operation} if enabled else previous - {operation}
+            if actions != previous:
+                self.legacy_access.write(replace(self.legacy_access.read(), auto_approve_scoped_actions=actions))
+                self.auto_approve_scoped_actions = actions
+                self.generation += 1
 
     def set_guest_auto_approval(self, operation, enabled):
         if operation not in GUEST_AUTO_APPROVAL_OPTIONS:

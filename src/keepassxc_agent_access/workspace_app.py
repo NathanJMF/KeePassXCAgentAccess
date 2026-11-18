@@ -16,7 +16,8 @@ gi.require_version("Gtk", "3.0")
 gi.require_version("Gdk", "3.0")
 from gi.repository import Gdk, Gio, GLib, Gtk, Pango
 
-from .access_settings import GUEST_AUTO_APPROVAL_OPTIONS, REVIEW_ACTIONS, TOKEN_AUTO_APPROVAL_OPTIONS
+from .access_settings import (GUEST_AUTO_APPROVAL_OPTIONS, REVIEW_ACTIONS, SCOPED_AUTO_APPROVAL_OPTIONS,
+                              TOKEN_AUTO_APPROVAL_OPTIONS)
 from .activity import ActivityError, ActivityStore
 from .agent_connection import connection_socket, installed_connection
 from .approvals import ApprovalQueue
@@ -1119,7 +1120,7 @@ class WorkspaceApplication(Gtk.Application):
             self._settings_switch(actions, caption, operation not in self.workspace.review_actions,
                                   lambda control, operation=operation: self._set_action_auto_approval(control, operation),
                                   operation,
-                                  "Trust the approved endpoint and requested fields when releasing results. Explicit certificate pins still need review."
+                                  "Trust the approved endpoint and requested fields when releasing results."
                                   if operation == "read_results" else None)
         for operation, caption in GUEST_AUTO_APPROVAL_OPTIONS.items():
             actions.pack_start(Gtk.Separator(), False, False, 0)
@@ -1128,6 +1129,15 @@ class WorkspaceApplication(Gtk.Application):
                                   operation, "Allow another command at an endpoint you approved for a limited time."
                                   if operation == "guest_run" else
                                   "Allow an agent to reuse a connection you approved for a limited time.")
+        scoped = self._settings_card(approvals)
+        scoped.pack_start(styled(_label("Use Approved Access"), "keeper-settings-caption"), False, False, 0)
+        scoped.pack_start(styled(_label("Requires Auto Approve, HTTPS Requests and Results - Read to be enabled."),
+                                 "keeper-settings-description"), False, False, 0)
+        for operation, (caption, description) in SCOPED_AUTO_APPROVAL_OPTIONS.items():
+            scoped.pack_start(Gtk.Separator(), False, False, 0)
+            self._settings_switch(scoped, caption, operation in self.workspace.auto_approve_scoped_actions,
+                                  lambda control, operation=operation: self._set_scoped_auto_approval(control, operation),
+                                  operation, description)
         self._token_auto_approval_settings(approvals)
         vaults = page("vaults", "Vaults", "drive-harddisk-symbolic")
         self._settings_switch(self._settings_card(vaults), "Start Unlocked", self.start_unlocked, self._set_start_unlocked,
@@ -1362,6 +1372,10 @@ class WorkspaceApplication(Gtk.Application):
             self.message = str(error) or "Could not save the guest auto approval setting."
             control.set_active(previous)
         self._refresh()
+
+    def _set_scoped_auto_approval(self, control, operation):
+        self.owner_operation(lambda: self.workspace.set_scoped_auto_approval(operation, control.get_active()))
+        control.set_active(operation in self.workspace.auto_approve_scoped_actions)
 
     def _set_token_auto_approval(self, control, setting):
         previous = getattr(self.workspace, setting)

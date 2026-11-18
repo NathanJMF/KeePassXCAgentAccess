@@ -153,6 +153,11 @@ class Workflow:
     steps: dict
     captures: dict
     opened: set
+    trusted_endpoint: tuple[str, str] | None = None
+
+    @property
+    def step_authorization(self):
+        return "Auto approved workflow step" if self.trusted_endpoint else "Approved in workflow review"
 
 
 class WorkflowAccess:
@@ -177,7 +182,9 @@ class WorkflowAccess:
                 and self.workspace.generation == workflow.workspace_generation
                 and token is not None and token.status == "active" and token.generation == workflow.token_generation
                 and record is not None and record.credential_revision(workflow.entry) == workflow.revision
-                and self.workspace.session(workflow.vault) is workflow.session)
+                and self.workspace.session(workflow.vault) is workflow.session
+                and (workflow.trusted_endpoint is None or self.broker.grants.result_certificate_trusted(
+                    token, workflow.vault, workflow.entry, workflow.revision, *workflow.trusted_endpoint)))
 
     def propose(self, raw, credential, uid, context, live, deliver, *, enrollment=None):
         identifier, vault, entry, minutes, common, steps, digest = parse_workflow(raw)
@@ -215,9 +222,21 @@ class WorkflowAccess:
             if token.workflow and token.workflow != (identifier, digest):
                 raise ListingError("receipt_conflict")
             revision = registration.credential_revision(entry)
-            if not any((scope.vault, scope.entry, scope.use_revision) == (vault, entry, revision)
-                       and needed <= set(scope.uses) and origin in scope.origins for scope in token.scope):
+            matching = tuple(scope for scope in token.scope
+                             if (scope.vault, scope.entry, scope.use_revision) == (vault, entry, revision)
+                             and needed <= set(scope.uses) and origin in scope.origins)
+            if not matching:
                 raise ListingError("ineligible")
+            guest_operations = {"guest": "guest_run", "console": "console_open"}
+            automatic = (
+                draft is None and token.workflow is None and any("https" in scope.uses for scope in matching)
+                and self.workspace.scoped_auto_approval_enabled("workflow")
+                and grants.result_certificate_trusted(token, vault, entry, revision, origin, common["certificate_sha256"])
+                and all(step.kind == "write" or (
+                    self.workspace.scoped_auto_approval_enabled("guest_first_use")
+                    and self.workspace.guest_auto_approval_enabled(guest_operations[step.kind]))
+                        for step in steps.values())
+            )
             self.active = {key: value for key, value in self.active.items() if self.current(value)}
             key = (token.id, identifier)
             pending_key = (hashed, None if draft else identifier)
@@ -231,7 +250,8 @@ class WorkflowAccess:
                 raise ListingError("receipt_exists")
             review_deadline = monotonic() + self.approvals.timeout
             workflow = Workflow(identifier, token.id, token.generation, self.workspace.generation, vault, entry,
-                                revision, session, review_deadline + 1, common, steps, {}, set())
+                                revision, session, review_deadline + 1, common, steps, {}, set(),
+                                (origin, common["certificate_sha256"]) if automatic else None)
             folder, name = entry_target_labels(session.entries, entry)
             action = "Review Workflow"
             event = self.activity.begin(uid, context, action, origin, entry, vault=registration.name, vault_id=vault,
@@ -264,11 +284,13 @@ class WorkflowAccess:
                           workflow_enrollment=draft is not None, resume_access=resume_access)
         outcome = "Revoked"
         try:
-            answer = self.approvals.wait(ticket, lambda: guard(live))
-            if answer != "approved":
-                outcome = {"declined": "Denied", "expired": "Expired"}.get(answer, "Revoked")
-                raise ListingError(answer)
-            self.activity.authorize(event, "Owner approved workflow-only token" if draft else "Owner approved exact workflow")
+            if not automatic:
+                answer = self.approvals.wait(ticket, lambda: guard(live))
+                if answer != "approved":
+                    outcome = {"declined": "Denied", "expired": "Expired"}.get(answer, "Revoked")
+                    raise ListingError(answer)
+            self.activity.authorize(event, "Auto approved scoped workflow" if automatic else
+                                    "Owner approved workflow-only token" if draft else "Owner approved exact workflow")
 
             def publish():
                 if draft is not None:

@@ -318,12 +318,15 @@ class Grants:
                      if (scope.vault, scope.entry, scope.use_revision) == (vault, entry, revision)
                      and "https_results" in scope.uses and origin in scope.origins)
 
+    def result_certificate_trusted(self, record, vault, entry, revision, origin, fingerprint):
+        pins = self.result_certificate_pins(record, vault, entry, revision, origin)
+        return bool(pins) and all(pin == fingerprint for pin in pins)
+
     def trust_result_certificate(self, identifier, generation, vault, entry, revision, origin, fingerprint, expected):
         """Owner approval of a concrete workflow also pins its TLS identity to this scope.
 
-        This is never an enrollment field: an agent cannot attest to certificate
-        trust. Call only after the owner approves a ticket displaying this pin
-        and the notice explaining future use under Auto Approve.
+        This is never an enrollment field. The broker records trust at verified
+        dispatch after an owner review or the owner's explicit first-pin policy.
         """
         with self.workspace.mutex:
             record = self.records[identifier]

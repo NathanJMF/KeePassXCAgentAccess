@@ -58,6 +58,38 @@ class ResultBrokerTests(unittest.TestCase):
         self.approve([self.item(("https", "https_body"))])
         self.assert_code("ineligible", "use_password", entry=self.entry, vault=self.vaults[0], usage=self.request())
 
+    def test_auto_approved_first_pin_keeps_review_for_rotation(self):
+        self.approve([self.item()])
+        self.workspace.set_review_action("read_results", False)
+        self.workspace.set_scoped_auto_approval("tls_first_pin", True)
+        worker = self.workspace.session(self.vaults[0]).worker
+        with patch.object(worker, "use", side_effect=self.fake_worker):
+            self.use(self.request(certificate_sha256="a" * 64))
+            self.use(self.request(certificate_sha256="a" * 64))
+            with self.assertRaises(ListingError) as denied:
+                self.reviewed(lambda: self.use(self.request(certificate_sha256="b" * 64)), approve=False)
+        self.assertEqual(denied.exception.code, "declined")
+        decisions = {row["decision"] for row in self.activity.rows(action="Read HTTPS Results")}
+        self.assertIn("Auto approved first certificate pin on verified dispatch", decisions)
+        self.assertIn("Approved token", decisions)
+
+    def test_auto_approved_one_time_write_requires_existing_write_permission(self):
+        self.approve([self.item()])
+        self.approve([self.item(("https_results", "https"))], index=1)
+        self.workspace.set_review_action("read_results", False)
+        self.workspace.set_scoped_auto_approval("https_write_once", True)
+        request = self.request(approve_write_once=True, request={
+            "path": "/jobs", "auth": "bearer", "method": "POST", "json": {"task": "create"}})
+        worker = self.workspace.session(self.vaults[0]).worker
+        with patch.object(worker, "use", side_effect=self.fake_worker) as send:
+            with self.assertRaises(ListingError) as denied:
+                self.reviewed(lambda: self.use(request), approve=False)
+            self.assertEqual(denied.exception.code, "declined")
+            self.assertEqual(self.use(request, index=1)["outcome"], "succeeded")
+            send.assert_called_once()
+        self.assertIn("Auto approved scoped HTTPS write",
+                      {row["decision"] for row in self.activity.rows(action="Write via HTTPS")})
+
     def test_write_receipt_reserves_once_before_review_and_survives_lost_delivery(self):
         self.approve([self.item(("https_results", "https_body"))])
         self.approve([self.item(("https_results", "https_body"))], index=1)

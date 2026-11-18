@@ -394,6 +394,25 @@ class ConsoleReuseTests(TestCase):
         self.assertTrue(gate(lambda: None))
         return {"outcome": "succeeded"}
 
+    def test_first_console_auto_approves_inside_trusted_write_scope(self):
+        vault = self.vaults[0]
+        origin = "https://console.test/"
+        identifier = self.approve([{"vault": vault, "entry": self.entry,
+                                    "uses": ["https_results", "https_body", "https"], "origins": [origin]}])
+        token = self.grants.records[identifier]
+        revision = self.workspace.registrations[vault].credential_revision(self.entry)
+        self.grants.trust_result_certificate(token.id, token.generation, vault, self.entry, revision,
+                                             token.scope[0].origins[0], "a" * 64, (None,))
+        self.workspace.set_review_action("read_results", False)
+        self.workspace.set_guest_auto_approval("console_open", True)
+        self.workspace.set_scoped_auto_approval("guest_first_use", True)
+        worker = self.workspace.session(vault).worker
+        with patch.object(worker, "console", side_effect=self.worker_exchange, create=True):
+            handle = self.open(reuse_minutes=3)
+            self.assertGreater(handle["reuse_expires_in"], 0)
+            self.close(handle)
+        self.assertIn("Auto approved scoped console", {r["decision"] for r in self.activity.rows()})
+
     def test_reconnect_requires_exact_live_permission_and_does_not_extend_it(self):
         self.setup_token()
         self.setup_token(index=1)

@@ -35,6 +35,7 @@ class ConsoleGrant:
     ready: bool = False
     workflow_id: str | None = None
     workflow_step: str | None = None
+    trusted_pin: str | None = None
 
 
 class ConsoleAccess:
@@ -52,7 +53,9 @@ class ConsoleAccess:
                 and self.workspace.generation == grant.generation
                 and token is not None and token.status == "active" and token.generation == grant.token_generation
                 and self.workspace.session(grant.vault) is grant.session and registration is not None
-                and registration.credential_revision(grant.entry) == grant.credential_revision)
+                and registration.credential_revision(grant.entry) == grant.credential_revision
+                and (grant.trusted_pin is None or self.broker.grants.result_certificate_trusted(
+                    token, grant.vault, grant.entry, grant.credential_revision, grant.origin, grant.trusted_pin)))
 
     @staticmethod
     def discard_worker_console(identifier, grant):
@@ -119,6 +122,7 @@ class ConsoleAccess:
             raise ListingError("invalid_request") from None
 
         with self.workspace.mutex:
+            auto_open = False
             if not live():
                 raise ListingError("revoked")
             if self.workspace.paused:
@@ -135,9 +139,10 @@ class ConsoleAccess:
                     raise ListingError("ineligible")
                 revision = registration.credential_revision(entry)
                 origin = descriptor["origin"]
-                if not any((scope.vault, scope.entry, scope.use_revision) == (vault, entry, revision)
-                           and {"https_results", "https_body"} <= set(scope.uses)
-                           and origin in scope.origins for scope in token.scope):
+                matching = tuple(scope for scope in token.scope
+                                 if (scope.vault, scope.entry, scope.use_revision) == (vault, entry, revision)
+                                 and {"https_results", "https_body"} <= set(scope.uses) and origin in scope.origins)
+                if not matching:
                     raise ListingError("ineligible")
                 if session.worker.available is False:
                     raise ListingError("ineligible")
@@ -159,8 +164,18 @@ class ConsoleAccess:
                     self.reusable = {key: permit for key, permit in self.reusable.items() if self.current(permit)}
                     if permit := self.reusable.get(reuse_key):
                         reuse_until = permit.expires
-                    elif len(self.reusable) + len(self.sessions) < MAX_REUSABLE_CONSOLES:
-                        reuse_minutes = requested_minutes
+                        grant = replace(grant, trusted_pin=permit.trusted_pin)
+                    else:
+                        if len(self.reusable) + len(self.sessions) < MAX_REUSABLE_CONSOLES:
+                            reuse_minutes = requested_minutes
+                        pin = descriptor["certificate_sha256"]
+                        auto_open = (self.workspace.scoped_auto_approval_enabled("guest_first_use")
+                                     and any("https" in scope.uses for scope in matching)
+                                     and self.broker.grants.result_certificate_trusted(token, vault, entry, revision, origin, pin))
+                        if auto_open:
+                            grant = replace(grant, trusted_pin=pin)
+                            if reuse_minutes:
+                                reuse_until = monotonic() + reuse_minutes * 60
                 self.sessions[identifier] = grant
             else:
                 grant = self.sessions.get(identifier)
@@ -203,7 +218,7 @@ class ConsoleAccess:
         dispatched = False
         try:
             authorization = "Approved console session"
-            if operation == "console_open" and reuse_until is None:
+            if operation == "console_open" and not auto_open and reuse_until is None:
                 details = (" › ".join(part for part in (registration.name, folder, title) if part),
                            f"Private login: POST {descriptor['login']['path']}",
                            f"Console setup: POST {descriptor['connect']['path']}",
@@ -223,7 +238,8 @@ class ConsoleAccess:
                 else:
                     authorization = "Approved console once"
             elif operation == "console_open":
-                authorization = "Approved in workflow review" if approved_step else "Used approved console connection"
+                authorization = (approved_step[0].step_authorization if approved_step else
+                                 "Auto approved scoped console" if auto_open else "Used approved console connection")
             self.activity.authorize(event, authorization)
             def gate(send):
                 def authorize():

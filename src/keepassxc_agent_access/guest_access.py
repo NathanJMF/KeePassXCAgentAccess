@@ -32,6 +32,7 @@ class GuestGrant:
     expires: float
     workflow_id: str | None = None
     workflow_step: str | None = None
+    trusted_endpoint: tuple[str, str] | None = None
 
 
 class GuestAccess:
@@ -55,7 +56,9 @@ class GuestAccess:
                 and self.workspace.generation == grant.generation
                 and token is not None and token.status == "active" and token.generation == grant.token_generation
                 and self.workspace.session(grant.vault) is grant.session and registration is not None
-                and registration.credential_revision(grant.entry) == grant.revision)
+                and registration.credential_revision(grant.entry) == grant.revision
+                and (grant.trusted_endpoint is None or self.broker.grants.result_certificate_trusted(
+                    token, grant.vault, grant.entry, grant.revision, *grant.trusted_endpoint)))
 
     def handle(self, operation, keys, payload, uid, context, live, dispatch, deliver, *, approved_step=None):
         credential = payload.get("credential")
@@ -88,6 +91,7 @@ class GuestAccess:
             self.jobs = {key: job for key, job in self.jobs.items() if self.current(job[0])}
             self.grants = {key: permit for key, permit in self.grants.items() if self.current(permit)}
             reused = False
+            auto_start = False
             reuse_minutes = 0
             private_job = None
             if starting:
@@ -97,8 +101,10 @@ class GuestAccess:
                     raise ListingError("ineligible")
                 revision = registration.credential_revision(entry)
                 needed = {"https_results", "https_body"} if "login" in request.data else {"https_results"}
-                if not any((scope.vault, scope.entry, scope.use_revision) == (vault, entry, revision)
-                           and needed <= set(scope.uses) and request.origin in scope.origins for scope in token.scope):
+                matching = tuple(scope for scope in token.scope
+                                 if (scope.vault, scope.entry, scope.use_revision) == (vault, entry, revision)
+                                 and needed <= set(scope.uses) and request.origin in scope.origins)
+                if not matching:
                     raise ListingError("ineligible")
                 grant_key = (token.id, vault, entry, fingerprint)
                 automatic = not approved_step and self.workspace.guest_auto_approval_enabled("guest_run")
@@ -108,6 +114,13 @@ class GuestAccess:
                     reuse_minutes = requested_minutes
                 grant = permit or GuestGrant(token.id, token.generation, self.workspace.generation, vault, entry,
                                              revision, session, monotonic() + self.broker.approvals.timeout + 30)
+                if automatic and not reused and self.workspace.scoped_auto_approval_enabled("guest_first_use"):
+                    endpoint = (request.origin, request.data["certificate_sha256"])
+                    auto_start = (any("https" in scope.uses for scope in matching)
+                                  and self.broker.grants.result_certificate_trusted(token, vault, entry, revision, *endpoint))
+                    if auto_start:
+                        expires = monotonic() + (reuse_minutes * 60 if reuse_minutes else JOB_SECONDS)
+                        grant = replace(grant, expires=expires, trusted_endpoint=endpoint)
                 if approved_step:
                     task, step = approved_step
                     grant = replace(grant, expires=task.deadline, workflow_id=task.id, workflow_step=step)
@@ -171,7 +184,7 @@ class GuestAccess:
                 if not guard(lambda: live(claim)):
                     raise ListingError("revoked")
                 stage = "pending"
-            if starting and not reused and approved_step is None:
+            if starting and not reused and not auto_start and approved_step is None:
                 details = (
                     " › ".join(part for part in (registration.name, folder, key) if part),
                     (f"Any command in the {workflow.body_type} field {workflow.command_field!r} for up to {reuse_minutes} minutes."
@@ -191,8 +204,9 @@ class GuestAccess:
                     grant = replace(grant, expires=monotonic() + reuse_minutes * 60)
             decision = "Approved guest job status"
             if starting:
-                decision = ("Approved in workflow review" if approved_step else
+                decision = (approved_step[0].step_authorization if approved_step else
                             "Used approved guest command endpoint" if reused else
+                            "Auto approved scoped guest command" if auto_start else
                             f"Owner approved guest commands for {reuse_minutes} min" if reuse_minutes else
                             "Owner approved guest command once")
             self.activity.authorize(event, decision)

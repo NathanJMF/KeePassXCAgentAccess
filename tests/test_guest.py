@@ -47,6 +47,34 @@ class GuestTests(TestCase):
         return self.invoke("guest_run", **{"vault": self.vaults[0], "entry": self.entry, "receipt": str(uuid4()),
                                            "command": "check service", "workflow": workflow(), **kwargs})
 
+    def test_first_guest_command_auto_approves_only_inside_trusted_write_scope(self):
+        descriptor = workflow()
+        self.scope(descriptor["origin"])
+        vault = self.vaults[0]
+        identifier = self.approve([{"vault": vault, "entry": self.entry, "uses": ["https_results", "https"],
+                                    "origins": [descriptor["origin"]]}], index=1)
+        token = self.grants.records[identifier]
+        revision = self.workspace.registrations[vault].credential_revision(self.entry)
+        self.grants.trust_result_certificate(token.id, token.generation, vault, self.entry, revision,
+                                             token.scope[0].origins[0], descriptor["certificate_sha256"], (None,))
+        self.workspace.set_review_action("read_results", False)
+        self.workspace.set_guest_auto_approval("guest_run", True)
+        self.workspace.set_scoped_auto_approval("guest_first_use", True)
+
+        def worker_use(_action, gate, **_kwargs):
+            self.assertTrue(gate(lambda: None))
+            return {"outcome": "succeeded", "http_status": 200, "data": [{"job_id": 14}]}
+
+        worker = self.workspace.session(vault).worker
+        with patch.object(worker, "use", side_effect=worker_use) as send:
+            with self.assertRaises(ListingError) as denied:
+                self.reviewed(lambda: self.run_guest(), approve=False)
+            self.assertEqual(denied.exception.code, "declined")
+            approved = self.run_guest(index=1, reuse_minutes=3)
+            self.assertGreater(approved["reuse_expires_in"], 0)
+            send.assert_called_once()
+        self.assertIn("Auto approved scoped guest command", {r["decision"] for r in self.activity.rows()})
+
     def test_reuse_is_explicit_exact_and_job_polling_needs_no_second_review(self):
         origin = "https://guest.example.test/"
         self.scope(origin)
