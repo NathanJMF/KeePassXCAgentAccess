@@ -23,12 +23,15 @@ from .agent_connection import installed_connection
 from .agent_setup import RUNTIME
 from .isolated_runner import broker_path, owned, subordinate_ids
 from .launcher import (
-    DESKTOP_ID, SKILL_PATH, antigravity_skill_destination, desktop_contents, skill_destination, skill_launcher_contents,
+    DESKTOP_ID, SKILL_PATH, antigravity_mcp_config_destination, antigravity_mcp_entry,
+    antigravity_skill_destination, desktop_contents, desktop_icon, normalize_desktop_icon,
+    skill_destination, skill_launcher_contents,
 )
 from .settings import SettingsError, SettingsStore
 
 
 APP = DESKTOP_ID.removesuffix(".desktop")
+DESKTOP_SERVICE = "keeper.service"
 SERVICE = "keeper-agent.service"
 LEGACY_SERVICE = "keepassxc-agent-access.service"
 CHECKOUT = Path(__file__).resolve().parents[2]
@@ -67,6 +70,13 @@ def systemctl(*args, check=True):
     return subprocess.run(["systemctl", "--user", *args], check=check, capture_output=True, text=True)
 
 
+def systemd_user_available():
+    try:
+        return systemctl("show-environment", check=False).returncode == 0
+    except OSError:
+        return False
+
+
 def external_broker_active():
     try:
         return systemctl("is-active", "--quiet", LEGACY_SERVICE, check=False).returncode == 0
@@ -75,7 +85,30 @@ def external_broker_active():
 
 
 def external_broker_managed():
-    return bool(systemctl("show", "--property=FragmentPath", "--value", LEGACY_SERVICE).stdout.strip())
+    try:
+        return bool(systemctl("show", "--property=FragmentPath", "--value", LEGACY_SERVICE).stdout.strip())
+    except (OSError, subprocess.CalledProcessError):
+        return False
+
+
+def desktop_service_contents(app):
+    if not str(app).isprintable():
+        raise ValueError("The installation path contains unsupported characters.")
+    quoted = str(app).replace("\\", "\\\\").replace('"', '\\"').replace("%", "%%").replace("$", "$$")
+    return f"""[Unit]
+Description=Keeper
+PartOf=graphical-session.target
+After=graphical-session.target
+
+[Service]
+Type=exec
+ExecStart="{quoted}/run-tray"
+Restart=on-failure
+RestartSec=1
+
+[Install]
+WantedBy=graphical-session.target
+""".encode()
 
 
 def service_contents(app, uid):
@@ -188,7 +221,9 @@ class Installation:
         self.update_source = self.base / "update-source"
         self.manifest = self.base / "installation.json"
         self.launcher = data / "applications" / DESKTOP_ID
-        self.unit = Path(GLib.get_user_config_dir()) / "systemd/user" / SERVICE
+        config = Path(GLib.get_user_config_dir()) / "systemd/user"
+        self.unit = config / SERVICE
+        self.desktop_unit = config / DESKTOP_SERVICE
 
     @contextmanager
     def lock(self):
@@ -215,14 +250,15 @@ class Installation:
             raise ValueError("Keeper’s installation record could not be read.")
         return state
 
-    def connection_update_needed(self):
+    def connection_update_needed(self, source=None):
         if not installed_connection():
             return False
+        root = source or self.app
         runtime = Path(f"/usr/local/lib/keeper-connect-{os.getuid()}")
         try:
             for name in RUNTIME:
                 app_path = "src/keepassxc_agent_access/agent_setup.py" if name == "agent-setup" else name
-                if regular_file(runtime / name) != regular_file(self.app / app_path):
+                if regular_file(runtime / name) != regular_file(root / app_path):
                     return True
         except (OSError, ValueError):
             return True
@@ -243,21 +279,67 @@ class Installation:
                              "Keep that configuration, or clear it in Keeper before enabling the bundled runner.")
         return service_contents(self.app, uid)
 
-    def install(self, enable_agent, *, stop_existing=False):
+    @staticmethod
+    def _launcher_digest(data):
+        return digest(normalize_desktop_icon(data.decode("utf-8", "replace")).encode("utf-8"))
+
+    @staticmethod
+    def _antigravity_mcp_update(mcp_path, command, previous_entry):
+        if mcp_path is None or mcp_path.is_symlink():
+            return None
+        try:
+            old_bytes = regular_file(mcp_path)
+            if old_bytes is None:
+                data = {}
+            else:
+                data = json.loads(old_bytes.decode("utf-8"))
+        except (OSError, ValueError, UnicodeDecodeError):
+            return None
+        if not isinstance(data, dict):
+            return None
+        servers = data.get("mcpServers")
+        if "mcpServers" in data and not isinstance(servers, dict):
+            return None
+        servers = dict(servers or {})
+        entry = antigravity_mcp_entry(command)
+        existing = servers.get("keeper")
+        if existing not in (None, previous_entry, entry):
+            return None
+        if existing == entry and old_bytes is not None:
+            return (mcp_path, None, old_bytes, entry)
+        servers["keeper"] = entry
+        updated = (json.dumps({**data, "mcpServers": servers}, indent=2) + "\n").encode("utf-8")
+        return (mcp_path, updated, old_bytes, entry)
+
+    def install(self, enable_agent, *, stop_existing=False, connect_agent=False):
         previous = self.installed()
         if self.app.exists() or self.app.is_symlink():
             owned(self.app, private=True)
         old_launcher = regular_file(self.launcher)
         agent = enable_agent or "unit" in previous
         executable = "keeper-open" if agent else "run-tray"
-        launcher = desktop_contents(self.app / executable).encode()
-        checkout_launcher = desktop_contents(CHECKOUT / "run-tray").encode()
-        self.check_replaceable(old_launcher, previous.get("launcher"), (launcher, checkout_launcher), "launcher")
+        icon = desktop_icon(old_launcher.decode("utf-8", "ignore")) if old_launcher is not None else "dialog-password"
+        launcher = desktop_contents(self.app / executable, icon=icon).encode()
+        checkout_launcher = desktop_contents(CHECKOUT / "run-tray", icon=icon).encode()
+        if old_launcher is not None:
+            expected_digests = {self._launcher_digest(launcher), self._launcher_digest(checkout_launcher)}
+            if (self._launcher_digest(old_launcher) not in expected_digests
+                    and self._launcher_digest(old_launcher) != previous.get("launcher")
+                    and digest(old_launcher) != previous.get("launcher")):
+                raise ValueError("Keeper found a customized launcher. Move it aside before installing over it.")
 
         old_unit = regular_file(self.unit) if agent else None
         unit = self.agent_unit() if agent else None
         if agent:
             self.check_replaceable(old_unit, previous.get("unit"), (unit,), "service")
+
+        manage_desktop_unit = bool(
+            connect_agent and not agent and not external_broker_managed() and systemd_user_available()
+        )
+        old_desktop_unit = regular_file(self.desktop_unit) if (manage_desktop_unit or "desktop_unit" in previous) else None
+        desktop_unit = desktop_service_contents(self.app) if manage_desktop_unit else None
+        if manage_desktop_unit:
+            self.check_replaceable(old_desktop_unit, previous.get("desktop_unit"), (desktop_unit,), "autostart service")
 
         skill = skill_destination()
         source_skill = (CHECKOUT / "skills" / SKILL_PATH).read_bytes()
@@ -286,25 +368,38 @@ class Installation:
             )
         skill_launcher = skill.with_name("keeper-agent")
         source_skill_launcher = skill_launcher_contents(self.app / "keeper-agent")
-        if skill_launcher.is_symlink():
-            raise ValueError("Keeper found a customized skill helper. Move keeper-agent beside the skill aside before installing.")
-        old_skill_launcher = regular_file(skill_launcher)
-        if old_skill_launcher is not None:
-            helper_info = skill_launcher.stat()
-            if helper_info.st_uid != os.geteuid() or helper_info.st_mode & 0o022:
-                raise ValueError("Keeper found a customized skill helper with unsafe ownership or permissions. Move it aside before installing.")
-        self.check_replaceable(
-            old_skill_launcher, previous.get("skill_launcher") if previous.get("skill_launcher_path") == str(skill_launcher) else None,
-            (source_skill_launcher, skill_launcher_contents(CHECKOUT / "keeper-agent")), "skill helper",
-        )
-        state = {"version": 1, "launcher": digest(launcher)}
+        install_skill_launcher = agent or not connect_agent
+        remove_old_skill_launcher = False
+        old_skill_launcher = None
+        if install_skill_launcher:
+            if skill_launcher.is_symlink():
+                raise ValueError("Keeper found a customized skill helper. Move keeper-agent beside the skill aside before installing.")
+            old_skill_launcher = regular_file(skill_launcher)
+            if old_skill_launcher is not None:
+                helper_info = skill_launcher.stat()
+                if helper_info.st_uid != os.geteuid() or helper_info.st_mode & 0o022:
+                    raise ValueError("Keeper found a customized skill helper with unsafe ownership or permissions. Move it aside before installing.")
+            self.check_replaceable(
+                old_skill_launcher, previous.get("skill_launcher") if previous.get("skill_launcher_path") == str(skill_launcher) else None,
+                (source_skill_launcher, skill_launcher_contents(CHECKOUT / "keeper-agent")), "skill helper",
+            )
+        elif previous.get("skill_launcher_path") == str(skill_launcher) and not skill_launcher.is_symlink():
+            old_skill_launcher = regular_file(skill_launcher)
+            if old_skill_launcher is not None and digest(old_skill_launcher) == previous.get("skill_launcher"):
+                remove_old_skill_launcher = True
+        mcp_update = None
+        if connect_agent and not agent:
+            mcp_update = self._antigravity_mcp_update(
+                antigravity_mcp_config_destination(), self.app / "keeper-connect", previous.get("antigravity_mcp_entry")
+            )
+        state = {"version": 1, "launcher": self._launcher_digest(launcher)}
         upstream = None
         if (CHECKOUT / ".git").exists():
             from .updates import UpdateError, git, revision, update_upstream
 
             try:
                 state["revision"] = revision(CHECKOUT)
-                state["source_dirty"] = bool(git(CHECKOUT, "status", "--porcelain", "--untracked-files=all"))
+                state["source_dirty"] = bool(git(CHECKOUT, "status", "--porcelain", "--untracked-files=no"))
                 if CHECKOUT == self.update_source.resolve():
                     state.update(update_url=previous["update_url"], update_ref=previous["update_ref"])
                 else:
@@ -320,11 +415,20 @@ class Installation:
         if manage_ag_skill:
             state.update(antigravity_skill_path=str(ag_skill), antigravity_skill=digest(source_skill))
             writes.append((ag_skill, source_skill, old_ag_skill, 0o644))
-        state.update(skill_launcher_path=str(skill_launcher), skill_launcher=digest(source_skill_launcher))
-        writes.append((skill_launcher, source_skill_launcher, old_skill_launcher, 0o755))
+        if install_skill_launcher:
+            state.update(skill_launcher_path=str(skill_launcher), skill_launcher=digest(source_skill_launcher))
+            writes.append((skill_launcher, source_skill_launcher, old_skill_launcher, 0o755))
+        if mcp_update is not None:
+            mcp_path, mcp_bytes, old_mcp_bytes, mcp_entry = mcp_update
+            state.update(antigravity_mcp_path=str(mcp_path), antigravity_mcp_entry=mcp_entry)
+            if mcp_bytes is not None:
+                writes.append((mcp_path, mcp_bytes, old_mcp_bytes, 0o600))
         if agent:
             state["unit"] = digest(unit)
             writes.append((self.unit, unit, old_unit, 0o644))
+        if desktop_unit is not None:
+            state["desktop_unit"] = digest(desktop_unit)
+            writes.append((self.desktop_unit, desktop_unit, old_desktop_unit, 0o644))
 
         self.base.mkdir(mode=0o700, parents=True, exist_ok=True)
         with TemporaryDirectory(dir=self.base) as temporary:
@@ -350,10 +454,15 @@ class Installation:
             replaced_update = False
             stopped_service = False
             enabled_service = False
+            stopped_desktop_service = False
+            enabled_desktop_service = False
             try:
                 if old_unit is not None and "unit" in previous:
                     systemctl("stop", SERVICE)
                     stopped_service = True
+                if "desktop_unit" in previous and old_desktop_unit is not None:
+                    systemctl("stop", DESKTOP_SERVICE, check=False)
+                    stopped_desktop_service = True
                 if agent or ((previous or stop_existing) and not external_broker_active()):
                     stop_application()
                 if self.app.exists():
@@ -366,19 +475,33 @@ class Installation:
                     update_stage.rename(self.update_source)
                     replaced_update = True
                 for path, content, original, mode in writes:
-                    original_mode = stat.S_IMODE(path.stat().st_mode) if original is not None else 0o644
+                    original_mode = stat.S_IMODE(path.stat().st_mode) if original is not None else mode
                     publish(path, content, mode=mode)
                     changed.append((path, original, original_mode))
                 if agent:
                     systemctl("daemon-reload")
                     enabled_service = True
                     systemctl("enable", "--now", SERVICE)
+                if desktop_unit is not None:
+                    systemctl("daemon-reload")
+                    enabled_desktop_service = True
+                    systemctl("enable", "--now", DESKTOP_SERVICE)
+                elif stopped_desktop_service and "desktop_unit" in previous and self.desktop_unit.is_file():
+                    if digest(self.desktop_unit.read_bytes()) == previous["desktop_unit"]:
+                        systemctl("disable", "--now", DESKTOP_SERVICE, check=False)
+                        self.desktop_unit.unlink(missing_ok=True)
+                        changed.append((self.desktop_unit, old_desktop_unit, 0o644))
+                        systemctl("daemon-reload", check=False)
+                if remove_old_skill_launcher and self.remove_matching(skill_launcher, previous["skill_launcher"]):
+                    changed.append((skill_launcher, old_skill_launcher, 0o755))
                 if legacy_contents is not None and self.remove_matching(legacy_skill, digest(legacy_contents)):
                     changed.append((legacy_skill, legacy_contents, 0o644))
                 publish(self.manifest, json.dumps(state).encode())
             except Exception:
                 if enabled_service:
                     systemctl("disable", "--now", SERVICE, check=False)
+                if enabled_desktop_service:
+                    systemctl("disable", "--now", DESKTOP_SERVICE, check=False)
                 for path, original, mode in reversed(changed):
                     if original is None:
                         path.unlink(missing_ok=True)
@@ -392,10 +515,12 @@ class Installation:
                     shutil.rmtree(self.app)
                 if backup.exists():
                     backup.rename(self.app)
-                if agent:
+                if agent or stopped_desktop_service:
                     systemctl("daemon-reload", check=False)
                 if stopped_service:
                     systemctl("enable", "--now", SERVICE, check=False)
+                if stopped_desktop_service and "desktop_unit" in previous:
+                    systemctl("enable", "--now", DESKTOP_SERVICE, check=False)
                 raise
         return self.launcher, self.app / "keeper-run-agent" if agent else None
 
@@ -418,9 +543,17 @@ class Installation:
                 systemctl("disable", "--now", SERVICE)
                 self.unit.unlink()
                 systemctl("daemon-reload")
+        if "desktop_unit" in state:
+            desktop_unit = regular_file(self.desktop_unit)
+            if desktop_unit is not None:
+                if digest(desktop_unit) != state["desktop_unit"]:
+                    raise ValueError("Keeper’s autostart service was customized. Disable and remove it before uninstalling.")
+                systemctl("disable", "--now", DESKTOP_SERVICE, check=False)
+                self.desktop_unit.unlink()
+                systemctl("daemon-reload", check=False)
         if not external_broker_active():
             stop_application()
-        self.remove_matching(self.launcher, state.get("launcher"))
+        self.remove_matching(self.launcher, state.get("launcher"), normalize=True)
         skill = skill_destination()
         for path in (skill, skill.parents[1] / SKILL_PATH):
             if state.get("skill_path") == str(path) and not path.parent.is_symlink():
@@ -429,6 +562,19 @@ class Installation:
             ag_path = Path(ag_path_text)
             if not ag_path.parent.is_symlink():
                 self.remove_matching(ag_path, state.get("antigravity_skill"))
+        if (mcp_path_text := state.get("antigravity_mcp_path")) and (mcp_entry := state.get("antigravity_mcp_entry")):
+            mcp_path = Path(mcp_path_text)
+            if not mcp_path.is_symlink() and not mcp_path.parent.is_symlink():
+                try:
+                    raw = regular_file(mcp_path)
+                    data = json.loads(raw.decode("utf-8")) if raw is not None else None
+                except (OSError, ValueError, UnicodeDecodeError):
+                    data = None
+                if isinstance(data, dict) and isinstance(data.get("mcpServers"), dict) and data["mcpServers"].get("keeper") == mcp_entry:
+                    servers = dict(data["mcpServers"])
+                    del servers["keeper"]
+                    publish(mcp_path, (json.dumps({**data, "mcpServers": servers}, indent=2) + "\n").encode("utf-8"),
+                            mode=stat.S_IMODE(mcp_path.stat().st_mode))
         skill_launcher = skill.with_name("keeper-agent")
         if state.get("skill_launcher_path") == str(skill_launcher) and not skill_launcher.parent.is_symlink():
             self.remove_matching(skill_launcher, state.get("skill_launcher"))
@@ -441,10 +587,14 @@ class Installation:
         return True
 
     @staticmethod
-    def remove_matching(path, checksum):
-        if not path.is_symlink() and (content := regular_file(path)) is not None and digest(content) == checksum:
-            path.unlink()
-            return True
+    def remove_matching(path, checksum, *, normalize=False):
+        if not path.is_symlink() and (content := regular_file(path)) is not None:
+            matched = digest(content) == checksum or (
+                normalize and Installation._launcher_digest(content) == checksum
+            )
+            if matched:
+                path.unlink()
+                return True
         return False
 
 
@@ -455,6 +605,7 @@ def main():
     agent = install.add_mutually_exclusive_group()
     agent.add_argument("--agent", action="store_true")
     agent.add_argument("--connect-agent", action="store_true")
+    agent.add_argument("--app-only", action="store_true")
     install.add_argument("--no-launch", action="store_true")
     commands.add_parser("uninstall")
     opening = commands.add_parser("open")
@@ -470,7 +621,18 @@ def main():
             with installation.lock():
                 previous = installation.installed()
                 broker = None
-                if args.connect_agent:
+                if args.agent:
+                    enable_agent, connect_agent = True, False
+                elif args.app_only:
+                    enable_agent, connect_agent = False, False
+                elif args.connect_agent:
+                    enable_agent, connect_agent = False, True
+                elif "unit" in previous:
+                    enable_agent, connect_agent = True, False
+                else:
+                    enable_agent, connect_agent = False, True
+
+                if connect_agent:
                     if "unit" in previous:
                         raise ValueError("This installation uses the legacy runner. Keep it for existing grants, "
                                          "or uninstall it before setting up the dedicated connection.")
@@ -479,14 +641,28 @@ def main():
                         raise ValueError("The separately managed broker has no saved endpoint. "
                                          "Save its current endpoint and runner in Keeper's Broker Settings before connecting.")
                     broker = saved.broker_config()
-                elif args.agent and "unit" not in previous and installed_connection():
+                elif enable_agent and "unit" not in previous and installed_connection():
                     raise ValueError("The dedicated Keeper connection is already installed. Use --connect-agent.")
-                launcher, runner = installation.install(args.agent, stop_existing=args.connect_agent)
-                if args.connect_agent:
-                    administer_connection("install", broker)
+                launcher, runner = installation.install(
+                    enable_agent, stop_existing=connect_agent, connect_agent=connect_agent
+                )
+                runner_updated = False
+                if connect_agent:
+                    existing_connection = installed_connection()
+                    needs_admin = (
+                        existing_connection is None
+                        or installation.connection_update_needed(CHECKOUT)
+                        or (broker is not None and broker != existing_connection)
+                    )
+                    if needs_admin:
+                        administer_connection("install", broker)
+                        runner_updated = True
             print("Keeper is installed. Open Keeper from the application menu.")
-            if args.connect_agent:
-                print("Open Keeper Settings → Connect an Agent for the skill and MCP command.")
+            if connect_agent:
+                if runner_updated:
+                    print("Open Keeper Settings → Connect an Agent for the skill and MCP command.")
+                else:
+                    print("Local MCP runner is already up to date. Open Keeper Settings → Connect an Agent for details.")
             if runner:
                 print(f"Agent skill: {skill_destination()}")
                 print(f"Agent command: {skill_destination().with_name('keeper-agent')}")
@@ -503,6 +679,9 @@ def main():
                     if installed_connection():
                         administer_connection("remove")
                     removed = installation.uninstall()
+            elif installed_connection():
+                administer_connection("remove")
+                removed = True
             if removed:
                 print("Keeper was removed. Vaults, keyring entries, settings and Activity were kept.")
             else:
