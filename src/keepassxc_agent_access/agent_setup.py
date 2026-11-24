@@ -138,10 +138,18 @@ def setup(owner, endpoint, peer_uid, payload=None, *, remove=False):
     files = {runtime / path for path in RUNTIME} | {listener, runner, tmpfiles}
     if previous is not None:
         hashes = previous.get("files")
-        if (previous.get("owner") != owner or previous.get("version") != 1 or not isinstance(hashes, dict)
-                or hashes.keys() - {str(path) for path in files}):
+        if previous.get("owner") != owner or previous.get("version") != 1 or not isinstance(hashes, dict):
             raise ValueError("Keeper’s administrator installation record is invalid.")
-        for path in files:
+        managed = {str(listener), str(runner), str(tmpfiles)}
+        recorded = set()
+        for entry in hashes:
+            candidate = Path(entry)
+            if entry not in managed and (
+                ".." in candidate.parts or not candidate.is_relative_to(runtime) or candidate == runtime
+            ):
+                raise ValueError("Keeper’s administrator installation record is invalid.")
+            recorded.add(candidate)
+        for path in files | recorded:
             data = trusted_file(path)
             if (sha256(data).hexdigest() if data is not None else None) != hashes.get(str(path)):
                 raise ValueError(f"Keeper will preserve the changed administrator file at {path}.")
@@ -187,11 +195,14 @@ def setup(owner, endpoint, peer_uid, payload=None, *, remove=False):
         raise ValueError("Remove the bundled connection before switching its broker account or socket.")
     additions.update({runtime / path: data for path, data in payload.items()})
     additions[listener], additions[runner] = unit_contents(owner, account.pw_name, broker, runtime)
-    old = {path: trusted_file(path) for path in additions}
+    obsolete = ({Path(path) for path in previous["files"]} - set(additions)) if previous else set()
+    old = {path: trusted_file(path) for path in set(additions) | obsolete}
     try:
         if previous:
             call("systemctl", "stop", listener.name)
             call("systemctl", "stop", name + "@*.service")
+        for path in obsolete:
+            path.unlink(missing_ok=True)
         for path, data in additions.items():
             publish(path, data, 0o755 if path.name in ("keeper-agent-runner", "keepassxc-agent") else 0o644)
         if tmpfiles in additions:

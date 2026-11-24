@@ -1,7 +1,9 @@
 """Install the per-user GNOME launcher and Keeper skill from the trusted checkout."""
 
+import json
 import os
 from pathlib import Path
+import re
 from shlex import quote
 import sys
 import stat
@@ -14,6 +16,7 @@ from . import APP_TITLE
 
 DESKTOP_ID = "io.github.keepassxcagentaccess.Tray.desktop"
 SKILL_PATH = Path("keepassxc-agent-access") / "SKILL.md"
+_ICON_LINE = re.compile(r"^Icon=(.+)$", re.MULTILINE)
 
 
 def _exec_argument(value):
@@ -34,6 +37,38 @@ def antigravity_skill_destination():
     if config.is_symlink() or not config.is_dir():
         return None
     return config / "skills" / "keeper" / "SKILL.md"
+
+
+def antigravity_mcp_config_destination():
+    config = Path.home() / ".gemini" / "config"
+    if config.is_symlink() or not config.is_dir():
+        return None
+    return config / "mcp_config.json"
+
+
+def antigravity_mcp_entry(command):
+    return {"command": str(command), "args": []}
+
+
+def antigravity_mcp_snippet(command):
+    return json.dumps({"mcpServers": {"keeper": antigravity_mcp_entry(command)}}, indent=2)
+
+
+def desktop_icon(contents):
+    if isinstance(contents, str) and "[Desktop Entry]" in contents:
+        match = _ICON_LINE.search(contents)
+        if match:
+            value = match.group(1).strip()
+            if value and value.isprintable() and "\n" not in value and "\r" not in value:
+                return value
+    return "dialog-password"
+
+
+def normalize_desktop_icon(contents):
+    icon = desktop_icon(contents)
+    if icon == "dialog-password":
+        return contents
+    return _ICON_LINE.sub("Icon=dialog-password", contents, count=1)
 
 
 def skill_launcher_contents(executable):
@@ -78,13 +113,15 @@ def _install_skill():
     _install_skill_file(helper, helper_contents, 0o755)
 
 
-def desktop_contents(executable):
+def desktop_contents(executable, *, icon="dialog-password"):
+    if not isinstance(icon, str) or not icon.strip() or not icon.isprintable() or "\n" in icon or "\r" in icon:
+        icon = "dialog-password"
     return "\n".join([
         "[Desktop Entry]",
         "Type=Application",
         f"Name={APP_TITLE}",
         "Comment=Manage agent access to your KeePass vault",
-        "Icon=dialog-password",
+        f"Icon={icon}",
         f"Exec={_exec_argument(str(executable))} --show-window",
         "Terminal=false",
         "Categories=Utility;Security;",
@@ -99,7 +136,14 @@ def install(executable, data_directory):
     directory = Path(data_directory) / "applications"
     directory.mkdir(parents=True, exist_ok=True)
     path = directory / DESKTOP_ID
-    contents = desktop_contents(executable)
+    icon = "dialog-password"
+    try:
+        info = path.lstat()
+    except FileNotFoundError:
+        info = None
+    if info is not None and stat.S_ISREG(info.st_mode):
+        icon = desktop_icon(path.read_text(encoding="utf-8", errors="ignore"))
+    contents = desktop_contents(executable, icon=icon)
     with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=directory, delete=False) as file:
         temporary = Path(file.name)
         try:

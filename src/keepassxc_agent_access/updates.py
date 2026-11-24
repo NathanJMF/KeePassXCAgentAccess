@@ -12,7 +12,7 @@ from urllib.parse import urlsplit
 from gi.repository import GLib
 
 from .installation import (
-    LEGACY_SERVICE, Installation, external_broker_active, present_application, systemctl,
+    DESKTOP_SERVICE, LEGACY_SERVICE, Installation, external_broker_active, present_application, systemctl,
 )
 from .isolated_runner import owned
 from .settings import SettingsError, write_private_json
@@ -25,9 +25,10 @@ class UpdateError(Exception):
 def git(checkout, *arguments, timeout=12, failure="Keeper could not read its update checkout."):
     environment = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
     environment.update(PATH="/usr/bin:/bin", GIT_TERMINAL_PROMPT="0", GIT_ASKPASS="/bin/false",
-                       GIT_OPTIONAL_LOCKS="0", GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_GLOBAL="/dev/null")
+                       GIT_OPTIONAL_LOCKS="0", GIT_CONFIG_NOSYSTEM="1")
     try:
-        return subprocess.run(["/usr/bin/git", "-c", "core.hooksPath=/dev/null", "-C", str(checkout),
+        return subprocess.run(["/usr/bin/git", "-c", "core.hooksPath=/dev/null",
+                               "-c", "core.fsmonitor=false", "-C", str(checkout),
                                *arguments], env=environment,
                               capture_output=True, text=True, timeout=timeout, check=True).stdout.strip()
     except (OSError, subprocess.SubprocessError):
@@ -127,7 +128,7 @@ def apply_update(installation, checked):
             raise UpdateError("The update changed. Check for updates again.")
         if fresh.target == fresh.installed:
             return "Keeper is up to date."
-        if git(checked.checkout, "status", "--porcelain"):
+        if git(checked.checkout, "status", "--porcelain", "--untracked-files=no"):
             raise UpdateError("The Keeper checkout has local changes. Commit or move them before applying the update.")
         git(checked.checkout, "fetch", "--no-tags", "--no-recurse-submodules", "--",
             checked.remote, checked.ref, timeout=90, failure="Keeper could not download the update.")
@@ -140,7 +141,8 @@ def apply_update(installation, checked):
             failure="The update cannot be fast-forwarded. Update the checkout manually.")
         git(checked.checkout, "merge", "--ff-only", "--no-edit", fetched,
             failure="Keeper could not fast-forward the checkout.")
-        options = ["--agent"] if "unit" in installation.installed() else []
+        state = installation.installed()
+        options = ["--agent"] if "unit" in state else ["--app-only"]
         subprocess.run([str(checked.checkout / "install"), "--no-launch", *options], cwd=checked.checkout,
                        capture_output=True, check=True, timeout=180)
     except (OSError, subprocess.SubprocessError):
@@ -148,16 +150,23 @@ def apply_update(installation, checked):
         raise UpdateError(f"Installation could not finish. Run {command} from a trusted Keeper checkout "
                           "in a terminal to install any missing packages and see details.") from None
 
+    state = installation.installed()
     if external_broker_active():
         service = systemctl("show", "--property=ExecStart", "--value", LEGACY_SERVICE)
         if f"path={installation.app / 'run-tray'} ;" not in service.stdout:
             return "Update installed. Restart your separately managed Keeper service to use it."
         systemctl("restart", LEGACY_SERVICE)
         present_application()
-    elif "unit" in installation.installed():
+    elif "unit" in state:
+        present_application()
+    elif "desktop_unit" in state:
+        systemctl("restart", DESKTOP_SERVICE)
         present_application()
     else:
         detached([str(installation.app / "run-tray"), "--show-window"])
+    check_connection = getattr(installation, "connection_update_needed", None)
+    if callable(check_connection) and check_connection():
+        return "Keeper was updated. Open Settings → Connect an Agent to update the local runner."
     return "Keeper was updated."
 
 
@@ -171,8 +180,8 @@ def update_result(installation):
 
 def detached(program, *options):
     environment = ("HOME", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME", "XDG_RUNTIME_DIR",
-                   "XDG_CURRENT_DESKTOP", "DBUS_SESSION_BUS_ADDRESS", "DISPLAY", "WAYLAND_DISPLAY",
-                   "XAUTHORITY", "GDK_BACKEND", "SSH_AUTH_SOCK")
+                   "XDG_CURRENT_DESKTOP", "XDG_SESSION_ID", "DBUS_SESSION_BUS_ADDRESS", "DISPLAY",
+                   "WAYLAND_DISPLAY", "XAUTHORITY", "GDK_BACKEND", "SSH_AUTH_SOCK")
     subprocess.run(
         ["systemd-run", "--user", "--collect", "--quiet", *options,
          *(f"--setenv={name}={os.environ[name]}" for name in environment if name in os.environ),
