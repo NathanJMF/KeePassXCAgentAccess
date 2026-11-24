@@ -219,9 +219,8 @@ class RunnerTests(TestCase):
         self.assertEqual((result.returncode, result.stderr), (0, b""))
         self.assertEqual(len(replies), len(requests))
         for reply in replies:
-            self.assertEqual(reply["result"],
-                             {"content": [{"type": "text", "text": "Invalid Keeper tool or arguments."}],
-                              "isError": True})
+            self.assertTrue(reply["result"]["isError"])
+            self.assertTrue(reply["result"]["content"][0]["text"].startswith("Invalid Keeper tool or arguments."))
         self.assertEqual(list(self.profile.iterdir()), [])
 
     def test_edit_tools_pass_only_typed_arguments_to_the_cli(self):
@@ -344,3 +343,155 @@ class RunnerTests(TestCase):
         self.assertEqual(len(set(results)), 1)
         self.assertEqual(list(self.profile.iterdir()), [path])
         self.assertEqual(path.stat().st_nlink, 1)
+
+    def test_connection_profiles_reject_ephemeral_mutations_until_persistent_profile_selected(self):
+        from uuid import uuid4
+
+        def run(*messages):
+            result = subprocess.run(
+                [RUNNER, "--socket", self.endpoint, "--project-profiles", self.profile, "--connection-profiles"],
+                input=b"".join(encode(message) for message in messages), capture_output=True, check=True, timeout=12,
+            )
+            return [decode(line) for line in result.stdout.splitlines()]
+
+        req = {"identity": "Fixture", "project": "Fixture", "items": [{"label": "Sample", "metadata": True}]}
+        wf = {"id": str(uuid4()), "vault": str(uuid4()), "entry": str(uuid4()),
+              "origin": "https://example.test/", "steps": [{"name": "step", "request": {}}]}
+        replies = run(
+            call_tool("request_access", {"request": req}, identifier=1),
+            call_tool("workflow_request", {"request": wf, "registration": {"identity": "A", "project": "B"}}, identifier=2),
+        )
+        for reply in replies:
+            self.assertTrue(reply["result"]["isError"])
+            self.assertIn("Pass a persistent profile parameter", reply["result"]["content"][0]["text"])
+        self.assertEqual(list(self.profile.iterdir()), [])
+
+    def test_serve_drains_oversized_frame_and_continues(self):
+        from io import BytesIO
+        from keepassxc_agent_access.agent_runner import MAX_MESSAGE
+
+        oversized = b'{"jsonrpc":"2.0","id":1,"method":"ping","pad":"' + (b"a" * MAX_MESSAGE) + b'"}\n'
+        follow_up = encode(frame("ping", identifier=2))
+        sink = BytesIO()
+        AgentRunner(self.endpoint, self.profile).serve(BytesIO(oversized + follow_up), sink)
+        replies = [decode(line) for line in sink.getvalue().splitlines()]
+        self.assertEqual(replies[0]["error"]["code"], -32600)
+        self.assertIsNone(replies[0]["id"])
+        self.assertEqual(replies[1], {"jsonrpc": "2.0", "id": 2, "result": {}})
+
+    def test_usage_schema_has_oneof_branches_and_direct_runner_rejects_input_path(self):
+        from keepassxc_agent_access.agent_runner import USAGE
+
+        self.assertIn("https_results", USAGE["properties"]["type"]["enum"])
+        branches = {branch["properties"]["type"]["enum"][0]: branch for branch in USAGE["oneOf"]}
+        self.assertEqual(set(branches), {"local_command", "networked_command", "https", "https_results", "browser"})
+        for branch in branches.values():
+            self.assertIs(branch["additionalProperties"], False)
+
+        entry = "229b7a79-bcb0-450c-a320-fbccdd672f75"
+        network = {"type": "networked_command", "command": ["/usr/bin/cat", "/input"],
+                   "origin": "https://example.test/", "prompt_variable": "GIT_ASKPASS"}
+        with self.assertRaisesRegex(ValueError, "keeper-connect"):
+            invocation("use_password", {"entry": entry, "usage": network, "input_path": "/tmp/artifact"})
+
+    def test_call_tool_allows_sanitized_error_detail_and_truncates_to_400(self):
+        from unittest.mock import patch
+        from keepassxc_agent_access.protocol import ERRORS
+
+        runner = AgentRunner(self.endpoint, self.profile)
+        long_detail = "d" * 500
+        completed = subprocess.CompletedProcess([], 1, b"", (ERRORS["invalid_request"] + " " + long_detail).encode())
+        with patch("keepassxc_agent_access.agent_runner.subprocess.run", return_value=completed):
+            reply = runner.call_tool({"name": "access_status", "arguments": {}})
+        self.assertTrue(reply["isError"])
+        text = reply["content"][0]["text"]
+        self.assertTrue(text.startswith(ERRORS["invalid_request"] + " "))
+        self.assertLessEqual(len(text), 400)
+
+        unexpected = subprocess.CompletedProcess([], 1, b"", b"Traceback (most recent call last): secret")
+        with patch("keepassxc_agent_access.agent_runner.subprocess.run", return_value=unexpected):
+            reply = runner.call_tool({"name": "access_status", "arguments": {}})
+        self.assertEqual(reply["content"][0]["text"], "Keeper could not complete the request.")
+
+    def test_keeper_connect_rewrites_input_path_and_injects_schema(self):
+        from base64 import b64decode
+        from importlib.machinery import SourceFileLoader
+        from importlib.util import module_from_spec, spec_from_loader
+
+        connect_path = RUNNER.with_name("keeper-connect")
+        loader = SourceFileLoader("keeper_connect", str(connect_path))
+        spec = spec_from_loader("keeper_connect", loader)
+        mod = module_from_spec(spec)
+        loader.exec_module(mod)
+
+        tools_reply = encode({
+            "jsonrpc": "2.0", "id": 1,
+            "result": {"tools": [{"name": "use_password", "inputSchema": {"type": "object", "properties": {"entry": {"type": "string"}}}}]},
+        })
+        injected = decode(mod.process_incoming_line(tools_reply))
+        self.assertIn("input_path", injected["result"]["tools"][0]["inputSchema"]["properties"])
+        self.assertEqual(decode(mod.process_incoming_line(encode(injected))), injected)
+
+        artifact = self.root / "artifact.bin"
+        artifact.write_bytes(b"hello\x00world")
+        entry = "229b7a79-bcb0-450c-a320-fbccdd672f75"
+        network = {"type": "networked_command", "command": ["/usr/bin/cat", "/input"],
+                   "origin": "https://example.test/", "prompt_variable": "GIT_ASKPASS"}
+        req = call_tool("use_password", {"entry": entry, "usage": network, "input_path": str(artifact)}, identifier=7)
+        fwd, local = mod.process_outgoing_line(encode(req))
+        self.assertIsNone(local)
+        rewritten = decode(fwd)
+        args = rewritten["params"]["arguments"]
+        self.assertNotIn("input_path", args)
+        self.assertEqual(b64decode(args["input_base64"]), b"hello\x00world")
+
+        both = call_tool("use_password", {"entry": entry, "usage": network, "input_path": str(artifact), "input_base64": "YQ=="}, identifier=8)
+        fwd, local = mod.process_outgoing_line(encode(both))
+        self.assertIsNone(fwd)
+        self.assertTrue(decode(local)["result"]["isError"])
+        self.assertIn("not both", decode(local)["result"]["content"][0]["text"])
+
+        empty = self.root / "empty.bin"
+        empty.write_bytes(b"")
+        for bad_path in ("", str(self.root), str(self.root / "missing.bin"), str(empty)):
+            bad = call_tool("use_password", {"entry": entry, "usage": network, "input_path": bad_path}, identifier=9)
+            fwd, local = mod.process_outgoing_line(encode(bad))
+            self.assertIsNone(fwd)
+            self.assertTrue(decode(local)["result"]["isError"])
+
+        oversized = self.root / "big.bin"
+        with open(oversized, "wb") as stream:
+            stream.truncate(8 * 1024 * 1024 + 1)
+        bad_big = call_tool("use_password", {"entry": entry, "usage": network, "input_path": str(oversized)}, identifier=10)
+        fwd, local = mod.process_outgoing_line(encode(bad_big))
+        self.assertIsNone(fwd)
+        self.assertTrue(decode(local)["result"]["isError"])
+
+        bad_cli = subprocess.run([connect_path, "--profile", "../bad"], capture_output=True, check=False, timeout=5)
+        self.assertEqual(bad_cli.returncode, 2)
+
+        with socket.socket(socket.AF_UNIX) as listener:
+            sock_path = self.root / "connect.sock"
+            listener.bind(str(sock_path))
+            listener.listen()
+            listener.settimeout(5)
+            received = []
+
+            def serve_sock():
+                conn, _ = listener.accept()
+                with conn, conn.makefile("rb") as stream:
+                    received.append(decode(stream.readline()))
+                    received.append(decode(stream.readline()))
+                    conn.sendall(tools_reply)
+
+            t = Thread(target=serve_sock, daemon=True)
+            t.start()
+            from io import BytesIO
+            out = BytesIO()
+            with socket.socket(socket.AF_UNIX) as client:
+                client.connect(str(sock_path))
+                mod.proxy(BytesIO(encode(req)), out, client, profile="Work-1")
+            t.join(5)
+            self.assertEqual(received[0], {"jsonrpc": "2.0", "method": "keeper/profile", "params": {"name": "Work-1"}})
+            self.assertEqual(b64decode(received[1]["params"]["arguments"]["input_base64"]), b"hello\x00world")
+            self.assertIn("input_path", decode(out.getvalue())["result"]["tools"][0]["inputSchema"]["properties"])

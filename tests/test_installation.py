@@ -392,8 +392,11 @@ class InstallationTests(unittest.TestCase):
              patch("keepassxc_agent_access.installation.Path",
                    side_effect=lambda p: runtime if str(p) == "/usr/local/lib/keeper-connect-1000" else real_path(p)):
             self.assertFalse(self.installation.connection_update_needed(source))
-            (source / "keepassxc-agent").write_bytes(b"changed")
-            self.assertTrue(self.installation.connection_update_needed(source))
+            with patch.object(self.installation, "manages_system_connection", return_value=True):
+                self.assertFalse(self.installation.connection_update_needed(source))
+                (source / "keepassxc-agent").write_bytes(b"changed")
+                self.assertTrue(self.installation.connection_update_needed(source))
+            self.assertFalse(self.installation.connection_update_needed(source))
 
 
 if __name__ == "__main__":

@@ -29,6 +29,8 @@ class BrokerTests(TestCase):
 
     @staticmethod
     def handle(request, _uid, session, _live, _dispatch, _deliver):
+        if isinstance(request, dict) and request.get("operation") == "detail_error":
+            raise ListingError("invalid_request", detail="Specify a vault UUID.")
         if request != LIST_REQUEST or type(request["version"]) is not int:
             raise ListingError("invalid_request")
         return session.list_entries()
@@ -68,6 +70,8 @@ class BrokerTests(TestCase):
                             b'{"version":1,"operation":"list_entries","password":0}\n']:
                 self.assertEqual(self.invoke(invalid), {"error": "invalid_request"})
             self.assertEqual(self.invoke(b"x" * REQUEST_LIMIT), {"error": "too_large"})
+            self.assertEqual(self.invoke(encode({"version": 1, "operation": "detail_error"})),
+                             {"error": "invalid_request", "detail": "Specify a vault UUID."})
             self.assertEqual(self.invoke(encode(LIST_REQUEST)), {"entries": []})
         self.session.list_entries.assert_called_once()
 

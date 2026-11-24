@@ -7,7 +7,7 @@ from tempfile import TemporaryDirectory
 from threading import Thread
 from unittest import TestCase
 
-from keepassxc_agent_access.agent_cli import _validate
+from keepassxc_agent_access.agent_cli import _validate, result_usage_request
 from keepassxc_agent_access.protocol import ERRORS, LIST_REQUEST, ListingError, decode, encode
 from keepassxc_agent_access.runner_token import credential
 
@@ -33,7 +33,7 @@ class AgentCliTests(TestCase):
                                          env={**base, **registered}, capture_output=True, check=False, timeout=7)
                 self.assertEqual(process.returncode, 1)
                 self.assertEqual(process.stdout, b"")
-                self.assertEqual(process.stderr.decode().strip(), ERRORS["invalid_request"])
+                self.assertTrue(process.stderr.decode().strip().startswith(ERRORS["invalid_request"]))
                 self.assertNotIn(b"Traceback", process.stderr)
 
     def test_access_details_reject_extra_fields_and_malformed_permissions(self):
@@ -65,6 +65,85 @@ class AgentCliTests(TestCase):
                 _validate(value, request)
         with self.assertRaises(ListingError):
             _validate(reply, {"operation": "access_status"})
+
+        extended = {
+            **reply,
+            "paused": False,
+            "last_change": {"id": "00000000-0000-0000-0000-000000000003", "status": "denied"},
+            "scope": [{**item, "vault_locked": False, "stale": False,
+                       "pinned_origins": ["https://api.example.test:443/"]}],
+        }
+        self.assertEqual(_validate(extended, request), extended)
+        for bad in (
+            {**reply, "paused": "no"},
+            {**reply, "last_change": {"id": "00000000-0000-0000-0000-000000000003", "status": "pending"}},
+            {**reply, "scope": [{**item, "vault_locked": "yes"}]},
+            {**reply, "scope": [{**item, "pinned_origins": ["http://api.example.test/"]}]},
+            {**reply, "requested_items": [{**item, "label": None, "stale": False}]},
+        ):
+            with self.subTest(bad=bad), self.assertRaises(ListingError):
+                _validate(bad, request)
+
+    def test_result_usage_allows_headers_on_basic_bearer_and_scalar_on_get(self):
+        base = {
+            "type": "https_results",
+            "origin": "https://api.example.test/",
+            "request": {"path": "/items", "method": "GET", "auth": "bearer", "headers": {"Accept": "application/json"}},
+            "result": {"path": "/data/id", "scalar": "item_id"},
+        }
+        self.assertEqual(result_usage_request(base), base)
+        basic = {**base, "request": {"path": "/items", "auth": "basic", "headers": {"X-Custom": "1"}}}
+        self.assertEqual(result_usage_request(basic), basic)
+        for auth in ("basic", "bearer"):
+            with self.subTest(auth=auth), self.assertRaises(ValueError):
+                result_usage_request({**base, "request": {
+                    "path": "/items", "auth": auth, "headers": {"authorization": "Bearer leaked"},
+                }})
+        with self.assertRaises(ValueError):
+            result_usage_request({**base, "result": {"path": "/data", "scalar": "password"}})
+
+    def test_error_detail_and_acknowledged_write_exit_status(self):
+        with self.assertRaises(ListingError) as error:
+            _validate({"error": "invalid_request", "detail": "Supply a valid JSON object."}, {"operation": "list_vaults"})
+        self.assertEqual(error.exception.code, "invalid_request")
+        self.assertEqual(error.exception.detail, "Supply a valid JSON object.")
+        with self.assertRaises(ListingError) as invalid_detail:
+            _validate({"error": "invalid_request", "detail": "line1\nline2"}, {"operation": "list_vaults"})
+        self.assertEqual(invalid_detail.exception.code, "invalid_response")
+
+        with TemporaryDirectory(dir="/tmp") as directory, socket.socket(socket.AF_UNIX) as listener:
+            root = Path(directory)
+            endpoint = root / "keeper.sock"
+            token_file = root / "token"
+            credential(token_file, create=True)
+            listener.bind(str(endpoint))
+            listener.listen()
+            listener.settimeout(7)
+
+            def serve():
+                conn, _ = listener.accept()
+                with conn, conn.makefile("rb") as stream:
+                    stream.readline()
+                    conn.sendall(encode({"outcome": "acknowledged", "http_status": 204}))
+
+            server = Thread(target=serve, daemon=True)
+            server.start()
+            usage = {
+                "type": "https_results",
+                "origin": "https://api.example.test/",
+                "request": {"path": "/items", "method": "POST", "auth": "bearer"},
+                "result": {"path": "/data", "columns": ["id"]},
+            }
+            process = subprocess.run(
+                [CLI, "use", "--entry", "00000000-0000-0000-0000-000000000002", "--json"],
+                input=encode(usage),
+                env={"PATH": "/usr/bin:/bin", "KEEPASSXC_AGENT_SOCKET": str(endpoint),
+                     "KEEPASSXC_AGENT_TOKEN_FILE": str(token_file)},
+                capture_output=True, check=False, timeout=7,
+            )
+            server.join(7)
+            self.assertEqual(process.returncode, 0)
+            self.assertEqual(decode(process.stdout), {"outcome": "acknowledged", "http_status": 204})
 
     def invoke(self, endpoint, fields=()):
         return subprocess.run(
