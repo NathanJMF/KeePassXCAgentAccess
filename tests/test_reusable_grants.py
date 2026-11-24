@@ -11,6 +11,7 @@ from uuid import uuid4
 
 import gi
 
+gi.require_version("Gdk", "3.0")
 gi.require_version("Gtk", "3.0")
 from keepassxc_agent_access.activity import ActivityStore, Attribution
 from keepassxc_agent_access.grants import CREDENTIAL_USES, Grants, Item, Scope
@@ -224,3 +225,46 @@ class ReusableGrantTests(TestCase):
         self.grants.decide(fresh.id, [self.grants.choices(item)[0] for item in pending.items], change_id=change)
         updated = self.grants.authenticate(self.credential, 1500)
         self.assertEqual(updated.scope[0].result_certificates, (("https://service.example.test:443/", pin),))
+
+    def test_is_stale_and_reapprove_credentials_preserve_result_certificates(self):
+        from keepassxc_agent_access.protocol import ListingError
+
+        self.assertEqual(self.enroll(self.request(uses=("https_results",))), "pending")
+        grant = self.approve()
+        self.assertFalse(self.grants.is_stale(grant))
+        with self.assertRaisesRegex(ValueError, "already current"):
+            self.grants.reapprove_credentials(grant.id)
+
+        rev = self.workspace.registrations[self.vault].credential_revision(self.entry)
+        pin = "d" * 64
+        self.grants.trust_result_certificate(
+            grant.id, grant.generation, self.vault, self.entry, rev, "https://service.example.test:443/", pin, (None,))
+
+        # Rotate the vault entry's credential nonce.
+        self.workspace.registrations[self.vault] = replace(
+            self.workspace.registrations[self.vault],
+            credential_nonces=((self.entry, str(uuid4())),),
+        )
+        stale = self.grants.authenticate(self.credential, 1500)
+        self.assertTrue(self.grants.is_stale(stale))
+
+        # Locked vault blocks re-approval.
+        saved_session = self.workspace.sessions.pop(self.vault)
+        with self.assertRaisesRegex(ValueError, "Unlock all affected vaults"):
+            self.grants.reapprove_credentials(stale.id)
+        self.workspace.sessions[self.vault] = saved_session
+
+        updated = self.grants.reapprove_credentials(stale.id)
+        new_rev = self.workspace.registrations[self.vault].credential_revision(self.entry)
+        self.assertFalse(self.grants.is_stale(updated))
+        self.assertEqual(updated.scope[0].use_revision, new_rev)
+        self.assertEqual(updated.scope[0].result_certificates, (("https://service.example.test:443/", pin),))
+        reloaded = Grants(self.workspace, self.activity).authenticate(self.credential, 1500)
+        self.assertEqual(reloaded.scope, updated.scope)
+        latest = self.activity.rows(limit=1)[0]
+        self.assertEqual(latest["action"], "Approve token permissions")
+        self.assertEqual(latest["decision"], "Re-approved current credential in Access")
+
+        self.grants.transition(updated.id, "removed")
+        with self.assertRaises(ListingError):
+            self.grants.reapprove_credentials(updated.id)

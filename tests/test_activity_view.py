@@ -7,6 +7,7 @@ from unittest.mock import Mock
 
 import gi
 
+gi.require_version("Gdk", "3.0")
 gi.require_version("Gtk", "3.0")
 from keepassxc_agent_access.activity_grouping import activity_groups, activity_matches
 from keepassxc_agent_access.workspace_views import (
@@ -120,6 +121,26 @@ class ActivityGroupingTests(TestCase):
         first = next(iter(groups.values()))[1]
         self.assertEqual([row["id"] for row in first], [1, 2])
         self.assertEqual(len(groups), 4)
+
+    def test_repeat_operations_without_chat_id_and_discover_resources_group_cleanly(self):
+        rows = [
+            {"id": 1, "action": "List entries", "chat_id": None, "uid": 1000,
+             "vault_id": "vault-a", "token": "token-a", "requested": 1.0},
+            {"id": 2, "action": "List entries", "chat_id": "", "uid": 1000,
+             "vault_id": "vault-a", "token": "token-a", "requested": 2.0},
+            {"id": 3, "action": "List entries", "chat_id": "chat-a", "uid": 1000,
+             "vault_id": "vault-a", "token": "token-a", "requested": 3.0},
+            {"id": 4, "action": "Discover resources", "chat_id": None, "uid": 1000,
+             "token": None, "requested": 4.0},
+            {"id": 5, "action": "Discover resources", "chat_id": "", "uid": 1000,
+             "token": None, "requested": 5.0},
+            {"id": 6, "action": "Discover resources", "chat_id": "chat-a", "uid": 1000,
+             "token": None, "requested": 6.0},
+        ]
+        groups = list(activity_groups(rows).values())
+        self.assertEqual(len(groups), 4)
+        self.assertEqual([row["id"] for row in groups[1][1]], [5, 4])
+        self.assertEqual([row["id"] for row in groups[3][1]], [2, 1])
 
     def test_filters_match_resolved_resource_and_exact_references(self):
         row = {"id": 1, "entry": "entry-id", "outcome": "Pending review"}

@@ -201,12 +201,32 @@ def main(root):
             responses = []
             listener = dialog.connect("response", lambda _, response: responses.append(response))
             try:
-                for kind in (Gdk.EventType.KEY_PRESS, Gdk.EventType.KEY_RELEASE):
-                    for key in (Gdk.KEY_Return, Gdk.KEY_space, Gdk.KEY_Escape):
-                        event = Gdk.Event.new(kind)
+                seen_copy = []
+                copy_probe = dialog.connect("key-press-event", lambda _w, ev: seen_copy.append(ev.keyval) and False)
+                try:
+                    for kind in (Gdk.EventType.KEY_PRESS, Gdk.EventType.KEY_RELEASE):
+                        signal = "key-press-event" if kind == Gdk.EventType.KEY_PRESS else "key-release-event"
+                        for key in (Gdk.KEY_Return, Gdk.KEY_space):
+                            event = Gdk.Event.new(kind)
+                            event.key.keyval = key
+                            assert dialog.emit(signal, event)
+                    for key in (Gdk.KEY_c, Gdk.KEY_C):
+                        event = Gdk.Event.new(Gdk.EventType.KEY_PRESS)
                         event.key.keyval = key
-                        assert dialog.emit("key-press-event" if kind == Gdk.EventType.KEY_PRESS
-                                           else "key-release-event", event)
+                        event.key.state = Gdk.ModifierType.CONTROL_MASK
+                        dialog.emit("key-press-event", event)
+                        release = Gdk.Event.new(Gdk.EventType.KEY_RELEASE)
+                        release.key.keyval = key
+                        release.key.state = Gdk.ModifierType.CONTROL_MASK
+                        assert not dialog.emit("key-release-event", release)
+                finally:
+                    dialog.disconnect(copy_probe)
+                assert seen_copy == [Gdk.KEY_c, Gdk.KEY_C]
+                with patch.object(dialog, "response") as response_mock:
+                    escape = Gdk.Event.new(Gdk.EventType.KEY_PRESS)
+                    escape.key.keyval = Gdk.KEY_Escape
+                    assert dialog.emit("key-press-event", escape)
+                    response_mock.assert_called_once_with(Gtk.ResponseType.DELETE_EVENT)
                 for response in (Gtk.ResponseType.ACCEPT, Gtk.ResponseType.REJECT):
                     widget = dialog.get_widget_for_response(response)
                     assert not widget.get_can_focus()
@@ -1402,6 +1422,8 @@ def main(root):
                     widgets = {child.get_name(): child for child in descendants(dialog)}
                     widgets["action-kind"].set_active_id(ActionType.BROWSER.value)
                     fields = {
+                        "action-id": "health-check",
+                        "action-name": "Health check",
                         "action-destination": url + "/sign-in",
                         "browser-submit_url": url + "/session",
                         "browser-form_id": "sign-in",
@@ -1799,8 +1821,21 @@ def main(root):
                 for sentinel in (UNLOCK, PASSWORD, OTHER_PASSWORD, EDIT_PASSWORD, REQUESTED_PASSWORD, AUTHORIZATION, BEARER_AUTHORIZATION, other_header):
                     assert all(sentinel.encode() not in data for data in persisted)
                     assert all(sentinel.encode() not in data for call in captured for data in call)
-                assert not any(application == app.get_application_id()
-                               for _, (application, *_) in notification_messages)
+                keeper_notifications = [
+                    (member, body) for member, body in notification_messages
+                    if body and body[0] == app.get_application_id()
+                ]
+                for member, body in keeper_notifications:
+                    if member == "AddNotification":
+                        payload = repr(body).encode()
+                        assert b"pending agent request" in payload
+                        for sentinel in (UNLOCK, PASSWORD, OTHER_PASSWORD, EDIT_PASSWORD, REQUESTED_PASSWORD,
+                                         AUTHORIZATION, BEARER_AUTHORIZATION, other_header,
+                                         "Check approved services", *(row["title"] for row in fixture)):
+                            assert sentinel.encode() not in payload
+                        for name in names:
+                            raw = subprocess.check_output([*NAMESPACE, "cat", str(profiles / name / "token")]).strip()
+                            assert raw not in payload
                 app.window.close()
                 wait_for(lambda: app.exiting, "Closing the window did not quit Keeper")
                 print("Workspace scenario passed: two vaults, scoped CLI, GNOME mouse-only request pop-ups, four access decisions, credential types, migration, locks and Activity", flush=True)

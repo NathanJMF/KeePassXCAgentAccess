@@ -186,6 +186,28 @@ class AccessStorageTests(TestCase):
         self.assertEqual((current["vault"], current["folder"], current["entry_title"], current["entry"]),
                          ("Example vault", "Root", "At review", entry))
 
+    def test_activity_detail_column_migrates_sanitizes_and_counts_rows(self):
+        store = ActivityStore(self.root / "activity.sqlite")
+        store.recover(30)
+        self.assertEqual(store.count(), 0)
+        first = store.begin(123, Attribution(), "Use password", "https://example.invalid/")
+        store.finish(first, "Failed", detail="  Line one\nline\t two\x07  ")
+        self.assertEqual(store.count(), 1)
+        row, = store.rows()
+        self.assertEqual(row["detail"], "Line one line two")
+
+        with store.connection() as db:
+            db.execute("ALTER TABLE activity DROP COLUMN detail")
+        reopened = ActivityStore(store.path)
+        reopened.recover(30)
+        migrated, = reopened.rows()
+        self.assertIsNone(migrated["detail"])
+        second = reopened.begin(123, Attribution(), "List vaults", None)
+        reopened.finish(second, "Revoked", detail="x" * 300)
+        self.assertEqual(reopened.count(), 2)
+        newest = reopened.rows(limit=1)[0]
+        self.assertEqual(newest["detail"], "x" * 240)
+
     def test_activity_rejects_claimed_provenance_and_unprotected_database(self):
         with self.assertRaises(ValueError):
             Attribution.parse({"model": "Fixture model", "verified": True})

@@ -4,13 +4,15 @@ import stat
 from pathlib import Path
 import subprocess
 from tempfile import TemporaryDirectory
+import tomllib
 import unittest
 from unittest.mock import patch
 
 from keepassxc_agent_access.installation import DESKTOP_SERVICE, Installation, SERVICE, desktop_service_contents, main as install_main, service_contents
 from keepassxc_agent_access.agent_setup import PAYLOAD_LIMIT, RUNTIME, setup as admin_setup, unit_contents
 from keepassxc_agent_access.launcher import (
-    antigravity_mcp_entry, antigravity_mcp_snippet, desktop_contents, desktop_icon, normalize_desktop_icon,
+    antigravity_mcp_entry, antigravity_mcp_snippet, codex_mcp_entry, codex_mcp_snippet,
+    desktop_contents, desktop_icon, detected_agent_clients, normalize_desktop_icon,
     skill_launcher_contents, _install_skill,
 )
 
@@ -61,6 +63,10 @@ class InstallationTests(unittest.TestCase):
             ("skill_destination", {"return_value": self.skill}),
             ("antigravity_skill_destination", {"return_value": None}),
             ("antigravity_mcp_config_destination", {"return_value": None}),
+            ("codex_skill_destination", {"return_value": None}),
+            ("codex_mcp_config_destination", {"return_value": None}),
+            ("claude_skill_destination", {"return_value": None}),
+            ("claude_mcp_config_destination", {"return_value": None}),
             ("stop_application", {}),
         ):
             patcher = patch(f"keepassxc_agent_access.installation.{target}", **options)
@@ -520,6 +526,135 @@ class InstallationTests(unittest.TestCase):
                 (source / "keepassxc-agent").write_bytes(b"changed")
                 self.assertTrue(self.installation.connection_update_needed(source))
             self.assertFalse(self.installation.connection_update_needed(source))
+
+    def test_detected_agent_clients_includes_codex_and_claude_and_ignores_symlinks(self):
+        (self.root / ".gemini/config").mkdir(parents=True)
+        (self.root / ".codex").mkdir(parents=True)
+        real_claude = self.root / "real-claude"
+        real_claude.mkdir()
+        (self.root / ".claude").symlink_to(real_claude)
+        with patch("keepassxc_agent_access.launcher.Path.home", return_value=self.root):
+            clients = {client.key: client for client in detected_agent_clients()}
+            self.assertEqual(set(clients), {"antigravity", "codex"})
+            self.assertEqual(clients["codex"].mcp_format, "toml")
+            self.assertEqual(clients["codex"].mcp_path, self.root / ".codex/config.toml")
+            (self.root / ".claude").unlink()
+            (self.root / ".claude").mkdir()
+            clients = {client.key: client for client in detected_agent_clients()}
+            self.assertEqual(set(clients), {"antigravity", "codex", "claude"})
+            self.assertEqual(clients["claude"].mcp_path, self.root / ".claude.json")
+            self.assertEqual(clients["claude"].mcp_format, "json")
+
+    def test_codex_and_claude_install_non_clobber_and_uninstall(self):
+        codex_dir = self.root / ".codex"
+        codex_dir.mkdir()
+        codex_skill = codex_dir / "skills/keeper/SKILL.md"
+        codex_config = codex_dir / "config.toml"
+        codex_config.write_text('model = "gpt-5"\n', encoding="utf-8")
+
+        claude_dir = self.root / ".claude"
+        claude_dir.mkdir()
+        claude_skill = claude_dir / "skills/keeper/SKILL.md"
+        claude_config = self.root / ".claude.json"
+        claude_config.write_text(json.dumps({"numStartups": 4, "mcpServers": {"other": {"command": "/bin/true"}}}))
+
+        with patch("keepassxc_agent_access.installation.codex_skill_destination", return_value=codex_skill), \
+             patch("keepassxc_agent_access.installation.codex_mcp_config_destination", return_value=codex_config), \
+             patch("keepassxc_agent_access.installation.claude_skill_destination", return_value=claude_skill), \
+             patch("keepassxc_agent_access.installation.claude_mcp_config_destination", return_value=claude_config), \
+             patch("keepassxc_agent_access.installation.external_broker_managed", return_value=True):
+            self.installation.install(False, stop_existing=True, connect_agent=True)
+            self.assertTrue(codex_skill.is_file())
+            self.assertTrue(claude_skill.is_file())
+            parsed_toml = tomllib.loads(codex_config.read_text(encoding="utf-8"))
+            self.assertEqual(parsed_toml["model"], "gpt-5")
+            command = str(self.installation.app / "keeper-connect")
+            self.assertEqual(parsed_toml["mcp_servers"]["keeper"], {"command": command, "args": []})
+            self.assertIn("# BEGIN KEEPER MCP", codex_config.read_text(encoding="utf-8"))
+            self.assertIn(command, codex_mcp_snippet(command))
+
+            parsed_claude = json.loads(claude_config.read_text(encoding="utf-8"))
+            self.assertEqual(parsed_claude["numStartups"], 4)
+            self.assertEqual(parsed_claude["mcpServers"]["other"], {"command": "/bin/true"})
+            self.assertEqual(parsed_claude["mcpServers"]["keeper"], antigravity_mcp_entry(command))
+
+            self.assertTrue(self.installation.uninstall())
+            self.assertFalse(codex_skill.exists())
+            self.assertFalse(claude_skill.exists())
+            self.assertEqual(codex_config.read_text(encoding="utf-8"), 'model = "gpt-5"\n')
+            saved_claude = json.loads(claude_config.read_text(encoding="utf-8"))
+            self.assertEqual(saved_claude, {"numStartups": 4, "mcpServers": {"other": {"command": "/bin/true"}}})
+
+    def test_codex_never_clobbers_unmarked_keeper_entry_and_uninstall_deletes_only_created_empty_file(self):
+        codex_dir = self.root / ".codex"
+        codex_dir.mkdir()
+        codex_skill = codex_dir / "skills/keeper/SKILL.md"
+        codex_config = codex_dir / "config.toml"
+        custom_toml = '[mcp_servers.keeper]\ncommand = "/custom/keeper"\nargs = ["--flag"]\n'
+        codex_config.write_text(custom_toml, encoding="utf-8")
+
+        with patch("keepassxc_agent_access.installation.codex_skill_destination", return_value=codex_skill), \
+             patch("keepassxc_agent_access.installation.codex_mcp_config_destination", return_value=codex_config), \
+             patch("keepassxc_agent_access.installation.external_broker_managed", return_value=True):
+            self.installation.install(False, stop_existing=True, connect_agent=True)
+            self.assertEqual(codex_config.read_text(encoding="utf-8"), custom_toml)
+            self.assertTrue(self.installation.uninstall())
+            self.assertEqual(codex_config.read_text(encoding="utf-8"), custom_toml)
+
+            codex_config.unlink()
+            self.installation.install(False, stop_existing=True, connect_agent=True)
+            expected_block = codex_mcp_entry(self.installation.app / "keeper-connect")
+            self.assertEqual(codex_config.read_text(encoding="utf-8"), expected_block)
+            self.assertTrue(self.installation.uninstall())
+            self.assertFalse(codex_config.exists())
+
+            # A matching marked block from a previous install updates in-place cleanly.
+            self.installation.install(False, stop_existing=True, connect_agent=True)
+            old_block = codex_mcp_entry("/old/keeper-connect")
+            codex_config.write_text('model = "gpt-5"\n\n' + old_block + '\n[other]\nkey = "value"\n', encoding="utf-8")
+            state = json.loads(self.installation.manifest.read_text(encoding="utf-8"))
+            state["codex_mcp_block"] = old_block
+            state["codex_mcp_created"] = False
+            state["client_mcps"]["codex"]["block"] = old_block
+            state["client_mcps"]["codex"]["created"] = False
+            self.installation.manifest.write_text(json.dumps(state), encoding="utf-8")
+            self.installation.install(False, stop_existing=True, connect_agent=True)
+            updated_text = codex_config.read_text(encoding="utf-8")
+            self.assertIn(expected_block, updated_text)
+            self.assertNotIn("/old/keeper-connect", updated_text)
+            self.assertEqual(tomllib.loads(updated_text)["other"], {"key": "value"})
+
+            self.assertTrue(self.installation.uninstall())
+            self.assertEqual(codex_config.read_text(encoding="utf-8"), 'model = "gpt-5"\n\n[other]\nkey = "value"\n')
+
+    def test_install_client_integration_handles_fresh_and_customized_clients(self):
+        with self.assertRaisesRegex(ValueError, "Run ./install first"):
+            self.installation.install_client_integration("codex")
+        with self.assertRaisesRegex(ValueError, "Unsupported client"):
+            self.installation.install_client_integration("unknown")
+
+        self.installation.install(False)
+        codex_dir = self.root / ".codex"
+        codex_dir.mkdir()
+        with patch("keepassxc_agent_access.launcher.Path.home", return_value=self.root):
+            result = self.installation.install_client_integration("codex")
+            self.assertEqual(result, {"skill_installed": True, "mcp_configured": True})
+            codex_skill = codex_dir / "skills/keeper/SKILL.md"
+            codex_config = codex_dir / "config.toml"
+            self.assertTrue(codex_skill.is_file())
+            self.assertEqual(codex_config.read_text(encoding="utf-8"),
+                             codex_mcp_entry(self.installation.app / "keeper-connect"))
+
+            codex_skill.write_bytes(b"custom skill")
+            codex_config.write_text('[mcp_servers.keeper]\ncommand = "/other"\nargs = []\n', encoding="utf-8")
+            result = self.installation.install_client_integration("codex")
+            self.assertEqual(result, {"skill_installed": False, "mcp_configured": False})
+            self.assertEqual(codex_skill.read_bytes(), b"custom skill")
+            self.assertIn('/other', codex_config.read_text(encoding="utf-8"))
+
+        self.assertTrue(self.installation.uninstall())
+        self.assertTrue(codex_skill.is_file())
+        self.assertIn('/other', codex_config.read_text(encoding="utf-8"))
 
 
 if __name__ == "__main__":
