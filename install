@@ -45,7 +45,7 @@ for option in "$@"; do
     esac
 done
 if [[ $mode == default || $mode == connect-agent ]]; then
-    packages+=(acl pkexec socat gir1.2-webkit2-4.1 xvfb python3-pycryptodome)
+    packages+=(acl pkexec gir1.2-webkit2-4.1 xvfb python3-pycryptodome)
 elif [[ $mode == agent ]]; then
     packages+=(acl uidmap util-linux gir1.2-webkit2-4.1 xvfb python3-pycryptodome)
 fi

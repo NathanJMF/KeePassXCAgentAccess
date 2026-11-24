@@ -47,3 +47,16 @@ class SystemKeyring:
                     raise KeyringError("Keyring cleanup is pending.")
         except GLib.Error:
             raise KeyringError("Keyring cleanup is pending.") from None
+
+    def remove_all(self):
+        try:
+            service = Secret.Service.get_sync(Secret.ServiceFlags.NONE, None)
+            items = service.search_sync(self.schema, {}, Secret.SearchFlags.ALL, None)
+            removed = 0
+            for item in items:
+                if not item.delete_sync(None):
+                    raise KeyringError("Keyring cleanup is pending.")
+                removed += 1
+            return removed
+        except GLib.Error:
+            raise KeyringError("Keyring cleanup is pending.") from None

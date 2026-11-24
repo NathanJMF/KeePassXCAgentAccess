@@ -22,7 +22,8 @@ from gi.repository import Gio, GLib
 from .access_settings import AccessStore
 from .agent_connection import installed_connection
 from .agent_setup import RUNTIME
-from .isolated_runner import broker_path, owned, subordinate_ids
+from .isolated_runner import broker_path, namespace, owned, subordinate_ids
+from .keyring import KeyringError, SystemKeyring
 from .launcher import (
     DESKTOP_ID, SKILL_PATH, antigravity_mcp_config_destination, antigravity_mcp_entry,
     antigravity_skill_destination, desktop_contents, desktop_icon, normalize_desktop_icon,
@@ -429,6 +430,8 @@ class Installation:
         if mcp_update is not None:
             mcp_path, mcp_bytes, old_mcp_bytes, mcp_entry = mcp_update
             state.update(antigravity_mcp_path=str(mcp_path), antigravity_mcp_entry=mcp_entry)
+            if old_mcp_bytes is None or previous.get("antigravity_mcp_created"):
+                state["antigravity_mcp_created"] = True
             if mcp_bytes is not None:
                 writes.append((mcp_path, mcp_bytes, old_mcp_bytes, 0o600))
         if agent:
@@ -537,62 +540,188 @@ class Installation:
         if original is not None and original not in expected and digest(original) != saved:
             raise ValueError(f"Keeper found a customized {title}. Move it aside before installing over it.")
 
-    def uninstall(self):
-        state = self.installed()
-        if not state:
+    @staticmethod
+    def _prune_empty_dirs(paths):
+        for directory in paths:
+            try:
+                if directory is not None and directory.is_dir() and not directory.is_symlink():
+                    directory.rmdir()
+            except OSError:
+                pass
+
+    @staticmethod
+    def _remove_owned_tree(path):
+        try:
+            info = path.lstat()
+        except FileNotFoundError:
             return False
-        if self.app.exists() or self.app.is_symlink():
-            owned(self.app, private=True)
-        if "unit" in state:
-            unit = regular_file(self.unit)
-            if unit is not None:
-                if digest(unit) != state["unit"]:
-                    raise ValueError("Keeper’s user service was customized. Disable and remove it before uninstalling.")
-                systemctl("disable", "--now", SERVICE)
-                self.unit.unlink()
-                systemctl("daemon-reload")
-        if "desktop_unit" in state:
-            desktop_unit = regular_file(self.desktop_unit)
-            if desktop_unit is not None:
-                if digest(desktop_unit) != state["desktop_unit"]:
-                    raise ValueError("Keeper’s autostart service was customized. Disable and remove it before uninstalling.")
-                systemctl("disable", "--now", DESKTOP_SERVICE, check=False)
-                self.desktop_unit.unlink()
-                systemctl("daemon-reload", check=False)
-        if not external_broker_active():
-            stop_application()
-        self.remove_matching(self.launcher, state.get("launcher"), normalize=True)
-        skill = skill_destination()
-        for path in (skill, skill.parents[1] / SKILL_PATH):
-            if state.get("skill_path") == str(path) and not path.parent.is_symlink():
-                self.remove_matching(path, state.get("skill"))
-        if ag_path_text := state.get("antigravity_skill_path"):
-            ag_path = Path(ag_path_text)
-            if not ag_path.parent.is_symlink():
-                self.remove_matching(ag_path, state.get("antigravity_skill"))
-        if (mcp_path_text := state.get("antigravity_mcp_path")) and (mcp_entry := state.get("antigravity_mcp_entry")):
-            mcp_path = Path(mcp_path_text)
-            if not mcp_path.is_symlink() and not mcp_path.parent.is_symlink():
+        if not stat.S_ISDIR(info.st_mode) or stat.S_ISLNK(info.st_mode) or info.st_uid != os.geteuid():
+            return False
+        shutil.rmtree(path, ignore_errors=True)
+        return not path.exists()
+
+    def _clear_runtime_and_state(self):
+        removed = False
+        real_home = self.manages_system_connection()
+        if real_home or os.environ.get("XDG_RUNTIME_DIR"):
+            try:
+                runtime_runner = broker_path()
+            except ValueError:
+                runtime_runner = None
+            if runtime_runner is not None:
+                removed |= self._remove_owned_tree(runtime_runner)
+        if real_home or os.environ.get("XDG_STATE_HOME"):
+            state_home = Path(os.environ.get("XDG_STATE_HOME") or Path.home() / ".local" / "state")
+            if state_home.is_absolute():
+                removed |= self._remove_owned_tree(state_home / "keeper-agent-sessions")
+                scoped = state_home / "keeper-scoped-runner"
                 try:
-                    raw = regular_file(mcp_path)
-                    data = json.loads(raw.decode("utf-8")) if raw is not None else None
-                except (OSError, ValueError, UnicodeDecodeError):
-                    data = None
-                if isinstance(data, dict) and isinstance(data.get("mcpServers"), dict) and data["mcpServers"].get("keeper") == mcp_entry:
-                    servers = dict(data["mcpServers"])
-                    del servers["keeper"]
-                    publish(mcp_path, (json.dumps({**data, "mcpServers": servers}, indent=2) + "\n").encode("utf-8"),
-                            mode=stat.S_IMODE(mcp_path.stat().st_mode))
-        skill_launcher = skill.with_name("keeper-agent")
-        if state.get("skill_launcher_path") == str(skill_launcher) and not skill_launcher.parent.is_symlink():
-            self.remove_matching(skill_launcher, state.get("skill_launcher"))
-        if self.app.exists():
-            shutil.rmtree(self.app)
-        if self.update_source.exists() or self.update_source.is_symlink():
-            owned(self.update_source, private=True)
-            shutil.rmtree(self.update_source)
-        self.manifest.unlink()
-        return True
+                    info = scoped.lstat()
+                except FileNotFoundError:
+                    info = None
+                if info is not None and stat.S_ISDIR(info.st_mode) and not stat.S_ISLNK(info.st_mode) and info.st_uid == os.geteuid():
+                    try:
+                        uid, gid = subordinate_ids()
+                        prefix = namespace(uid, gid)
+                    except (OSError, ValueError):
+                        prefix = None
+                    if prefix is not None:
+                        for anchor in scoped.iterdir():
+                            profile = anchor / "profile"
+                            if profile.exists() and not profile.is_symlink():
+                                subprocess.run([*prefix, "/usr/bin/rm", "-rf", "--", str(profile)],
+                                               cwd="/", env={"PATH": "/usr/bin:/bin"}, check=False, capture_output=True)
+                    removed |= self._remove_owned_tree(scoped)
+        if real_home:
+            owner = os.geteuid()
+            var_tmp = Path("/var/tmp")
+            if var_tmp.is_dir():
+                for candidate in var_tmp.glob("keeper-runtime-*"):
+                    try:
+                        info = candidate.lstat()
+                    except OSError:
+                        continue
+                    if stat.S_ISDIR(info.st_mode) and not stat.S_ISLNK(info.st_mode) and info.st_uid == owner:
+                        shutil.rmtree(candidate, ignore_errors=True)
+                        removed = True
+        return removed
+
+    def _clear_user_data(self):
+        removed = False
+        config_dir = self.unit.parents[2] / "keepassxc-agent-access"
+        item_ids = set()
+        try:
+            saved = SettingsStore(config_dir / "settings.json").read()
+            if saved.active_item:
+                item_ids.add(saved.active_item)
+            item_ids.update(saved.pending_items)
+        except (OSError, SettingsError, ValueError):
+            pass
+        workspace_file = config_dir / "workspace.json"
+        try:
+            if not workspace_file.is_symlink() and workspace_file.is_file():
+                data = json.loads(workspace_file.read_text(encoding="utf-8"))
+                for vault_row in data.get("vaults", ()):
+                    if isinstance(vault_row, dict) and isinstance(vault_row.get("item"), str):
+                        item_ids.add(vault_row["item"])
+        except (OSError, ValueError):
+            pass
+        if item_ids or self.manages_system_connection():
+            try:
+                keyring = SystemKeyring()
+                for item_id in sorted(item_ids):
+                    try:
+                        keyring.remove(item_id)
+                        removed = True
+                    except KeyringError:
+                        pass
+                if self.manages_system_connection() and keyring.remove_all():
+                    removed = True
+            except (KeyringError, OSError):
+                pass
+        removed |= self._remove_owned_tree(config_dir)
+        cache_dir = Path(GLib.get_user_cache_dir()) / "keepassxc-agent-access"
+        removed |= self._remove_owned_tree(cache_dir)
+        return removed
+
+    def cleanup_empty_base(self):
+        try:
+            lock_file = self.base / ".lock"
+            if not lock_file.is_symlink():
+                lock_file.unlink(missing_ok=True)
+            if self.base.exists() and not self.base.is_symlink():
+                self.base.rmdir()
+        except OSError:
+            pass
+
+    def uninstall(self, *, keep_data=False):
+        state = self.installed()
+        removed = bool(state)
+        if state:
+            if self.app.exists() or self.app.is_symlink():
+                owned(self.app, private=True)
+            if "unit" in state:
+                unit = regular_file(self.unit)
+                if unit is not None:
+                    if digest(unit) != state["unit"]:
+                        raise ValueError("Keeper’s user service was customized. Disable and remove it before uninstalling.")
+                    systemctl("disable", "--now", SERVICE)
+                    self.unit.unlink()
+                    systemctl("daemon-reload")
+            if "desktop_unit" in state:
+                desktop_unit = regular_file(self.desktop_unit)
+                if desktop_unit is not None:
+                    if digest(desktop_unit) != state["desktop_unit"]:
+                        raise ValueError("Keeper’s autostart service was customized. Disable and remove it before uninstalling.")
+                    systemctl("disable", "--now", DESKTOP_SERVICE, check=False)
+                    self.desktop_unit.unlink()
+                    systemctl("daemon-reload", check=False)
+            if not external_broker_active():
+                stop_application()
+            self.remove_matching(self.launcher, state.get("launcher"), normalize=True)
+            skill = skill_destination()
+            for path in (skill, skill.parents[1] / SKILL_PATH):
+                if state.get("skill_path") == str(path) and not path.parent.is_symlink():
+                    self.remove_matching(path, state.get("skill"))
+            if ag_path_text := state.get("antigravity_skill_path"):
+                ag_path = Path(ag_path_text)
+                if not ag_path.parent.is_symlink():
+                    self.remove_matching(ag_path, state.get("antigravity_skill"))
+                    self._prune_empty_dirs((ag_path.parent, ag_path.parent.parent if ag_path.parent.parent.name == "skills" else None))
+            if (mcp_path_text := state.get("antigravity_mcp_path")) and (mcp_entry := state.get("antigravity_mcp_entry")):
+                mcp_path = Path(mcp_path_text)
+                if not mcp_path.is_symlink() and not mcp_path.parent.is_symlink():
+                    try:
+                        raw = regular_file(mcp_path)
+                        data = json.loads(raw.decode("utf-8")) if raw is not None else None
+                    except (OSError, ValueError, UnicodeDecodeError):
+                        data = None
+                    if isinstance(data, dict) and isinstance(data.get("mcpServers"), dict) and data["mcpServers"].get("keeper") == mcp_entry:
+                        servers = dict(data["mcpServers"])
+                        del servers["keeper"]
+                        if state.get("antigravity_mcp_created") and not servers and set(data) <= {"mcpServers"}:
+                            mcp_path.unlink(missing_ok=True)
+                        else:
+                            publish(mcp_path, (json.dumps({**data, "mcpServers": servers}, indent=2) + "\n").encode("utf-8"),
+                                    mode=stat.S_IMODE(mcp_path.stat().st_mode))
+            skill_launcher = skill.with_name("keeper-agent")
+            if state.get("skill_launcher_path") == str(skill_launcher) and not skill_launcher.parent.is_symlink():
+                self.remove_matching(skill_launcher, state.get("skill_launcher"))
+            self._prune_empty_dirs((skill.parent, skill.parent.parent if skill.parent.parent.name == "Skills" else None))
+            if self.app.exists():
+                shutil.rmtree(self.app)
+            if self.update_source.exists() or self.update_source.is_symlink():
+                owned(self.update_source, private=True)
+                shutil.rmtree(self.update_source)
+            self.manifest.unlink(missing_ok=True)
+        update_result_file = self.base / "update-result.json"
+        if not update_result_file.is_symlink() and update_result_file.exists():
+            update_result_file.unlink(missing_ok=True)
+            removed = True
+        removed |= self._clear_runtime_and_state()
+        if not keep_data:
+            removed |= self._clear_user_data()
+        return removed
 
     @staticmethod
     def remove_matching(path, checksum, *, normalize=False):
@@ -615,7 +744,9 @@ def main():
     agent.add_argument("--connect-agent", action="store_true")
     agent.add_argument("--app-only", action="store_true")
     install.add_argument("--no-launch", action="store_true")
-    commands.add_parser("uninstall")
+    uninstall_parser = commands.add_parser("uninstall")
+    uninstall_parser.add_argument("--keep-data", action="store_true",
+                                  help="Remove Keeper while keeping local settings, Activity, and saved OS keyring entries.")
     opening = commands.add_parser("open")
     opening.add_argument("--show-window", action="store_true", help=argparse.SUPPRESS)
     args = parser.parse_args()
@@ -683,16 +814,25 @@ def main():
         else:
             removed = False
             manage_connection = installation.manages_system_connection()
+            keep_data = getattr(args, "keep_data", False)
             if installation.base.exists() or installation.base.is_symlink():
                 with installation.lock():
                     if manage_connection and installed_connection():
                         administer_connection("remove")
-                    removed = installation.uninstall()
-            elif manage_connection and installed_connection():
-                administer_connection("remove")
-                removed = True
+                    removed = installation.uninstall(keep_data=keep_data)
+                installation.cleanup_empty_base()
+            else:
+                if manage_connection and installed_connection():
+                    administer_connection("remove")
+                    removed = True
+                if installation.uninstall(keep_data=keep_data):
+                    removed = True
             if removed:
-                print("Keeper was removed. Vaults, keyring entries, settings and Activity were kept.")
+                if keep_data:
+                    print("Keeper was removed. Vaults, keyring entries, settings and Activity were kept.")
+                else:
+                    print("Keeper and its local settings, Activity, and keyring entries were completely removed. "
+                          "Your .kdbx vault files were not touched.")
             else:
                 print("No managed Keeper installation was found.")
     except (OSError, ValueError, SettingsError, GLib.Error, subprocess.CalledProcessError) as error:

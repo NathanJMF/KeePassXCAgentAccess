@@ -2,12 +2,14 @@
 
 import argparse
 from base64 import b64decode
+import grp
 from hashlib import sha256
 import json
 import os
 from pathlib import Path
 import pwd
 import re
+import shutil
 import stat
 import subprocess
 import sys
@@ -125,6 +127,31 @@ def owner_broker(owner, endpoint, peer_uid):
     return path, account
 
 
+def _remove_managed_account(account_name, owner):
+    try:
+        account = pwd.getpwnam(account_name)
+    except KeyError:
+        account = None
+    if account is not None:
+        if account.pw_uid in (0, owner) or account.pw_shell != "/usr/sbin/nologin" or account.pw_dir != "/nonexistent":
+            raise ValueError("The bundled account name is already used by another Linux user.")
+        subprocess.run(["/usr/sbin/userdel", account.pw_name], check=False)
+    try:
+        grp.getgrnam(account_name)
+    except KeyError:
+        return
+    subprocess.run(["/usr/sbin/groupdel", account_name], check=False)
+
+
+def _remove_dir_if_exists(path):
+    try:
+        info = path.lstat()
+    except FileNotFoundError:
+        return
+    if stat.S_ISDIR(info.st_mode) and not stat.S_ISLNK(info.st_mode):
+        shutil.rmtree(path, ignore_errors=True)
+
+
 def setup(owner, endpoint, peer_uid, payload=None, *, remove=False):
     name = f"keeper-connect-{owner}"
     runtime = Path("/usr/local/lib") / name
@@ -132,6 +159,8 @@ def setup(owner, endpoint, peer_uid, payload=None, *, remove=False):
     listener = units / (name + ".socket")
     runner = units / (name + "@.service")
     tmpfiles = Path("/etc/tmpfiles.d") / (name + ".conf")
+    state_dir = Path("/var/lib") / name
+    socket_path = Path(f"/run/{name}.sock")
     manifest_path = connection_record(owner)
     original = trusted_file(manifest_path)
     previous = json.loads(original) if original is not None else None
@@ -151,7 +180,8 @@ def setup(owner, endpoint, peer_uid, payload=None, *, remove=False):
             recorded.add(candidate)
         for path in files | recorded:
             data = trusted_file(path)
-            if (sha256(data).hexdigest() if data is not None else None) != hashes.get(str(path)):
+            actual = sha256(data).hexdigest() if data is not None else None
+            if actual != hashes.get(str(path)) and not (remove and data is None):
                 raise ValueError(f"Keeper will preserve the changed administrator file at {path}.")
     elif any(trusted_file(path) is not None for path in files):
         raise ValueError("An unmanaged Keeper connection already occupies the installer destination.")
@@ -159,15 +189,31 @@ def setup(owner, endpoint, peer_uid, payload=None, *, remove=False):
     if remove:
         if previous is None:
             return
-        call("systemctl", "disable", "--now", listener.name)
-        call("systemctl", "stop", name + "@*.service")
+        subprocess.run(["/usr/bin/systemctl", "disable", "--now", listener.name], check=False)
+        subprocess.run(["/usr/bin/systemctl", "stop", name + "@*.service"], check=False)
         for path in previous["files"]:
-            Path(path).unlink()
-        manifest_path.unlink()
-        call("systemctl", "daemon-reload")
+            Path(path).unlink(missing_ok=True)
+        manifest_path.unlink(missing_ok=True)
+        _remove_dir_if_exists(runtime)
+        _remove_dir_if_exists(state_dir)
+        socket_path.unlink(missing_ok=True)
+        account_name = previous.get("managed_account")
+        if str(tmpfiles) in previous["files"]:
+            _remove_dir_if_exists(Path(f"/run/keeper-broker-{owner}"))
+            account_name = account_name or f"keeper-agent-{owner}"
+        try:
+            manifest_path.parent.rmdir()
+        except OSError:
+            pass
+        subprocess.run(["/usr/bin/systemctl", "daemon-reload"], check=False)
+        subprocess.run(["/usr/bin/systemctl", "reset-failed"], check=False)
+        if account_name == f"keeper-agent-{owner}":
+            _remove_managed_account(account_name, owner)
         return
 
     additions = {}
+    managed_account = None
+    created_account = False
     if previous and not endpoint and str(tmpfiles) not in previous["files"]:
         endpoint, peer_uid = previous["endpoint"], previous["uid"]
     if previous and str(tmpfiles) in previous["files"] and (endpoint, peer_uid) == (previous["endpoint"], previous["uid"]):
@@ -182,8 +228,10 @@ def setup(owner, endpoint, peer_uid, payload=None, *, remove=False):
             subprocess.run(["/usr/sbin/useradd", "--system", "--user-group", "--no-create-home",
                             "--home-dir", "/nonexistent", "--shell", "/usr/sbin/nologin", account_name], check=True)
             account = pwd.getpwnam(account_name)
+            created_account = True
         if account.pw_uid in (0, owner) or account.pw_shell != "/usr/sbin/nologin" or account.pw_dir != "/nonexistent":
             raise ValueError("The bundled account name is already used by another Linux user.")
+        managed_account = account_name
         broker_dir = Path(f"/run/keeper-broker-{owner}")
         broker = broker_dir / "broker.sock"
         additions[tmpfiles] = (
@@ -212,6 +260,8 @@ def setup(owner, endpoint, peer_uid, payload=None, *, remove=False):
         call("systemctl", "enable", "--now", listener.name)
         record = {"version": 1, "owner": owner, "endpoint": str(broker), "uid": account.pw_uid,
                   "files": {str(path): sha256(data).hexdigest() for path, data in additions.items()}}
+        if managed_account:
+            record["managed_account"] = managed_account
         publish(manifest_path, json.dumps(record).encode(), 0o644)
     except (OSError, ValueError, subprocess.CalledProcessError):
         subprocess.run(["/usr/bin/systemctl", "disable", "--now", listener.name], check=False)
@@ -220,7 +270,17 @@ def setup(owner, endpoint, peer_uid, payload=None, *, remove=False):
                 path.unlink(missing_ok=True)
             else:
                 publish(path, data, 0o755 if path.name in ("keeper-agent-runner", "keepassxc-agent") else 0o644)
+        if not previous:
+            _remove_dir_if_exists(runtime)
+            if tmpfiles in additions:
+                _remove_dir_if_exists(Path(f"/run/keeper-broker-{owner}"))
+            try:
+                manifest_path.parent.rmdir()
+            except OSError:
+                pass
         call("systemctl", "daemon-reload")
+        if created_account:
+            _remove_managed_account(managed_account, owner)
         if previous:
             call("systemctl", "enable", "--now", listener.name)
         raise
