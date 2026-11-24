@@ -411,8 +411,13 @@ class Action:
         if self.opaque and kind not in (ActionType.STDIN, ActionType.NETWORK_PROMPT):
             raise ValueError("Dispatch-only output applies to commands.")
         headers = credential_headers(self.headers)
-        if headers and kind != ActionType.TEMPLATE:
-            raise ValueError("Choose HTTPS Credential Template for custom headers.")
+        if headers and kind not in (ActionType.BASIC, ActionType.BEARER, ActionType.TEMPLATE):
+            raise ValueError("Choose HTTPS authentication for custom headers.")
+        if kind in (ActionType.BASIC, ActionType.BEARER):
+            if any(name.lower() == "authorization" for name, _ in headers):
+                raise ValueError("Basic and Bearer requests set Authorization automatically.")
+            if any("{{password}}" in value or "{{username}}" in value for _, value in headers):
+                raise ValueError("Custom headers for Basic or Bearer cannot embed credential references.")
         object.__setattr__(self, "headers", headers)
         query = request_query(self.query)
         if query and kind in (ActionType.STDIN, ActionType.NETWORK_PROMPT, ActionType.BROWSER):

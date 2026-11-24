@@ -113,6 +113,9 @@ class GuestAccess:
                         token = refreshed
                         matching = matching_scopes(token)
                 if not matching:
+                    if any((scope.vault, scope.entry) == (vault, entry) and scope.use_revision != revision
+                           and needed <= set(scope.uses) and request.origin in scope.origins for scope in token.scope):
+                        raise ListingError("credential_changed")
                     raise ListingError("ineligible")
                 grant_key = (token.id, vault, entry, fingerprint)
                 automatic = not approved_step and self.workspace.guest_auto_approval_enabled("guest_run")
@@ -124,16 +127,22 @@ class GuestAccess:
                                              revision, session, monotonic() + self.broker.approvals.timeout + 30)
                 pending_pin = None
                 if automatic and not reused and self.workspace.scoped_auto_approval_enabled("guest_first_use"):
-                    endpoint = (request.origin, request.data["certificate_sha256"])
-                    expected_pins, cert_trusted, auto_pin = self.broker.grants.result_certificate_auto_pin(
-                        token, vault, entry, revision, *endpoint)
-                    auto_start = any("https" in scope.uses for scope in matching) and (cert_trusted or auto_pin)
-                    if auto_start:
-                        expires = monotonic() + (reuse_minutes * 60 if reuse_minutes else JOB_SECONDS)
-                        grant = replace(grant, expires=expires,
-                                        trusted_endpoint=endpoint if cert_trusted else None)
-                        if not cert_trusted:
-                            pending_pin = (*endpoint, expected_pins)
+                    if "certificate_sha256" in request.data:
+                        endpoint = (request.origin, request.data["certificate_sha256"])
+                        expected_pins, cert_trusted, auto_pin = self.broker.grants.result_certificate_auto_pin(
+                            token, vault, entry, revision, *endpoint)
+                        auto_start = any("https" in scope.uses for scope in matching) and (cert_trusted or auto_pin)
+                        if auto_start:
+                            expires = monotonic() + (reuse_minutes * 60 if reuse_minutes else JOB_SECONDS)
+                            grant = replace(grant, expires=expires,
+                                            trusted_endpoint=endpoint if cert_trusted else None)
+                            if not cert_trusted:
+                                pending_pin = (*endpoint, expected_pins)
+                    else:
+                        auto_start = any("https" in scope.uses for scope in matching)
+                        if auto_start:
+                            expires = monotonic() + (reuse_minutes * 60 if reuse_minutes else JOB_SECONDS)
+                            grant = replace(grant, expires=expires, trusted_endpoint=None)
                 if approved_step:
                     task, step = approved_step
                     grant = replace(grant, expires=task.deadline, workflow_id=task.id, workflow_step=step)

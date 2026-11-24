@@ -48,14 +48,18 @@ def authenticate(connection, path, entry, kind=ActionType.BASIC, *, method="GET"
     else:
         return failure()
 
-    headers = {"Authorization": authorization}
+    request_headers = dict(credential_headers(headers))
+    if any(name.lower() == "authorization" for name in request_headers):
+        return failure()
+    request_headers["Authorization"] = authorization
     body = None
     if request_json:
         body = request_json.encode("utf-8")
-        headers["Content-Type"] = "application/json"
+        request_headers = {key: value for key, value in request_headers.items() if key.lower() != "content-type"}
+        request_headers["Content-Type"] = "application/json"
 
     try:
-        connection.request(method, path, body=body, headers=headers)
+        connection.request(method, path, body=body, headers=request_headers)
         with connection.getresponse() as response:
             status = response.status
     except (OSError, HTTPException, ValueError):

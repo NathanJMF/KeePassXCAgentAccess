@@ -40,9 +40,9 @@ class GuestRequest:
 
 
 def parse_guest_request(data):
-    required = {"origin", "certificate_sha256", "submit", "poll", "body_type", "command_field", "job_query"}
-    if not isinstance(data, dict) or not required <= data.keys() <= required | {"login", "argument_prefix"}:
-        raise ValueError("Provide pinned submit and polling requests for the guest.")
+    required = {"origin", "submit", "poll", "body_type", "command_field", "job_query"}
+    if not isinstance(data, dict) or not required <= data.keys() <= required | {"certificate_sha256", "login", "argument_prefix"}:
+        raise ValueError("Provide submit and polling requests for the guest.")
     body_type, command_field, job_query = data["body_type"], data["command_field"], data["job_query"]
     if (body_type not in ("form", "json") or not isinstance(command_field, str) or not _FIELD.fullmatch(command_field)
             or not isinstance(job_query, str) or not _FIELD.fullmatch(job_query)):

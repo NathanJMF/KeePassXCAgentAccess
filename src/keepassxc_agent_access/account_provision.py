@@ -24,12 +24,12 @@ def parse_provision(provision, usage):
     names = {name.casefold() for name in fields.values()}
     data = parse_result_usage(usage).data
     request = data["request"]
-    if (request["method"] not in ("POST", "PUT") or "certificate_sha256" not in data
+    if (request["method"] not in ("POST", "PUT")
             or not data.get("approve_write_once")
             or ("form" if body_type == "json" else "json") in request
             or len(names) != len(fields)
             or names & {name.casefold() for name in request.get(body_type, {})}):
-        raise ValueError("Use a pinned one-time write with unassigned account body fields.")
+        raise ValueError("Use a one-time write with unassigned account body fields.")
     return {"entry": uuid_text(provision["entry"]), "body_type": body_type, "fields": dict(fields)}
 
 

@@ -20,7 +20,7 @@ from urllib.parse import quote, quote_plus, urlencode
 
 from .account_provision import parse_provision, provision_body
 from .access_settings import Destination, HTTPS_METHODS, HTTPS_WRITE_METHODS, credential_headers, request_query
-from .command_network import approved_address
+from .command_network import approved_addresses
 from .protocol import MAX_GUEST_TEXT
 
 
@@ -38,6 +38,10 @@ _REFERENCE = re.compile(r"\{\{(password|username|session\.[A-Za-z][A-Za-z0-9_]{0
 _PRIVATE_COLUMNS = frozenset(("password", "passwd", "secret", "token", "ticket", "csrfpreventiontoken",
                               "authorization", "cookie", "setcookie", "session", "apikey", "privatekey",
                               "accesstoken", "refreshtoken", "csrftoken", "credential", "credentials"))
+_PRIVATE_KEY_TOKENS = ("token", "secret", "ticket", "session", "cookie", "pass", "auth", "key")
+_TRIVIAL_VALUES = frozenset(("/", "true", "false", "null", "none", "ok"))
+_ANSI_CSI = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
+_ANSI_OSC = re.compile(r"\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)")
 
 
 def _json(value):
@@ -186,8 +190,8 @@ def parse_result_usage(data):
     if body and method not in HTTPS_WRITE_METHODS:
         raise ValueError("This resource method does not accept a body.")
     headers = dict(credential_headers(request.get("headers", {})))
-    if auth in ("basic", "bearer") and headers:
-        raise ValueError("Use template or session authentication for custom headers.")
+    if auth in ("basic", "bearer") and any(name.lower() == "authorization" for name in headers):
+        raise ValueError("Basic and Bearer requests set Authorization automatically.")
     allowed = session_refs if auth == "session" else {"password", "username"} if auth == "template" else set()
     refs = _references(headers, allowed)
     if auth == "session" and (not session_refs or not refs) or auth == "template" and "password" not in refs:
@@ -211,9 +215,8 @@ def parse_result_usage(data):
                    or re.sub(r"[_-]", "", name).lower() in _PRIVATE_COLUMNS for name in columns)
             or len(set(columns)) != len(columns)):
         raise ValueError("Choose unique noncredential scalar field names.")
-    if scalar and (method not in HTTPS_WRITE_METHODS or any(
-            re.sub(r"[_-]", "", key).lower() in _PRIVATE_COLUMNS for key in path.split("/"))):
-        raise ValueError("Only write operations may return a named scalar result from a noncredential path.")
+    if scalar and any(re.sub(r"[_-]", "", key).lower() in _PRIVATE_COLUMNS for key in path.split("/")):
+        raise ValueError("Named scalar results must come from a noncredential path.")
     result["result"] = {"path": path, **({"scalar": columns[0]} if scalar else {"columns": list(columns)})}
     canonical = _json(result)
     if len(canonical.encode("ascii")) > 4096:
@@ -293,9 +296,13 @@ def _project(document, projection, forbidden, private_number=None, *, guest_outp
                 continue
             value = row.get(field)
             if isinstance(value, str):
-                text_valid = (all(char.isprintable() or char in "\n\t\r" for char in value)
-                              if guest_output else value.isprintable())
-                if not text_valid or len(value) > (MAX_GUEST_TEXT if guest_output else 512):
+                if guest_output:
+                    value = _ANSI_OSC.sub("", value)
+                    value = _ANSI_CSI.sub("", value)
+                    value = "".join(char for char in value if char.isprintable() or char in "\n\t\r")
+                    if len(value) > MAX_GUEST_TEXT:
+                        value = value[:MAX_GUEST_TEXT - 15] + "\n...[truncated]"
+                elif not all(char.isprintable() or char in "\n\t\r" for char in value) or len(value) > 512:
                     raise ValueError("Only bounded text result fields may be returned.")
             if (type(value) not in (str, int, float, bool, type(None))
                     or isinstance(value, int) and not -(2**53) < value < 2**53
@@ -345,13 +352,19 @@ def _connection(origin, pin, deadline):
     try:
         # Resolve in a bounded helper rather than the platform's potentially
         # unbounded getaddrinfo. TLS still validates the original authority.
-        address = approved_address(target.host)
+        addresses = approved_addresses(target.host)
         def create_socket(_target, timeout, source_address=None):
-            remaining = deadline - monotonic()
-            if remaining <= 0:
-                raise TimeoutError
-            return socket.create_connection((str(address), target.port),
-                                            timeout=min(timeout, remaining), source_address=source_address)
+            last_error = None
+            for address in addresses:
+                remaining = deadline - monotonic()
+                if remaining <= 0:
+                    raise TimeoutError
+                try:
+                    return socket.create_connection((str(address), target.port),
+                                                    timeout=min(timeout, remaining), source_address=source_address)
+                except OSError as error:
+                    last_error = error
+            raise last_error
         connection._create_connection = create_socket
         connection.connect()
         if monotonic() >= deadline or connection.sock is None:
@@ -422,24 +435,45 @@ def _request_body(data, values):
     return headers, body
 
 
+def _is_private_key(key):
+    if not isinstance(key, str):
+        return False
+    normalized = re.sub(r"[_-]", "", key).lower()
+    return normalized in _PRIVATE_COLUMNS or any(word in normalized for word in _PRIVATE_KEY_TOKENS)
+
+
+def _is_secret_candidate(value, key):
+    if _is_private_key(key):
+        return True
+    if len(value) < 8:
+        return False
+    lowered = value.strip().lower()
+    if lowered in _TRIVIAL_VALUES or re.fullmatch(r"[0-9]+(?:\.[0-9]+)?", lowered):
+        return False
+    return True
+
+
 def _private_strings(document):
     result = []
     total = 0
-    def visit(value):
+    def visit(value, key=None):
         nonlocal total
         if isinstance(value, str) and value:
-            if len(value.encode("utf-8")) > 4096 or len(result) >= 128:
+            if not _is_secret_candidate(value, key):
+                return
+            encoded_len = len(value.encode("utf-8"))
+            if encoded_len > 4096 or len(result) >= 128:
                 raise ValueError("The private authentication response exceeds the limit.")
-            total += len(value.encode("utf-8"))
+            total += encoded_len
             if total > 65536:
                 raise ValueError("The private authentication response exceeds the limit.")
             result.append(value)
         elif isinstance(value, dict):
-            for item in value.values():
-                visit(item)
+            for child_key, item in value.items():
+                visit(item, child_key)
         elif isinstance(value, list):
             for item in value:
-                visit(item)
+                visit(item, key)
     visit(document)
     return result
 
@@ -510,8 +544,8 @@ def deliver_results(config, entry, dispatch, *, allow_username=False, private_re
             provision = parse_provision(provision, data)
         cached = None
         signature = None
-        if login_context and login_cache is not None and "login" in data and pin:
-            signature = _json([data["origin"], pin, data["login"], allow_username])
+        if login_context and login_cache is not None and "login" in data:
+            signature = _json([data["origin"], pin or "ca", data["login"], allow_username])
             if request["method"] == "GET" and login_context["reuse"]:
                 cached = login_cache.get(login_context["key"], signature)
         new_capture = None
@@ -539,21 +573,31 @@ def deliver_results(config, entry, dispatch, *, allow_username=False, private_re
             forbidden.extend(private_fields)
             if signature is not None:
                 new_capture = (session, private_fields)
-        headers = dict(_render(request.get("headers", {}), values))
+        raw_headers = request.get("headers", {})
+        headers = dict(_render(raw_headers, values))
+        rendered_auth_headers = [
+            headers[name] for name, template in raw_headers.items() if _REFERENCE.search(template)
+        ]
         if request["auth"] == "basic":
+            if any(name.lower() == "authorization" for name in headers):
+                raise ValueError("Basic requests set Authorization automatically.")
             if ":" in username or any(ord(char) < 32 or ord(char) == 127 for char in username + password):
                 raise ValueError("Invalid Basic credential.")
             authorization = "Basic " + b64encode((username + ":" + password).encode("utf-8")).decode("ascii")
             headers["Authorization"] = authorization
-            forbidden.extend((authorization, authorization.partition(" ")[2]))
+            rendered_auth_headers.extend((authorization, authorization.partition(" ")[2]))
         elif request["auth"] == "bearer":
+            if any(name.lower() == "authorization" for name in headers):
+                raise ValueError("Bearer requests set Authorization automatically.")
             if not re.fullmatch(r"[A-Za-z0-9._~+/-]+=*", password):
                 raise ValueError("Invalid Bearer credential.")
-            headers["Authorization"] = "Bearer " + password
+            authorization = "Bearer " + password
+            headers["Authorization"] = authorization
+            rendered_auth_headers.append(authorization)
         if any(any(ord(char) < 32 or ord(char) == 127 for char in value)
                or len(value.encode("utf-8")) > 16384 for value in headers.values()):
             raise ValueError("Invalid rendered authentication header.")
-        forbidden.extend(headers.values())
+        forbidden.extend(rendered_auth_headers)
         if provision is None:
             body_headers, body = _request_body(request, values)
         else:

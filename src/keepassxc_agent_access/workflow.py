@@ -20,8 +20,18 @@ from .result_delivery import parse_result_usage
 
 STEP = re.compile(r"[a-z][a-z0-9_-]{0,31}")
 REFERENCE = re.compile(r"\{([a-z][a-z0-9_-]{0,31})\}")
+_PATH_CAPTURE = re.compile(r"[A-Za-z0-9._:@~-]+")
 MAX_STEPS = 8
 MAX_WORKFLOWS = 16
+
+
+def _valid_capture(value):
+    if type(value) is int:
+        return 1 <= value < 2**53
+    if isinstance(value, str):
+        return (1 <= len(value) <= 128 and value.isprintable()
+                and "\0" not in value and "{{" not in value and "}}" not in value)
+    return False
 
 
 @dataclass(frozen=True)
@@ -32,7 +42,7 @@ class Step:
     capture: bool
     kind: str = "write"
     command: str | None = None
-    expected_id: int | None = None
+    expected_id: int | str | None = None
 
     def resolve(self, common, values):
         def binding(name):
@@ -54,7 +64,10 @@ class Step:
             parts = request["path"].split("/")
             for index, part in enumerate(parts):
                 if match := REFERENCE.fullmatch(part):
-                    parts[index] = str(binding(match[1]))
+                    bound = str(binding(match[1]))
+                    if not _PATH_CAPTURE.fullmatch(bound) or bound in (".", ".."):
+                        raise ValueError("Invalid captured path segment.")
+                    parts[index] = bound
                 elif "{" in part or "}" in part or "%7b" in part.lower() or "%7d" in part.lower():
                     raise ValueError("Only whole path segments may reference approved step results.")
             request["path"] = "/".join(parts)
@@ -85,9 +98,9 @@ class Step:
 
 def parse_workflow(raw):
     data = decode(encode(raw))
-    required = {"id", "vault", "entry", "origin", "certificate_sha256", "steps"}
-    if not isinstance(data, dict) or not required <= data.keys() <= required | {"login", "minutes"}:
-        raise ValueError("Provide a pinned workflow and its ordered steps.")
+    required = {"id", "vault", "entry", "origin", "steps"}
+    if not isinstance(data, dict) or not required <= data.keys() <= required | {"certificate_sha256", "login", "minutes"}:
+        raise ValueError("Provide a workflow and its ordered steps.")
     identifier, vault, entry = (uuid_text(data[key]) for key in ("id", "vault", "entry"))
     minutes = data.get("minutes", 30)
     if type(minutes) is not int or not 1 <= minutes <= 60:
@@ -113,8 +126,8 @@ def parse_workflow(raw):
         if not isinstance(name, str) or not STEP.fullmatch(name) or name in steps or type(capture) is not bool:
             raise ValueError("Use distinct names for workflow steps.")
         expected = raw_step.get("expected_id")
-        if "expected_id" in raw_step and (not capture or type(expected) is not int or not 1 <= expected < 2**53):
-            raise ValueError("Set an expected positive integer for a captured ID.")
+        if "expected_id" in raw_step and (not capture or not _valid_capture(expected)):
+            raise ValueError("Set a valid expected ID for a captured value.")
         request = raw_step["request"]
         if not isinstance(request, dict) or kind == "console" and set(request) != {"connect", "socket"}:
             raise ValueError("Provide an exact step request.")
@@ -237,13 +250,19 @@ class WorkflowAccess:
                     token = refreshed
                     matching = matching_scopes(token)
             if not matching:
+                if any((scope.vault, scope.entry) == (vault, entry) and scope.use_revision != revision
+                       and needed <= set(scope.uses) and origin in scope.origins for scope in token.scope):
+                    raise ListingError("credential_changed")
                 raise ListingError("ineligible")
             guest_operations = {"guest": "guest_run", "console": "console_open"}
-            if draft is not None:
+            pin = common.get("certificate_sha256")
+            if pin is None:
+                expected_pins, cert_trusted, auto_pin = (), True, False
+            elif draft is not None:
                 expected_pins, cert_trusted, auto_pin = (None,), False, self.workspace.scoped_auto_approval_enabled("tls_first_pin")
             else:
                 expected_pins, cert_trusted, auto_pin = grants.result_certificate_auto_pin(
-                    token, vault, entry, revision, origin, common["certificate_sha256"])
+                    token, vault, entry, revision, origin, pin)
             steps_auto = all(step.kind == "write" or (
                 self.workspace.scoped_auto_approval_enabled("guest_first_use")
                 and self.workspace.guest_auto_approval_enabled(guest_operations[step.kind]))
@@ -276,11 +295,11 @@ class WorkflowAccess:
             if key in self.active:
                 raise ListingError("receipt_exists")
             review_deadline = monotonic() + self.approvals.timeout
-            pending_pin = (origin, common["certificate_sha256"], expected_pins) if (
-                automatic and not cert_trusted and auto_pin) else None
+            pending_pin = (origin, pin, expected_pins) if (
+                pin is not None and automatic and not cert_trusted and auto_pin) else None
             workflow = Workflow(identifier, token.id, token.generation, self.workspace.generation, vault, entry,
                                 revision, session, review_deadline + 1, common, steps, {}, set(),
-                                (origin, common["certificate_sha256"]) if (automatic and cert_trusted) else None,
+                                (origin, pin) if (pin is not None and automatic and cert_trusted) else None,
                                 auto_approved=automatic, pending_pin=pending_pin)
             folder, name = entry_target_labels(session.entries, entry)
             action = "Review Workflow"
@@ -337,9 +356,14 @@ class WorkflowAccess:
                     if (row["vault"], row["entry"], row["generation"], row["revision"]) != (
                             vault, entry, token.generation, revision):
                         continue
-                    value = row["captured_id"]
-                    if (type(value) is int and 1 <= value < 2**53
-                            and (step.expected_id is None or value == step.expected_id)):
+                    if "captured_value" in row.keys() and row["captured_value"] is not None:
+                        try:
+                            value = json.loads(row["captured_value"])
+                        except ValueError:
+                            value = None
+                    else:
+                        value = row["captured_id"]
+                    if _valid_capture(value) and (step.expected_id is None or value == step.expected_id):
                         workflow.captures[name] = value
                 workflow.deadline = monotonic() + minutes * 60
                 if resume_access:
@@ -417,8 +441,7 @@ class WorkflowAccess:
         field = step.result["scalar"]
         values = result.get("data", [])
         value = values[0].get(field) if len(values) == 1 else None
-        if (type(value) is not int or not 1 <= value < 2**53
-                or step.expected_id is not None and value != step.expected_id):
+        if not _valid_capture(value) or step.expected_id is not None and value != step.expected_id:
             return {"outcome": "acknowledged", "http_status": result["http_status"]}, None
         return result, value
 

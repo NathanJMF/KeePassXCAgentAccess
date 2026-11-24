@@ -16,13 +16,43 @@ MAX_WIDTH, MAX_HEIGHT = 2048, 1536
 MAX_MESSAGE = MAX_WIDTH * MAX_HEIGHT * 4 + 65536
 MAX_PNG = 700_000
 WS_GUID = b"258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
+class ConsoleTimeoutError(TimeoutError):
+    """Raised when a console operation times out at a clean WebSocket/RFB boundary."""
+
+
 KEYS = {
     "BackSpace": 0xff08, "Tab": 0xff09, "Enter": 0xff0d, "Escape": 0xff1b,
     "Home": 0xff50, "Left": 0xff51, "Up": 0xff52, "Right": 0xff53, "Down": 0xff54,
-    "PageUp": 0xff55, "PageDown": 0xff56, "End": 0xff57, "Insert": 0xff63, "Delete": 0xffff,
+    "PageUp": 0xff55, "PageDown": 0xff56, "End": 0xff57, "Insert": 0xff63,
+    "Delete": 0xffff, "Del": 0xffff,
     **{f"F{n}": 0xffbd + n for n in range(1, 13)},
 }
+MODIFIERS = {
+    "ctrl": 0xffe3, "control": 0xffe3,
+    "alt": 0xffe9,
+    "shift": 0xffe1,
+    "super": 0xffeb, "meta": 0xffeb,
+}
 SHIFTED_US_KEYS = frozenset('~!@#$%^&*()_+{}|:"<>?')
+
+
+def _parse_key(spec):
+    if not isinstance(spec, str):
+        raise ValueError("Invalid key specification.")
+    if spec in KEYS or len(spec) == 1 and " " <= spec <= "~":
+        return (), spec
+    if "+" in spec:
+        parts = [*spec[:-2].split("+"), "+"] if spec.endswith("++") else spec.split("+")
+        mod_parts, base = parts[:-1], parts[-1]
+        if 1 <= len(mod_parts) <= 4 and all(mod_parts) and (base in KEYS or len(base) == 1 and " " <= base <= "~"):
+            mod_codes = []
+            for part in mod_parts:
+                code = MODIFIERS.get(part.lower())
+                if code is None or code in mod_codes:
+                    raise ValueError("Unsupported key modifier.")
+                mod_codes.append(code)
+            return tuple(mod_codes), base
+    raise ValueError("Unsupported key specification.")
 
 
 def _key_event(code, down):
@@ -30,14 +60,22 @@ def _key_event(code, down):
 
 
 def _key_press(key):
-    code = KEYS[key] if key in KEYS else ord(key)
-    press = _key_event(code, 1) + _key_event(code, 0)
-    # QEMU's graphical VNC console maps key symbols to physical keys.
-    # Send the Shift modifier explicitly for US-layout ASCII.
-    if len(key) == 1 and ("A" <= key <= "Z" or key in SHIFTED_US_KEYS):
-        shift = 0xffe1
-        return _key_event(shift, 1) + press + _key_event(shift, 0)
-    return press
+    mod_codes, base = _parse_key(key)
+    if not mod_codes:
+        code = KEYS[base] if base in KEYS else ord(base)
+        press = _key_event(code, 1) + _key_event(code, 0)
+        # QEMU's graphical VNC console maps key symbols to physical keys.
+        # Send the Shift modifier explicitly for US-layout ASCII.
+        if len(base) == 1 and ("A" <= base <= "Z" or base in SHIFTED_US_KEYS):
+            shift = 0xffe1
+            return _key_event(shift, 1) + press + _key_event(shift, 0)
+        return press
+    if 0xffe3 in mod_codes and 0xffe1 not in mod_codes and len(base) == 1 and "A" <= base <= "Z":
+        base = base.lower()
+    code = KEYS[base] if base in KEYS else ord(base)
+    down = b"".join(_key_event(mod, 1) for mod in mod_codes)
+    up = b"".join(_key_event(mod, 0) for mod in reversed(mod_codes))
+    return down + _key_event(code, 1) + _key_event(code, 0) + up
 
 
 def validate_inputs(events):
@@ -47,9 +85,11 @@ def validate_inputs(events):
         if not isinstance(event, dict):
             raise ValueError("Invalid console input.")
         if set(event) == {"key"}:
-            key = event["key"]
-            if isinstance(key, str) and (key in KEYS or len(key) == 1 and " " <= key <= "~"):
+            try:
+                _parse_key(event["key"])
                 continue
+            except ValueError:
+                pass
         elif set(event) == {"text"}:
             text = event["text"]
             if isinstance(text, str) and 1 <= len(text) <= 160 and all(" " <= ch <= "~" for ch in text):
@@ -262,12 +302,26 @@ class Console:
         self.rgb = bytearray(self.width * self.height * 3)
         self.previous_frame = None
 
+    def _clean_boundary(self):
+        ws = self.ws
+        return ws.remaining == 0 and not ws.fragmented and not ws.incoming
+
     def view(self, *, status_only=False):
         ws = self.ws
         ws.deadline = min(self.expires, monotonic() + 6)
-        ws.send(pack("!BBHHHH", 3, 0, 0, 0, self.width, self.height))
+        try:
+            ws.send(pack("!BBHHHH", 3, 0, 0, 0, self.width, self.height))
+        except TimeoutError:
+            if self._clean_boundary():
+                raise ConsoleTimeoutError from None
+            raise
         for _ in range(32):
-            kind = ws.read(1)[0]
+            try:
+                kind = ws.read(1)[0]
+            except TimeoutError:
+                if self._clean_boundary():
+                    raise ConsoleTimeoutError from None
+                raise
             if kind == 0:
                 self._update()
                 dimensions = {"width": self.width, "height": self.height}
@@ -327,4 +381,9 @@ class Console:
             else:
                 for key in ([event["key"]] if "key" in event else list(event["text"])):
                     data.extend(_key_press(key))
-        self.ws.send(data)
+        try:
+            self.ws.send(data)
+        except TimeoutError:
+            if self._clean_boundary():
+                raise ConsoleTimeoutError from None
+            raise

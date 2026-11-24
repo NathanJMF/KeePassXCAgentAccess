@@ -2,6 +2,7 @@
 
 from contextlib import contextmanager
 from dataclasses import dataclass
+import json
 import os
 from pathlib import Path
 import sqlite3
@@ -89,6 +90,7 @@ CREATE TABLE IF NOT EXISTS write_receipts (
     stage TEXT NOT NULL,
     http_status INTEGER,
     captured_id INTEGER,
+    captured_value TEXT,
     secondary_entry TEXT,
     PRIMARY KEY (token, id)
 );
@@ -138,6 +140,8 @@ class ActivityStore:
             receipt_columns = {column["name"] for column in db.execute("PRAGMA table_info(write_receipts)")}
             if "captured_id" not in receipt_columns:
                 db.execute("ALTER TABLE write_receipts ADD COLUMN captured_id INTEGER")
+            if "captured_value" not in receipt_columns:
+                db.execute("ALTER TABLE write_receipts ADD COLUMN captured_value TEXT")
             if "secondary_entry" not in receipt_columns:
                 db.execute("ALTER TABLE write_receipts ADD COLUMN secondary_entry TEXT")
             db.execute(
@@ -205,10 +209,19 @@ class ActivityStore:
 
     def claim_write(self, token, identifier, generation, vault, entry, revision, digest, *, secondary_entry=None):
         with self.connection() as db:
-            previous = db.execute("SELECT digest FROM write_receipts WHERE token=? AND id=?",
+            previous = db.execute("SELECT digest, stage FROM write_receipts WHERE token=? AND id=?",
                                   (token, identifier)).fetchone()
             if previous is not None:
-                return "receipt_exists" if previous["digest"] == digest else "receipt_conflict"
+                if previous["digest"] != digest:
+                    return "receipt_conflict"
+                if previous["stage"] not in ("failed", "not_sent"):
+                    return "receipt_exists"
+                db.execute("""UPDATE write_receipts
+                              SET generation=?, vault=?, entry=?, revision=?, secondary_entry=?,
+                                  stage='pending', http_status=NULL, captured_id=NULL, captured_value=NULL
+                              WHERE token=? AND id=?""",
+                           (generation, vault, entry, revision, secondary_entry, token, identifier))
+                return None
             count = db.execute("SELECT count(*) FROM write_receipts WHERE token=?", (token,)).fetchone()[0]
             if count >= WRITE_RECEIPTS_PER_TOKEN:
                 return "receipt_limit"
@@ -241,10 +254,12 @@ class ActivityStore:
             return None
 
     def advance_write(self, token, identifier, expected, stage, status=None, *, captured_id=None):
+        legacy_id = captured_id if type(captured_id) is int else None
+        serialized = json.dumps(captured_id, ensure_ascii=True, allow_nan=False) if captured_id is not None else None
         with self.connection() as db:
-            changed = db.execute("""UPDATE write_receipts SET stage=?, http_status=?, captured_id=?
+            changed = db.execute("""UPDATE write_receipts SET stage=?, http_status=?, captured_id=?, captured_value=?
                                     WHERE token=? AND id=? AND stage=?""",
-                                 (stage, status, captured_id, token, identifier, expected)).rowcount
+                                 (stage, status, legacy_id, serialized, token, identifier, expected)).rowcount
             if changed != 1:
                 raise ActivityError()
 

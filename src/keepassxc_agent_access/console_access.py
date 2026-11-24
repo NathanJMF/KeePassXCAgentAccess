@@ -152,6 +152,10 @@ class ConsoleAccess:
                         token = refreshed
                         matching = matching_scopes(token)
                 if not matching:
+                    if any((scope.vault, scope.entry) == (vault, entry) and scope.use_revision != revision
+                           and {"https_results", "https_body"} <= set(scope.uses)
+                           and origin in scope.origins for scope in token.scope):
+                        raise ListingError("credential_changed")
                     raise ListingError("ineligible")
                 if session.worker.available is False:
                     raise ListingError("ineligible")
@@ -298,7 +302,8 @@ class ConsoleAccess:
                 request["status_only"] = True
             result = session.worker.console(request, gate)
             if result.get("error"):
-                raise ListingError("console_closed" if result["error"] == "console_closed" else "console_failed")
+                code = result["error"] if result["error"] in ("console_closed", "console_timeout") else "console_failed"
+                raise ListingError(code)
             if operation == "console_open":
                 # Binding state changes under the same predicate as authorization.
                 def publish():
@@ -332,7 +337,8 @@ class ConsoleAccess:
             if operation != "console_open" and error.code in ("console_closed", "console_failed"):
                 with self.workspace.mutex:
                     self.sessions.pop(identifier, None)
-            outcome = {"declined": "Denied", "expired": "Expired", "revoked": "Revoked"}.get(error.code, "Failed")
+            outcome = {"declined": "Denied", "expired": "Expired", "revoked": "Revoked",
+                       "console_timeout": "Timed out"}.get(error.code, "Failed")
             if operation == "console_input" and dispatched:
                 outcome = "Interrupted · outcome unknown"
             self.activity.finish(event, outcome)
