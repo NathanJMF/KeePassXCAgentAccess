@@ -95,6 +95,7 @@ class ListingBroker:
             inode = None
             try:
                 config.validate()
+                self._clear_stale_socket(config.path)
                 server.bind(str(config.path))
                 info = config.path.lstat()
                 inode = (info.st_dev, info.st_ino)
@@ -151,6 +152,24 @@ class ListingBroker:
                 path.unlink()
         except OSError:
             pass
+
+    def _clear_stale_socket(self, path):
+        try:
+            info = path.lstat()
+        except FileNotFoundError:
+            return
+        if not stat.S_ISSOCK(info.st_mode) or info.st_uid != os.geteuid():
+            return
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as probe:
+            probe.settimeout(0.2)
+            try:
+                probe.connect(str(path))
+            except ConnectionRefusedError:
+                self._unlink(path, (info.st_dev, info.st_ino))
+            except OSError:
+                return
+            else:
+                raise ListingError()
 
     def _serve(self, listener):
         while True:

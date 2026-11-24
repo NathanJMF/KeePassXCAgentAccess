@@ -17,8 +17,8 @@ gi.require_version("Gtk", "3.0")
 gi.require_version("Gdk", "3.0")
 from gi.repository import Gdk, Gio, GLib, Gtk, Pango
 
-from .access_settings import (GUEST_AUTO_APPROVAL_OPTIONS, REVIEW_ACTIONS, SCOPED_AUTO_APPROVAL_OPTIONS,
-                              TOKEN_AUTO_APPROVAL_OPTIONS)
+from .access_settings import (AccessSettings, GUEST_AUTO_APPROVAL_OPTIONS, REVIEW_ACTIONS,
+                              SCOPED_AUTO_APPROVAL_OPTIONS, TOKEN_AUTO_APPROVAL_OPTIONS)
 from .activity import ActivityError, ActivityStore
 from .agent_connection import connection_socket, installed_connection
 from .approvals import ApprovalQueue
@@ -26,9 +26,9 @@ from .broker import BrokerConfig, ListingBroker
 from .desktop import DesktopSession
 from .edit_requests import EditRequests
 from .grants import Grants
-from .installation import Installation
+from .installation import Installation, administer_connection
 from .keyring import KeyringError, SystemKeyring
-from .launcher import skill_destination
+from .launcher import antigravity_mcp_snippet, antigravity_skill_destination, skill_destination
 from .legacy_tray import ACTIVE_ICON as TRAY_ACTIVE_ICON, ICON_DIRECTORY as TRAY_ICON_DIRECTORY
 from .legacy_tray import PAUSED_ICON as TRAY_PAUSED_ICON, LegacyTray
 from .owner_views import _dialog, _label, _scroll, table_time
@@ -91,6 +91,7 @@ class WorkspaceApplication(Gtk.Application):
         self.password_clipboard = None
         self.review_popups = ReviewPopups(Path(self.directory) / "desktop-notifications.json")
         self.popup_source = None
+        self._fallback_source = None
 
     def do_startup(self):
         Gtk.Application.do_startup(self)
@@ -154,11 +155,19 @@ class WorkspaceApplication(Gtk.Application):
         if self.show_window or not self.workspace or not self.workspace.registrations:
             self._present()
         else:
-            GLib.timeout_add(650, self._fallback)
+            self._schedule_fallback(1800 if self.legacy_tray else 650)
+
+    def _schedule_fallback(self, delay=650):
+        self._cancel_fallback()
+        self._fallback_source = GLib.timeout_add(delay, self._fallback)
+
+    def _cancel_fallback(self):
+        if self._fallback_source is not None:
+            GLib.source_remove(self._fallback_source)
+            self._fallback_source = None
 
     def _fallback(self):
-        if self.legacy_tray and not self.tray_connected:
-            return GLib.SOURCE_CONTINUE
+        self._fallback_source = None
         if not self.tray_connected:
             self._present()
         return GLib.SOURCE_REMOVE
@@ -385,10 +394,11 @@ class WorkspaceApplication(Gtk.Application):
         self.empty_area = area
 
     def _keyboard(self, _window, event):
-        if event.state & Gdk.ModifierType.CONTROL_MASK and event.keyval == Gdk.KEY_q:
+        modifiers = event.state & Gtk.accelerator_get_default_mod_mask()
+        if modifiers == Gdk.ModifierType.CONTROL_MASK and event.keyval in (Gdk.KEY_q, Gdk.KEY_Q):
             self._quit()
             return True
-        if (event.state & Gtk.accelerator_get_default_mod_mask() == Gdk.ModifierType.CONTROL_MASK
+        if (modifiers == Gdk.ModifierType.CONTROL_MASK
                 and event.keyval in (Gdk.KEY_f, Gdk.KEY_F)
                 and self.stack.get_visible_child_name() == "browse" and self.entry_search.get_visible()):
             self.entry_search.grab_focus()
@@ -412,7 +422,9 @@ class WorkspaceApplication(Gtk.Application):
         self.tray_connected = False
         if not self.exiting:
             self._build_appindicator()
-            if was_connected:
+            if self.indicator:
+                self._schedule_fallback(650)
+            elif was_connected or (self.window and not self.window.get_visible()):
                 self._present()
 
     def _build_appindicator(self):
@@ -440,7 +452,9 @@ class WorkspaceApplication(Gtk.Application):
 
     def _tray_status(self, _indicator, connected):
         self.tray_connected = connected
-        if not connected:
+        if connected:
+            self._cancel_fallback()
+        else:
             self._present()
 
     def _minimize(self, *_):
@@ -984,7 +998,7 @@ class WorkspaceApplication(Gtk.Application):
         button.connect("clicked", unlock)
         return controls
 
-    def unlock_record(self, record, *, parent=None, finished=None):
+    def unlock_record(self, record, *, parent=None, finished=None, skip_saved=False, reason=""):
         if not record or self.busy or self.desktop.locked or self.exiting:
             return False
         cycle = self.workspace.owner_generation
@@ -1018,8 +1032,8 @@ class WorkspaceApplication(Gtk.Application):
             self._background(lambda: self.workspace.unlock(record.id, password, save, cycle=cycle), finished=finished)
             return True
 
-        if not record.item:
-            return prompt()
+        if not record.item or skip_saved:
+            return prompt(reason)
 
         def saved_finished(completed, message):
             if not completed and message and prompt(message):
@@ -1065,13 +1079,14 @@ class WorkspaceApplication(Gtk.Application):
             for record in records:
                 if workspace.owner_generation != cycle:
                     raise UnlockCancelled
+                reason = ""
                 if record.item:
                     try:
                         workspace.unlock(record.id, cycle=cycle)
                         continue
-                    except OWNER_ERRORS:
-                        pass
-                pending.append(record)
+                    except OWNER_ERRORS as error:
+                        reason = str(error)
+                pending.append((record, reason))
             return pending
 
         def finish(pending):
@@ -1085,8 +1100,9 @@ class WorkspaceApplication(Gtk.Application):
         def unlock_next(pending):
             if workspace.owner_generation != cycle or self.desktop.locked or self.exiting:
                 return
-            for record in pending:
-                if self.unlock_record(record, finished=lambda *_: unlock_next(pending)):
+            for record, reason in pending:
+                if self.unlock_record(record, finished=lambda *_: unlock_next(pending),
+                                      skip_saved=bool(record.item), reason=reason):
                     return
 
         self._background(unlock_saved, after=finish)
@@ -1283,10 +1299,13 @@ class WorkspaceApplication(Gtk.Application):
             card.pack_start(row, False, False, 0)
 
         field("Keeper Skill", skill_destination(), "Give this file to your agent for instructions on using Keeper.")
+        if (ag_skill := antigravity_skill_destination()) is not None:
+            field("Antigravity Skill", ag_skill,
+                  "Installed automatically for Antigravity when ~/.gemini/config is present.")
         configured = installed_connection()
         if not configured or not connection_socket(os.getuid()).is_socket():
             card = self._settings_card(page)
-            card.pack_start(styled(_label("Run ./install --connect-agent once to enable the local MCP connection."),
+            card.pack_start(styled(_label("Run ./install once to enable the local MCP connection."),
                                                "keeper-settings-description"), False, False, 0)
             return
         if not self.broker or self.broker.config != configured:
@@ -1300,12 +1319,72 @@ class WorkspaceApplication(Gtk.Application):
             card.pack_start(styled(_label("The Keeper broker is unavailable. Check Broker Settings."),
                                                "keeper-settings-description"), False, False, 0)
             return
-        field("MCP Command", Installation().app / "keeper-connect",
+        command = Installation().app / "keeper-connect"
+        field("MCP Command", command,
               "Add this command as a local standard input/output MCP server in your agent client.")
+        snippet = antigravity_mcp_snippet(command)
+        json_card = self._settings_card(page)
+        json_card.pack_start(styled(_label("MCP Config JSON"), "keeper-settings-caption"), False, False, 0)
+        json_card.pack_start(styled(_label(
+            "Snippet for ~/.gemini/config/mcp_config.json or other MCP clients (configured automatically when "
+            "Antigravity is present)."
+        ), "keeper-settings-description"), False, False, 0)
+        view = Gtk.TextView(editable=False, cursor_visible=False, wrap_mode=Gtk.WrapMode.WORD_CHAR, monospace=True)
+        view.get_buffer().set_text(snippet)
+        view.get_accessible().set_name("MCP Config JSON")
+        scroll = _scroll(view)
+        scroll.set_min_content_height(110)
+        json_card.pack_start(scroll, False, False, 0)
+        copy_json = Gtk.Button(label="Copy JSON", halign=Gtk.Align.START)
+        copy_json.get_accessible().set_name("Copy MCP Config JSON")
+        copy_json.connect("clicked", lambda *_: Gtk.Clipboard.get(Gdk.SELECTION_CLIPBOARD).set_text(snippet, -1))
+        json_card.pack_start(copy_json, False, False, 0)
         if Installation().connection_update_needed():
             card = self._settings_card(page)
-            card.pack_start(styled(_label("To update the local runner, run ./install --connect-agent from your "
-                                          "trusted Keeper checkout."), "keeper-settings-description"), False, False, 0)
+            description = styled(_label(
+                "A newer local runner is available. Update the system runner installation to match Keeper."
+            ), "keeper-settings-description")
+            card.pack_start(description, False, False, 0)
+            status = styled(_label(""), "keeper-settings-description")
+            status.set_no_show_all(True)
+
+            def run_update(*_):
+                update_button.set_sensitive(False)
+                status.set_text("Updating local runner…")
+                status.show()
+
+                def work():
+                    try:
+                        administer_connection("install", self.broker.config)
+                        error = None
+                    except (*OWNER_ERRORS, ValueError) as failure:
+                        error = str(failure) or "Could not update the local runner."
+                    GLib.idle_add(finish, error)
+
+                def finish(error):
+                    if card.get_parent() is not None:
+                        if error:
+                            status.set_text(error)
+                            status.show()
+                            update_button.set_sensitive(True)
+                        elif Installation().connection_update_needed():
+                            status.set_text("Local runner updated, though an update is still reported.")
+                            status.show()
+                            update_button.set_sensitive(True)
+                        else:
+                            description.set_text("The local runner is up to date.")
+                            status.set_text("Local runner updated.")
+                            status.show()
+                            update_button.set_sensitive(False)
+                    return GLib.SOURCE_REMOVE
+
+                Thread(target=work, daemon=True).start()
+
+            update_button = styled(Gtk.Button(label="Update Local Runner…", halign=Gtk.Align.START),
+                                   "keeper-settings-save")
+            update_button.connect("clicked", run_update)
+            card.pack_start(update_button, False, False, 0)
+            card.pack_start(status, False, False, 0)
         if self.workspace.paused:
             card = self._settings_card(page)
             card.pack_start(styled(_label("Agent Access is paused. Resume it in Keeper when you are ready."),
@@ -1541,14 +1620,20 @@ class WorkspaceApplication(Gtk.Application):
         config = self.broker.config
         endpoint = Gtk.Entry(text=str(config.path) if config else "")
         uid = Gtk.Entry(text=str(config.agent_uid) if config else "")
+        status = styled(_label(""), "keeper-settings-description")
+        status.set_no_show_all(True)
+        try:
+            retention_days = self.workspace.legacy_access.read().retention_days
+        except SettingsError as error:
+            retention_days = AccessSettings().retention_days
+            status.set_text(str(error))
+            status.show()
         retention = Gtk.SpinButton.new_with_range(1, 365, 1)
-        retention.set_value(self.workspace.legacy_access.read().retention_days)
+        retention.set_value(retention_days)
         for label, widget in (("Absolute Broker Socket Path", endpoint), ("Isolated Runner Account or UID", uid),
                               ("Activity Retention (Days)", retention)):
             body.pack_start(styled(_label(label), "keeper-settings-caption"), False, False, 0)
             body.pack_start(widget, False, False, 0)
-        status = styled(_label(""), "keeper-settings-description")
-        status.set_no_show_all(True)
 
         def save(*_):
             try:
@@ -1562,14 +1647,18 @@ class WorkspaceApplication(Gtk.Application):
                 store = self.workspace.legacy_access
                 previous = store.read()
                 updated = replace(previous, endpoint=path or None, uid=peer, retention_days=retention.get_value_as_int())
+                fallback = BrokerConfig.from_environment() or installed_connection()
+                config = updated.broker_config(fallback)
                 if (updated.endpoint, updated.uid) == (previous.endpoint, previous.uid):
                     store.write(updated)
                 else:
-                    config = updated.broker_config()
                     self.workspace.pause(True, persist=False)
                     self.broker.update(lambda: store.write(updated), config)
                     if config:
                         self.broker.start()
+                if updated.endpoint is None and config is not None:
+                    endpoint.set_text(str(config.path))
+                    uid.set_text(str(config.agent_uid))
                 status.set_text("Broker settings saved.")
             except OWNER_ERRORS as error:
                 status.set_text(str(error) or "Could not save the broker settings.")
@@ -1625,6 +1714,7 @@ class WorkspaceApplication(Gtk.Application):
         return GLib.SOURCE_REMOVE
 
     def do_shutdown(self):
+        self._cancel_fallback()
         if self.password_clipboard:
             self.password_clipboard.close()
         if self.legacy_tray:
