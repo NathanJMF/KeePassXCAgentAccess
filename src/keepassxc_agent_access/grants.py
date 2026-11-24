@@ -431,19 +431,25 @@ class Grants:
         digest = verifier(credential)
         with self.workspace.mutex:
             identifier = self.credentials.get(digest)
+            stale_record = None
             if identifier:
                 record = self.records[identifier]
-                if record.workflow is not None:
-                    raise ListingError("ineligible")
-                if (record.uid != uid
-                        or (identity is not None and record.identity.strip() != identity)
-                        or (project is not None and record.project != project)):
-                    raise ListingError("ineligible")
-                if change_id:
-                    return self._request_change(record, change_id, items, attribution)
-                if record.items != items:
-                    raise ListingError("ineligible")
-                return record.status
+                if record.status in ("denied", "removed"):
+                    if record.workflow is not None or record.uid != uid or change_id is not None:
+                        raise ListingError("ineligible")
+                    stale_record = record
+                else:
+                    if record.workflow is not None:
+                        raise ListingError("ineligible")
+                    if (record.uid != uid
+                            or (identity is not None and record.identity.strip() != identity)
+                            or (project is not None and record.project != project)):
+                        raise ListingError("ineligible")
+                    if change_id:
+                        return self._request_change(record, change_id, items, attribution)
+                    if record.items != items:
+                        raise ListingError("ineligible")
+                    return record.status
             if change_id:
                 raise ListingError("ineligible")
             identity_key = identity.casefold()
@@ -451,8 +457,17 @@ class Grants:
                    for row in self.records.values()):
                 raise ListingError("identity_in_use")
             self._check_request_capacity()
+            if stale_record is not None:
+                del self.records[stale_record.id]
+                del self.credentials[digest]
             record = Grant(new_id(), digest, uid, time(), identity, project, attribution, items)
-            self._change(record, "Request token", "Pending approval")
+            try:
+                self._change(record, "Request token", "Pending approval")
+            except BaseException:
+                if stale_record is not None:
+                    self.records[stale_record.id] = stale_record
+                    self.credentials[digest] = stale_record.id
+                raise
             choices = None
             if self.workspace.token_auto_approval_enabled("auto_approve_tokens"):
                 allow_uses = self.workspace.token_auto_approval_enabled("auto_approve_token_credential_uses")

@@ -28,7 +28,7 @@ TOKEN_REQUESTS = 48
 BROKER_REQUESTS = 240
 
 
-def access_details(token):
+def access_details(token, workspace=None):
     """Project only this grant's attribution and permissions, never credentials."""
     def item(value, *, requested=False):
         result = {key: getattr(value, key) for key in
@@ -39,6 +39,12 @@ def access_details(token):
             result["origins"] = list(value.origins)
         if requested:
             result["label"] = value.label
+        elif workspace is not None:
+            reg = workspace.registrations.get(value.vault)
+            result["vault_locked"] = workspace.session(value.vault) is None
+            result["stale"] = bool(value.uses and (reg is None or value.use_revision != reg.credential_revision(value.entry)))
+            if value.result_certificates:
+                result["pinned_origins"] = sorted(origin for origin, _ in value.result_certificates)
         return result
 
     pending = token.pending_change
@@ -50,6 +56,10 @@ def access_details(token):
         "pending_change": ({"id": pending.id, "items": [item(value, requested=True) for value in pending.items]}
                            if pending else None),
     }
+    if workspace is not None:
+        result["paused"] = bool(workspace.paused)
+    if token.change and token.change.status == "denied":
+        result["last_change"] = {"id": token.change.id, "status": "denied"}
     if token.workflow:
         result["workflow"] = token.workflow[0]
     return result
@@ -201,10 +211,10 @@ class ScopedBroker:
             else:
                 raise ValueError
         except (ValueError, TypeError, KeyError, AttributeError):
-            raise ListingError("invalid_request") from None
+            raise ListingError("invalid_request", detail="Check the request version, operation, and parameter types.") from None
         if operation == "discover":
             if "credential" in payload:
-                raise ListingError("invalid_request")
+                raise ListingError("invalid_request", detail="Discovery does not accept a token credential.")
             return self._discover(uid, context, live, deliver, vault=vault, summary=payload.get("summary", False))
         credential = payload.get("credential")
         if credential is None:
@@ -213,21 +223,21 @@ class ScopedBroker:
         if isinstance(credential, str) and credential and credential in encode(
             {key: value for key, value in payload.items() if key != "credential"}
         ).decode("ascii"):
-            raise ListingError("invalid_request")
+            raise ListingError("invalid_request", detail="Do not include the token credential inside request parameters.")
 
         if operation in GUEST_OPERATIONS:
             try:
                 return self.guest_access.handle(operation, keys, payload, uid, context, live, dispatch, deliver,
                                                 approved_step=approved_step)
             except (ValueError, TypeError, KeyError, AttributeError, RecursionError):
-                raise ListingError("invalid_request") from None
+                raise ListingError("invalid_request", detail="Invalid guest command request.") from None
         if operation in WORKFLOW_OPERATIONS:
             if operation == "workflow_request":
                 try:
                     return self.workflows.propose(payload["request"], credential, uid, context, live, deliver,
                                                   enrollment=payload.get("enrollment"))
                 except (ValueError, TypeError, KeyError, AttributeError, RecursionError):
-                    raise ListingError("invalid_request") from None
+                    raise ListingError("invalid_request", detail="Invalid workflow manifest.") from None
             workflow, step_payload = self.workflows.resolve(identifier, name, payload, uid, live)
             if operation == "workflow_status":
                 return self.workflows.status(workflow, deliver)
@@ -238,7 +248,7 @@ class ScopedBroker:
                     raise ListingError("revoked")
                 token = self.grants.authenticate(credential, uid)
                 if self.edits is None or token.status != "active":
-                    raise ListingError("ineligible")
+                    raise ListingError("ineligible", detail="An active token with edit support is required.")
                 self._charge_request(token.verifier, uid, active=True)
             return encode(self.edits.submit(token, payload["request"], context, live=live))
         if operation == "write_status":
@@ -257,10 +267,10 @@ class ScopedBroker:
                 self._charge_request(token.verifier, uid, active=token.status == "active")
                 return encode(self.grants.release_entry(token, vault, entry, context))
             if operation == "access_status":
-                return encode(access_details(token) if payload.get("details") else {"status": token.status})
+                return encode(access_details(token, workspace=self.workspace) if payload.get("details") else {"status": token.status})
             if operation == "edit_status":
                 if self.edits is None:
-                    raise ListingError("ineligible")
+                    raise ListingError("ineligible", detail="Vault edit support is unavailable.")
                 return encode(self.edits.status(token, payload["id"]))
             self._charge_request(token.verifier, uid, active=token.status == "active")
             generation = self.workspace.generation
@@ -278,7 +288,7 @@ class ScopedBroker:
                 account = provision["entry"]
                 if (session is None or (chosen, account) in token.released_entries
                         or not any(row["id"] == account for row in session.entries)):
-                    raise ListingError("ineligible")
+                    raise ListingError("ineligible", detail="The target account entry is unavailable or released.")
                 account_revision = registration.credential_revision(account)
                 account_labels = entry_target_labels(session.entries, account)
             binding = registration.binding(entry, binding_id) if registration and entry and usage is None else None
@@ -291,7 +301,7 @@ class ScopedBroker:
                                                  vault_id=chosen if registration else None,
                                                  token=token.id, agent=token.identity, project=token.project)
                     self.activity.finish(denied, "Denied")
-                    raise ListingError("invalid_request") from None
+                    raise ListingError("invalid_request", detail="Invalid credential-use descriptor.") from None
                 binding = SimpleNamespace(action=action)
             review_operation = binding.action.kind.review_operation if binding else operation
             review_usage = self.workspace.requires_review(review_operation)
@@ -357,7 +367,7 @@ class ScopedBroker:
                 if standing_write:
                     if provision:
                         automatic_provision = (
-                            (certificate_trusted or auto_pin_initial)
+                            (not certificate_pin or certificate_trusted or auto_pin_initial)
                             and self.workspace.scoped_auto_approval_enabled("provision_account")
                             and any((s.vault, s.entry, s.use_revision) == (chosen, account, account_revision)
                                     and "https_body" in s.uses and origin in s.origins for s in token.scope)
@@ -391,7 +401,7 @@ class ScopedBroker:
                         scope_summary += " " + workflow["request"]["path"]
                     if receipt:
                         if not write_required:
-                            raise ListingError("invalid_request")
+                            raise ListingError("invalid_request", detail="Write receipts apply only to POST, PUT, PATCH, or DELETE requests.")
                         scope_summary += f" · Write receipt {receipt}"
                     if provision:
                         scope_summary += f" · Account entry {provision['entry']}"
@@ -458,7 +468,7 @@ class ScopedBroker:
         certificate_reservation = None
         try:
             if token.status != "active":
-                raise ListingError("ineligible")
+                raise ListingError("ineligible", detail=f"Token status is {token.status}; an active token is required.")
             with self.workspace.mutex:
                 if self.workspace.paused:
                     raise ListingError("paused")
@@ -469,22 +479,24 @@ class ScopedBroker:
                     raise ListingError("credential_changed")
                 if session is not None and write_approval_required:
                     raise ListingError("write_approval_required")
-                if session is None or (operation == "use_password" and not permitted):
-                    raise ListingError("ineligible")
+                if session is None:
+                    raise ListingError("ineligible", detail="The target vault is locked or not in this token's scope.")
+                if operation == "use_password" and not permitted:
+                    raise ListingError("ineligible", detail="This token does not permit the requested entry, action, or origin.")
             if operation == "use_password":
                 expected = binding.action.command if binding.action.is_command else None
                 if ((usage is None and command != expected)
                         or binding.action.accepts_input != (input_info is not None)):
-                    raise ListingError("ineligible")
+                    raise ListingError("ineligible", detail="The command or input artifact does not match the approved permission.")
                 if session.worker.entry(entry) is None:
-                    raise ListingError("ineligible")
+                    raise ListingError("ineligible", detail="The entry was not found in the unlocked vault.")
                 if usage is not None and binding.action.is_command:
                     # Hash only an authorized command, outside the global owner
                     # mutex. The worker rechecks this pin before execution.
                     try:
                         binding.action = usage_action(entry, usage, accepts_input=input_info is not None)
                     except (ValueError, TypeError, OSError):
-                        raise ListingError("ineligible") from None
+                        raise ListingError("ineligible", detail="The command executable is unavailable in /usr/bin.") from None
             if not guard(live):
                 raise ListingError("revoked")
             if receipt:
@@ -731,7 +743,7 @@ class ScopedBroker:
                 return effect()
 
         if not guard(live):
-            raise ListingError("ineligible")
+            raise ListingError("ineligible", detail="This write receipt is unavailable for the current token or vault state.")
         result = {"id": receipt, "status": row["stage"]}
         if row["http_status"] is not None:
             result["http_status"] = row["http_status"]
