@@ -22,7 +22,9 @@ from .access_settings import AccessStore
 from .agent_connection import installed_connection
 from .agent_setup import RUNTIME
 from .isolated_runner import broker_path, owned, subordinate_ids
-from .launcher import DESKTOP_ID, SKILL_PATH, desktop_contents, skill_destination, skill_launcher_contents
+from .launcher import (
+    DESKTOP_ID, SKILL_PATH, antigravity_skill_destination, desktop_contents, skill_destination, skill_launcher_contents,
+)
 from .settings import SettingsError, SettingsStore
 
 
@@ -272,6 +274,16 @@ class Installation:
         manage_skill = old_skill is None or (
             previous.get("skill_path") == str(skill) and previous.get("skill") == digest(old_skill)
         )
+        ag_skill = antigravity_skill_destination()
+        old_ag_skill = None
+        manage_ag_skill = False
+        if (ag_skill is not None and not ag_skill.parent.is_symlink()
+                and not ag_skill.parent.parent.is_symlink()):
+            old_ag_skill = regular_file(ag_skill) if not ag_skill.is_symlink() else b""
+            manage_ag_skill = old_ag_skill is None or (
+                previous.get("antigravity_skill_path") == str(ag_skill)
+                and previous.get("antigravity_skill") == digest(old_ag_skill)
+            )
         skill_launcher = skill.with_name("keeper-agent")
         source_skill_launcher = skill_launcher_contents(self.app / "keeper-agent")
         if skill_launcher.is_symlink():
@@ -305,6 +317,9 @@ class Installation:
         if manage_skill:
             state.update(skill_path=str(skill), skill=digest(source_skill))
             writes.append((skill, source_skill, old_skill, 0o644))
+        if manage_ag_skill:
+            state.update(antigravity_skill_path=str(ag_skill), antigravity_skill=digest(source_skill))
+            writes.append((ag_skill, source_skill, old_ag_skill, 0o644))
         state.update(skill_launcher_path=str(skill_launcher), skill_launcher=digest(source_skill_launcher))
         writes.append((skill_launcher, source_skill_launcher, old_skill_launcher, 0o755))
         if agent:
@@ -410,6 +425,10 @@ class Installation:
         for path in (skill, skill.parents[1] / SKILL_PATH):
             if state.get("skill_path") == str(path) and not path.parent.is_symlink():
                 self.remove_matching(path, state.get("skill"))
+        if ag_path_text := state.get("antigravity_skill_path"):
+            ag_path = Path(ag_path_text)
+            if not ag_path.parent.is_symlink():
+                self.remove_matching(ag_path, state.get("antigravity_skill"))
         skill_launcher = skill.with_name("keeper-agent")
         if state.get("skill_launcher_path") == str(skill_launcher) and not skill_launcher.parent.is_symlink():
             self.remove_matching(skill_launcher, state.get("skill_launcher"))

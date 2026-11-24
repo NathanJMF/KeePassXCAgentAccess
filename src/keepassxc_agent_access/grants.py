@@ -353,12 +353,14 @@ class Grants:
 
     def enroll(self, credential, uid, payload, attribution):
         try:
-            required = {"identity", "project", "items"}
-            if not isinstance(payload, dict) or not required <= payload.keys() <= required | {"change_id"}:
+            if not isinstance(payload, dict) or not {"items"} <= payload.keys() <= {"identity", "project", "items", "change_id"}:
                 raise ValueError
             change_id = uuid_text(payload["change_id"]) if "change_id" in payload else None
-            identity, project = label(payload["identity"]).strip(), label(payload["project"])
-            if not identity:
+            if change_id is None and not {"identity", "project"} <= payload.keys():
+                raise ValueError
+            identity = label(payload["identity"]).strip() if "identity" in payload else None
+            project = label(payload["project"]) if "project" in payload else None
+            if "identity" in payload and not identity:
                 raise ValueError
             data = payload["items"]
             if not isinstance(data, list) or not 0 < len(data) <= MAX_ITEMS:
@@ -369,14 +371,15 @@ class Grants:
         except (ValueError, AttributeError, TypeError):
             raise ListingError("invalid_request") from None
         digest = verifier(credential)
-        identity_key = identity.casefold()
         with self.workspace.mutex:
             identifier = self.credentials.get(digest)
             if identifier:
                 record = self.records[identifier]
                 if record.workflow is not None:
                     raise ListingError("ineligible")
-                if (record.uid, record.identity.strip(), record.project) != (uid, identity, project):
+                if (record.uid != uid
+                        or (identity is not None and record.identity.strip() != identity)
+                        or (project is not None and record.project != project)):
                     raise ListingError("ineligible")
                 if change_id:
                     return self._request_change(record, change_id, items, attribution)
@@ -385,6 +388,7 @@ class Grants:
                 return record.status
             if change_id:
                 raise ListingError("ineligible")
+            identity_key = identity.casefold()
             if any(row.status in LIVE_GRANT_STATES and row.identity.strip().casefold() == identity_key
                    for row in self.records.values()):
                 raise ListingError("identity_in_use")

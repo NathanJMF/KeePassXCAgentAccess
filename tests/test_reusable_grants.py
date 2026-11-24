@@ -147,6 +147,25 @@ class ReusableGrantTests(TestCase):
         self.assertEqual(approved.generation, original.generation + 1)
         self.assertIsNone(approved.pending_change)
 
+    def test_permission_change_allows_omitting_identity_and_project_and_rejects_mismatch(self):
+        from keepassxc_agent_access.protocol import ListingError
+
+        self.enroll(self.request())
+        self.approve()
+        change = str(uuid4())
+        self.assertEqual(self.grants.enroll(
+            self.credential, 1500,
+            {"change_id": change, "items": [self.request(uses=("https", "browser"))]},
+            Attribution(),
+        ), "pending")
+        with self.assertRaises(ListingError):
+            self.grants.enroll(
+                self.credential, 1500,
+                {"identity": "Different Identity", "change_id": str(uuid4()),
+                 "items": [self.request(uses=("https",))]},
+                Attribution(),
+            )
+
     def test_permission_text_exposes_transports_and_pinned_recipients(self):
         item = Item.parse(self.request(uses=tuple(CREDENTIAL_USES)))
         labels = dict(credential_use_labels(item))

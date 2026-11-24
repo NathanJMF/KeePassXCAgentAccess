@@ -29,6 +29,13 @@ def skill_destination():
     return documents / "Skills" / "Keeper" / SKILL_PATH.name
 
 
+def antigravity_skill_destination():
+    config = Path.home() / ".gemini" / "config"
+    if config.is_symlink() or not config.is_dir():
+        return None
+    return config / "skills" / "keeper" / "SKILL.md"
+
+
 def skill_launcher_contents(executable):
     """Bind the skill helper to its trusted installation, without shell expansion."""
     executable = str(Path(executable).absolute())

@@ -78,6 +78,45 @@ class RunnerTests(TestCase):
         self.assertEqual(list(self.profile.iterdir()), [named])
         self.assertEqual(stat.S_IMODE(named.stat().st_mode), 0o700)
 
+    def test_connection_profiles_support_per_task_profile_argument_and_persist_across_reconnects(self):
+        from hashlib import sha256
+
+        def run(*messages):
+            result = subprocess.run(
+                [RUNNER, "--socket", self.endpoint, "--project-profiles", self.profile, "--connection-profiles"],
+                input=b"".join(encode(message) for message in messages), capture_output=True, check=True, timeout=12,
+            )
+            return [decode(line) for line in result.stdout.splitlines()]
+
+        first = run(call_tool("access_status", {"profile": "conv-alpha"}))
+        second = run(call_tool("access_status", {"profile": "conv-beta"}))
+        again = run(call_tool("access_status", {"profile": "conv-alpha"}))
+        self.assertEqual([payload(r[0]) for r in (first, second, again)], [MISSING] * 3)
+        alpha_dir = self.profile / sha256(b"task:conv-alpha").hexdigest()
+        beta_dir = self.profile / sha256(b"task:conv-beta").hexdigest()
+        self.assertEqual(set(self.profile.iterdir()), {alpha_dir, beta_dir})
+        self.assertEqual(stat.S_IMODE(alpha_dir.stat().st_mode), 0o700)
+
+        invalid = run(call_tool("access_status", {"profile": "../escape"}))[0]
+        self.assertTrue(invalid["result"]["isError"])
+
+        with_meta = call_tool("access_status", {"profile": "ignored-when-meta-present"})
+        with_meta["params"]["_meta"] = {"conversationId": "host-conv-123"}
+        self.assertEqual(payload(run(with_meta)[0]), MISSING)
+        self.assertTrue((self.profile / sha256(b"host-conv-123").hexdigest()).is_dir())
+
+    def test_request_access_allows_omitting_identity_and_project_only_with_change_id(self):
+        from uuid import uuid4
+
+        change_id = str(uuid4())
+        args, data = invocation("request_access", {
+            "request": {"change_id": change_id, "items": [{"label": "Fixture", "metadata": True}]},
+        })
+        self.assertEqual(args[1:], ["access", "request", "--json"])
+        self.assertEqual(decode(data)["change_id"], change_id)
+        with self.assertRaises(ValueError):
+            invocation("request_access", {"request": {"items": [{"label": "Fixture", "metadata": True}]}})
+
     def test_workflow_registration_cannot_replace_host_identity_or_fill_empty_host_values(self):
         from unittest.mock import patch
         from uuid import uuid4
@@ -118,6 +157,7 @@ class RunnerTests(TestCase):
         self.assertEqual((result.returncode, result.stderr), (0, b""))
         self.assertEqual(replies[0]["result"]["serverInfo"]["name"], "Keeper")
         self.assertEqual(replies[0]["result"]["protocolVersion"], "2025-06-18")
+        self.assertTrue(replies[0]["result"]["instructions"])
         self.assertEqual({tool["name"] for tool in replies[1]["result"]["tools"]},
                          {"discover", "access_status", "request_access", "release_entry", "request_edit", "edit_status",
                           "list_vaults", "list_entries", "use_password", "write_status", "guest_run", "guest_status",

@@ -45,6 +45,7 @@ class InstallationTests(unittest.TestCase):
             self.installation = Installation()
         for target, options in (
             ("skill_destination", {"return_value": self.skill}),
+            ("antigravity_skill_destination", {"return_value": None}),
             ("stop_application", {}),
         ):
             patcher = patch(f"keepassxc_agent_access.installation.{target}", **options)
@@ -223,6 +224,24 @@ class InstallationTests(unittest.TestCase):
             self.assertTrue(installation.uninstall())
             manager.assert_any_call("disable", "--now", SERVICE)
         self.assertFalse(installation.unit.exists())
+
+    def test_antigravity_skill_install_preserves_custom_edits_and_uninstalls(self):
+        ag_skill = self.root / ".gemini/config/skills/keeper/SKILL.md"
+        with patch("keepassxc_agent_access.installation.antigravity_skill_destination", return_value=ag_skill):
+            self.installation.install(False)
+            self.assertTrue(ag_skill.is_file())
+            self.assertEqual(ag_skill.read_bytes(), self.skill.read_bytes())
+            self.installation.install(False)
+            self.assertTrue(self.installation.uninstall())
+            self.assertFalse(ag_skill.exists())
+
+            self.installation.install(False)
+            custom = b"Locally customized Antigravity Keeper skill"
+            ag_skill.write_bytes(custom)
+            self.installation.install(False)
+            self.assertEqual(ag_skill.read_bytes(), custom)
+            self.assertTrue(self.installation.uninstall())
+            self.assertEqual(ag_skill.read_bytes(), custom)
 
 
 if __name__ == "__main__":

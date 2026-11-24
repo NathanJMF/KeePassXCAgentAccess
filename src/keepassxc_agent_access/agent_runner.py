@@ -22,10 +22,24 @@ from .runner_token import UninitializedProfile, open_profile
 CLI = Path(__file__).resolve().parents[2] / "keepassxc-agent"
 MAX_MESSAGE = 4 * ((UPLOAD_LIMIT + 2) // 3) + REQUEST_LIMIT * 4
 PROTOCOLS = ("2025-06-18", "2025-03-26", "2024-11-05")
+PROFILE_NAME = r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}"
+CHAT_META_KEYS = ("threadId", "conversationId", "sessionId", "chatId")
+SERVER_INSTRUCTIONS = (
+    "Start with discover (with a short note) to find vault and entry UUIDs. "
+    "On shared MCP connections without automatic thread IDs (such as Antigravity), pass a stable "
+    "per-task profile (for example your conversation ID or a fresh UUID) on every Keeper tool call "
+    "so this task keeps an isolated token across reconnects. Request only needed permissions with "
+    "request_access, check approval with access_status, and use approved secrets without printing credentials."
+)
 
 
 def tool(name, description, properties=None, *, required=(), read_only=True):
     properties = dict(properties or {})
+    properties["profile"] = {
+        "type": "string",
+        "pattern": f"^{PROFILE_NAME}$",
+        "description": "Optional per-task profile ID (such as your conversation ID) on shared MCP connections. Reuse the same value across calls for this task.",
+    }
     if name not in ("access_status", "edit_status", "write_status", "guest_status", "guest_wait", "console_wait",
                     "workflow_status"):
         properties["note"] = {"type": "string", "minLength": 1, "maxLength": 180,
@@ -49,8 +63,8 @@ FIELDS = {"type": "array", "items": {"enum": list(ENTRY_FIELDS)},
 ENROLLMENT = {
     "type": "object",
     "properties": {
-        "identity": {"type": "string"},
-        "project": {"type": "string"},
+        "identity": {"type": "string", "description": "Required when creating a token; optional when updating with change_id."},
+        "project": {"type": "string", "description": "Required when creating a token; optional when updating with change_id."},
         "change_id": {**REFERENCE, "description": "A new UUID to replace this active token’s scope. Reuse it to check the change."},
         "items": {"type": "array", "minItems": 1, "items": {
             "type": "object",
@@ -72,7 +86,7 @@ ENROLLMENT = {
             "additionalProperties": False,
         }},
     },
-    "required": ["identity", "project", "items"],
+    "required": ["items"],
     "additionalProperties": False,
 }
 EDIT_REQUEST = {
@@ -243,6 +257,10 @@ def invocation(name, arguments):
         note = arguments["note"]
         if not isinstance(note, str) or not note.strip() or len(note) > 180 or not note.isprintable():
             raise ValueError
+    if "profile" in arguments:
+        profile = arguments["profile"]
+        if not isinstance(profile, str) or not re.fullmatch(PROFILE_NAME, profile):
+            raise ValueError
     usage = None
     if name == "use_password":
         if ("action" in arguments) == ("usage" in arguments):
@@ -320,6 +338,9 @@ def invocation(name, arguments):
         command.extend(f"--field={field}" for field in dict.fromkeys(fields))
     request = arguments.get("request")
     if "request" in arguments and not isinstance(request, dict):
+        raise ValueError
+    if name == "request_access" and "change_id" not in request and (
+            not isinstance(request.get("identity"), str) or not isinstance(request.get("project"), str)):
         raise ValueError
     if name == "request_edit":
         request = edit_request(request)
@@ -467,6 +488,7 @@ class AgentRunner:
                 "protocolVersion": version if version in PROTOCOLS else PROTOCOLS[0],
                 "capabilities": {"tools": {}},
                 "serverInfo": {"name": "Keeper", "version": "1"},
+                "instructions": SERVER_INSTRUCTIONS,
             }
         elif method == "ping":
             result = {}
@@ -495,7 +517,7 @@ class ProjectRunner(AgentRunner):
             if method == "keeper/profile" and "id" not in message and not self.initialized:
                 params = message.get("params")
                 name = params.get("name") if isinstance(params, dict) else None
-                if isinstance(name, str) and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}", name):
+                if isinstance(name, str) and re.fullmatch(PROFILE_NAME, name):
                     self.named_profile = self.profiles / sha256(("connection:" + name).encode("ascii")).hexdigest()
                 return None
             if method in ("initialize", "tools/call"):
@@ -504,13 +526,28 @@ class ProjectRunner(AgentRunner):
 
     def call_tool(self, params):
         metadata = params.get("_meta")
-        chat_id = metadata.get("threadId") if isinstance(metadata, dict) else None
-        if chat_id is None and self.connection_profile is not None:
-            profile = self.named_profile or self.connection_profile
-        elif isinstance(chat_id, str) and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,127}", chat_id):
+        chat_id = None
+        if isinstance(metadata, dict):
+            for key in CHAT_META_KEYS:
+                if key in metadata:
+                    chat_id = metadata[key]
+                    break
+        arguments = params.get("arguments", {})
+        requested_profile = arguments.get("profile") if isinstance(arguments, dict) else None
+        if requested_profile is not None and (
+                not isinstance(requested_profile, str) or not re.fullmatch(PROFILE_NAME, requested_profile)):
+            return tool_result("Invalid Keeper tool or arguments.", True)
+        if chat_id is not None:
+            if not isinstance(chat_id, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,127}", chat_id):
+                return tool_result("Keeper needs a valid client thread or conversation ID on this project connection.", True)
             profile = self.profiles / sha256(chat_id.encode("ascii")).hexdigest()
+        elif self.connection_profile is not None and requested_profile is not None:
+            profile = self.profiles / sha256(("task:" + requested_profile).encode("ascii")).hexdigest()
+            chat_id = requested_profile
+        elif self.connection_profile is not None:
+            profile = self.named_profile or self.connection_profile
         else:
-            return tool_result("Keeper needs the Codex thread ID on this project connection.", True)
+            return tool_result("Keeper needs the client thread or conversation ID on this project connection.", True)
         if not isinstance(params.get("name"), str) or params["name"] not in OPERATIONS:
             return tool_result("Invalid Keeper tool or arguments.", True)
         try:
