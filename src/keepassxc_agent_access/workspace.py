@@ -100,8 +100,8 @@ class Workspace:
         self.opening = {}
         self.editing = set()
         self.pending = ()
-        self.paused = True
         preferences = self.legacy_access.read()
+        self.paused = preferences.agent_paused
         self.review_usage = preferences.review_usage
         self.review_actions = preferences.review_actions - {"read_results"}
         if preferences.review_results:
@@ -486,8 +486,12 @@ class Workspace:
             self.legacy_access.write(replace(self.legacy_access.read(), **{setting: enabled}))
             setattr(self, setting, enabled)
 
-    def pause(self, paused=True):
+    def pause(self, paused=True, *, persist=True):
         with self.mutex:
+            if persist:
+                settings = self.legacy_access.read()
+                if settings.agent_paused != paused:
+                    self.legacy_access.write(replace(settings, agent_paused=paused))
             if self.paused != paused:
                 self.paused = paused
                 self.generation += 1
@@ -495,7 +499,7 @@ class Workspace:
     def lock_all(self):
         with self.mutex:
             self.owner_generation += 1
-            self.pause()
+            self.pause(True, persist=False)
             for job in self.opening.values():
                 job.set()
             sessions, self.sessions = self.sessions, {}

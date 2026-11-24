@@ -117,7 +117,9 @@ class WorkspaceApplication(Gtk.Application):
                 self.broker.start()
         except OWNER_ERRORS as error:
             self.message = str(error) or "Could not initialize the workspace."
-        if self.workspace and not self.desktop.locked:
+        if self.workspace and self.desktop.locked:
+            self.workspace.pause(True, persist=False)
+        elif self.workspace and not self.desktop.locked:
             if self.start_unlocked:
                 self._unlock_all(cleanup=True)
             elif self.workspace.pending:
@@ -1472,7 +1474,7 @@ class WorkspaceApplication(Gtk.Application):
                 store = self.workspace.legacy_access
                 updated = replace(store.read(), endpoint=path or None, uid=peer, retention_days=retention.get_value_as_int())
                 config = updated.broker_config()
-                self.workspace.pause()
+                self.workspace.pause(True, persist=False)
                 self.broker.update(lambda: store.write(updated), config)
                 if config:
                     self.broker.start()

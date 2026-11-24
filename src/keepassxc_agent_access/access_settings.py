@@ -504,6 +504,7 @@ class AccessSettings:
     review_results: bool = True
     auto_approve_guest_actions: frozenset[str] = frozenset()
     auto_approve_scoped_actions: frozenset[str] = frozenset()
+    agent_paused: bool = True
 
     def for_vault(self, identity):
         return dict(self.vaults).get(identity, VaultPolicy())
@@ -538,9 +539,11 @@ class AccessStore:
             token_auto_approval_acknowledged = data.get("token_auto_approval_acknowledged", False)
             guest_actions = data.get("auto_approve_guest_actions", [])
             scoped_actions = data.get("auto_approve_scoped_actions", [])
+            agent_paused = data.get("agent_paused", True)
             if (type(retention) is not int or not 1 <= retention <= 365 or type(review_usage) is not bool or type(review_results) is not bool
                     or type(start_unlocked) is not bool or type(auto_approve_tokens) is not bool
                     or type(auto_approve_token_changes) is not bool or type(token_auto_approval_acknowledged) is not bool
+                    or type(agent_paused) is not bool
                     or not isinstance(review_actions, list)
                     or any(not isinstance(action, str) for action in review_actions)
                     or not isinstance(guest_actions, list)
@@ -559,7 +562,8 @@ class AccessStore:
             return AccessSettings(AccessMode(data["mode"]), endpoint, uid, retention, vaults, review_usage,
                                   normalize_review_actions(review_actions), start_unlocked,
                                   auto_approve_tokens, auto_approve_token_changes, token_auto_approval_acknowledged,
-                                  review_results, frozenset(guest_actions), frozenset(scoped_actions))
+                                  review_results, frozenset(guest_actions), frozenset(scoped_actions),
+                                  agent_paused)
         except FileNotFoundError:
             return AccessSettings()
         except (OSError, AttributeError, ValueError, TypeError, KeyError):
@@ -578,6 +582,8 @@ class AccessStore:
             raise ValueError("Choose a supported scoped operation.")
         if not 1 <= settings.retention_days <= 365:
             raise ValueError("Choose a retention period between 1 and 365 days.")
+        if type(settings.agent_paused) is not bool:
+            raise ValueError("Choose whether agent access is paused.")
         write_private_json(self.path, {
             "mode": settings.mode.value,
             "review_usage": settings.review_usage,
@@ -586,6 +592,7 @@ class AccessStore:
             "auto_approve_guest_actions": sorted(settings.auto_approve_guest_actions),
             "auto_approve_scoped_actions": sorted(settings.auto_approve_scoped_actions),
             "start_unlocked": settings.start_unlocked,
+            "agent_paused": settings.agent_paused,
             "auto_approve_tokens": settings.auto_approve_tokens,
             "auto_approve_token_changes": settings.auto_approve_token_changes,
             "token_auto_approval_acknowledged": settings.token_auto_approval_acknowledged,

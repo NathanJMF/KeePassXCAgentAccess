@@ -276,6 +276,7 @@ class ScopedBrokerTests(unittest.TestCase):
         vault, other = self.vaults
         item = {"metadata": True, "entry": self.entry, "vault": vault}
         self.approve([item])
+        self.workspace.pause(True)
         store = self.workspace.legacy_access
         store.write(replace(store.read(), auto_approve_tokens=True, auto_approve_token_changes=True))
         settings = json.loads(store.path.read_text())
@@ -307,6 +308,25 @@ class ScopedBrokerTests(unittest.TestCase):
         self.assertFalse(reset.auto_approve_token_changes)
         reopened.acknowledge_token_auto_approval(True)
         self.assertEqual(self.enroll([item], 2), {"status": "pending"})
+
+    def test_workspace_remembers_agent_access_state_across_restart_and_lock_all(self):
+        fresh = Workspace(self.workspace.directory, None)
+        fresh.pause(True)
+        self.assertTrue(Workspace(self.workspace.directory, None).paused)
+
+        fresh.pause(False)
+        self.assertFalse(fresh.legacy_access.read().agent_paused)
+        reopened = Workspace(self.workspace.directory, None)
+        self.assertFalse(reopened.paused)
+
+        reopened.lock_all()
+        self.assertTrue(reopened.paused)
+        self.assertFalse(reopened.legacy_access.read().agent_paused)
+        after_lock = Workspace(self.workspace.directory, None)
+        self.assertFalse(after_lock.paused)
+
+        after_lock.pause(True)
+        self.assertTrue(Workspace(self.workspace.directory, None).paused)
 
     def test_main_auto_approve_must_be_on_for_both_token_switches(self):
         vault, other = self.vaults

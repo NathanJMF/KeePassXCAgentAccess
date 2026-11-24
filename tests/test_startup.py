@@ -1,3 +1,4 @@
+import json
 import os
 from pathlib import Path
 import subprocess
@@ -8,6 +9,7 @@ from unittest.mock import Mock, patch
 
 import gi
 
+from keepassxc_agent_access.access_settings import AccessSettings, AccessStore
 from keepassxc_agent_access.tray import Gdk, Gtk, VaultApplication
 from keepassxc_agent_access.workspace_app import WorkspaceApplication
 
@@ -89,6 +91,27 @@ raise SystemExit(app.run([]))
             app.quit.assert_called_once_with()
             with patch("keepassxc_agent_access.tray.Gtk.Application.do_shutdown"):
                 app.do_shutdown()
+
+    def test_workspace_startup_pauses_in_memory_without_overwriting_saved_state_when_desktop_locked(self):
+        from gi.repository import GLib
+
+        with TemporaryDirectory() as directory:
+            store = AccessStore(Path(directory) / "access.json")
+            store.write(AccessSettings(agent_paused=False))
+            broker = Mock(config=None)
+            with patch("keepassxc_agent_access.workspace_app.Gtk.Application.do_startup"), \
+                 patch("keepassxc_agent_access.workspace_app.Gdk.Display.get_default", return_value=Mock()), \
+                 patch("keepassxc_agent_access.workspace_app.installed_connection", return_value=None), \
+                 patch("keepassxc_agent_access.workspace_app.ListingBroker", return_value=broker), \
+                 patch.object(GLib, "timeout_add", return_value=1), \
+                 patch.object(GLib, "timeout_add_seconds", return_value=2), \
+                 patch.object(GLib, "unix_signal_add", return_value=3):
+                app = WorkspaceApplication(directory=Path(directory), keyring=Mock(),
+                                           desktop_factory=lambda *_: Mock(locked=True))
+                app.hold = Mock()
+                app.do_startup()
+                self.assertTrue(app.workspace.paused)
+                self.assertFalse(store.read().agent_paused)
 
 
 if __name__ == "__main__":
