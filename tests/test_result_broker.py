@@ -73,6 +73,26 @@ class ResultBrokerTests(unittest.TestCase):
         self.assertIn("Auto approved first certificate pin on verified dispatch", decisions)
         self.assertIn("Approved token", decisions)
 
+    def test_tls_first_pin_persists_on_auto_approved_write_and_tls_cert_repin_handles_rotation(self):
+        identifier = self.approve([self.item(("https_results", "https"))])
+        self.workspace.set_review_action("read_results", False)
+        self.workspace.set_scoped_auto_approval("tls_first_pin", True)
+        self.workspace.set_scoped_auto_approval("https_write_once", True)
+        write_req = self.request(approve_write_once=True, certificate_sha256="a" * 64, request={
+            "path": "/jobs", "auth": "bearer", "method": "POST", "json": {"task": "create"}})
+        worker = self.workspace.session(self.vaults[0]).worker
+        with patch.object(worker, "use", side_effect=self.fake_worker):
+            self.assertEqual(self.use(write_req)["outcome"], "succeeded")
+            self.assertEqual(self.grants.records[identifier].scope[0].result_certificates,
+                             (("https://api.example.test:443/", "a" * 64),))
+            with self.assertRaises(ListingError) as denied:
+                self.reviewed(lambda: self.use(self.request(certificate_sha256="b" * 64)), approve=False)
+            self.assertEqual(denied.exception.code, "declined")
+            self.workspace.set_scoped_auto_approval("tls_cert_repin", True)
+            self.assertEqual(self.use(self.request(certificate_sha256="b" * 64))["outcome"], "succeeded")
+            self.assertEqual(self.grants.records[identifier].scope[0].result_certificates,
+                             (("https://api.example.test:443/", "b" * 64),))
+
     def test_auto_approved_one_time_write_requires_existing_write_permission(self):
         self.approve([self.item()])
         self.approve([self.item(("https_results", "https"))], index=1)
@@ -283,7 +303,7 @@ class ResultBrokerTests(unittest.TestCase):
         with patch.object(worker, "use", side_effect=self.fake_worker):
             self.reviewed(lambda: self.use(workflow))
 
-    def test_permission_change_discards_remembered_certificates(self):
+    def test_permission_change_preserves_unchanged_origin_certificates_and_drops_changed_ones(self):
         from uuid import uuid4
         identifier = self.approve([self.item()])
         self.workspace.set_review_action("read_results", False)
@@ -296,8 +316,19 @@ class ResultBrokerTests(unittest.TestCase):
                         "items": [self.item()], "change_id": change_id})
             change = self.grants.records[identifier].pending_change
             self.grants.decide(identifier, [self.grants.choices(item)[0] for item in change.items], change_id=change_id)
+            self.assertEqual(self.grants.records[identifier].scope[0].result_certificates,
+                             (("https://api.example.test:443/", "a" * 64),))
+            # Unchanged origin skips cert review.
+            self.assertEqual(self.use(workflow)["outcome"], "succeeded")
+            # Changing origin clears the old origin's pin.
+            other_origin = self.item()
+            other_origin["origins"] = ["https://other.example.test/"]
+            change_id2 = str(uuid4())
+            self.invoke("request_access", request={"identity": "Fixture agent 0", "project": "Fixture",
+                        "items": [other_origin], "change_id": change_id2})
+            change2 = self.grants.records[identifier].pending_change
+            self.grants.decide(identifier, [self.grants.choices(item)[0] for item in change2.items], change_id=change_id2)
             self.assertEqual(self.grants.records[identifier].scope[0].result_certificates, ())
-            self.reviewed(lambda: self.use(workflow))
 
     def test_revocation_between_login_and_resource_send_blocks_data(self):
         identifier = self.approve([self.item(("https_results", "https_body"))])

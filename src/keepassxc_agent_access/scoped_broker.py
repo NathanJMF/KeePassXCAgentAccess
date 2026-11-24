@@ -300,61 +300,85 @@ class ScopedBroker:
             certificate_trusted = False
             certificate_committed = False
             certificate_expected = ()
+            auto_pin_initial = False
             write_once = False
             automatic_write = False
             automatic_provision = False
             write_approval_required = False
             credential_revision = registration.credential_revision(entry) if registration and entry else None
-            if binding is not None and binding.action.kind == ActionType.RESULTS:
-                # Saved actions already bind the owner's exact certificate in
-                # their reviewed action revision; dynamic uses need scope trust.
-                if usage is not None:
-                    certificate_pin = decode(binding.action.result_request.encode("utf-8")).get("certificate_sha256")
-                    write_once = usage.get("approve_write_once") is True
-                if certificate_pin:
-                    certificate_expected = self.grants.result_certificate_pins(
-                        token, chosen, entry, credential_revision, usage_origin(binding.action.url))
-                    certificate_trusted = bool(certificate_expected) and all(
-                        pin == certificate_pin for pin in certificate_expected)
-                    certificate_committed = certificate_trusted
-                review_policy = review_usage or self.workspace.requires_review("use_https")
-            remember_certificate = bool(certificate_pin and not certificate_trusted and not write_once)
             if usage is not None:
                 origin = None
                 if binding.action.kind != ActionType.STDIN:
                     origin = usage_origin(binding.action.url)
                 body_required = requires_body_permission(binding.action)
                 write_required = requires_write_permission(binding.action)
-                matching = tuple(s for s in token.scope
-                                   if (s.vault, s.entry) == (chosen, entry) and usage["type"] in s.uses
-                                   and (origin is None or origin in s.origins)
-                                   and (not body_required or "https_body" in s.uses))
-                candidates = tuple(s for s in matching if not write_required or write_once or "https" in s.uses)
+                if binding.action.kind == ActionType.RESULTS:
+                    # Saved actions already bind the owner's exact certificate in
+                    # their reviewed action revision; dynamic uses need scope trust.
+                    certificate_pin = decode(binding.action.result_request.encode("utf-8")).get("certificate_sha256")
+                    write_once = usage.get("approve_write_once") is True
+
+                def scope_matches(active_token):
+                    matched = tuple(s for s in active_token.scope
+                                    if (s.vault, s.entry) == (chosen, entry) and usage["type"] in s.uses
+                                    and (origin is None or origin in s.origins)
+                                    and (not body_required or "https_body" in s.uses))
+                    filtered = tuple(s for s in matched if not write_required or write_once or "https" in s.uses)
+                    return matched, filtered
+
+                matching, candidates = scope_matches(token)
+                permitted = registration is not None and any(
+                    s.use_revision is not None and s.use_revision == credential_revision
+                    for s in candidates)
+                credential_changed = bool(candidates) and not permitted
+                if credential_changed and registration is not None:
+                    refreshed = self.grants.refresh_rotated_credential(token.id, chosen, entry, credential_revision)
+                    if refreshed is not None:
+                        token = refreshed
+                        matching, candidates = scope_matches(token)
+                        permitted = any(s.use_revision is not None and s.use_revision == credential_revision
+                                        for s in candidates)
+                        credential_changed = bool(candidates) and not permitted
+                if provision and not any(
+                        (s.vault, s.entry, s.use_revision) == (chosen, account, account_revision)
+                        and "https_body" in s.uses and origin in s.origins for s in token.scope):
+                    refreshed_account = self.grants.refresh_rotated_credential(token.id, chosen, account, account_revision)
+                    if refreshed_account is not None:
+                        token = refreshed_account
+                        matching, candidates = scope_matches(token)
+                if binding.action.kind == ActionType.RESULTS:
+                    if certificate_pin:
+                        certificate_expected, certificate_trusted, auto_pin_initial = self.grants.result_certificate_auto_pin(
+                            token, chosen, entry, credential_revision, origin, certificate_pin)
+                        certificate_committed = certificate_trusted
+                    review_policy = review_usage or self.workspace.requires_review("use_https")
                 standing_write = (write_once and write_required and any(
                     "https" in s.uses and s.use_revision == credential_revision for s in matching))
                 if standing_write:
                     if provision:
                         automatic_provision = (
-                            certificate_trusted and self.workspace.scoped_auto_approval_enabled("provision_account")
+                            (certificate_trusted or auto_pin_initial)
+                            and self.workspace.scoped_auto_approval_enabled("provision_account")
                             and any((s.vault, s.entry, s.use_revision) == (chosen, account, account_revision)
                                     and "https_body" in s.uses and origin in s.origins for s in token.scope)
                         )
                     else:
                         automatic_write = self.workspace.scoped_auto_approval_enabled("https_write_once")
-                permitted = registration is not None and any(
-                    s.use_revision is not None and s.use_revision == credential_revision
-                    for s in candidates)
-                credential_changed = bool(candidates) and not permitted
                 write_approval_required = write_required and not write_once and not permitted and any(
                     s.use_revision is not None and s.use_revision == credential_revision for s in matching)
             else:
+                if binding is not None and binding.action.kind == ActionType.RESULTS:
+                    review_policy = review_usage or self.workspace.requires_review("use_https")
                 permitted = (
                     binding is not None and binding.action.enabled and
                     any((s.vault, s.entry, s.action, s.revision) == (chosen, entry, binding_id, binding.revision)
                         for s in token.scope)
                 )
+            remember_certificate = bool(
+                approved_step is None and certificate_pin and not certificate_trusted
+                and (not write_once or (auto_pin_initial and (automatic_write or automatic_provision))))
             review_policy = review_policy or write_once and not (automatic_write or automatic_provision)
-            review_usage = review_policy or bool(certificate_pin and not certificate_trusted)
+            review_usage = review_policy or bool(certificate_pin and not certificate_trusted and not auto_pin_initial)
             recognized = permitted or usage is not None and credential_changed
             folder, title = entry_target_labels(session.entries, entry) if recognized and session else (None, None)
             scope_summary = f"Requested entry fields · {', '.join(fields)}" if fields else None
@@ -480,17 +504,14 @@ class ScopedBroker:
                 if not guard(lambda: live(claim)):
                     raise ListingError("revoked")
                 receipt_stage = "pending"
-            if certificate_pin and not review_policy:
+            if approved_step is None and certificate_pin and not review_policy:
                 with self.workspace.mutex:
-                    certificate_expected = self.grants.result_certificate_pins(
-                        self.grants.records[token.id], chosen, entry, credential_revision, usage_origin(binding.action.url))
-                    certificate_trusted = bool(certificate_expected) and all(
-                        pin == certificate_pin for pin in certificate_expected)
+                    certificate_expected, certificate_trusted, auto_pin = self.grants.result_certificate_auto_pin(
+                        self.grants.records[token.id], chosen, entry, credential_revision,
+                        usage_origin(binding.action.url), certificate_pin)
                     certificate_committed = certificate_trusted
-                    first_pin = bool(certificate_expected) and not any(certificate_expected)
-                    auto_pin = first_pin and not provision and self.workspace.scoped_auto_approval_enabled("tls_first_pin")
                     review_usage = not certificate_trusted and not auto_pin
-                    remember_certificate = not certificate_trusted and not write_once
+                    remember_certificate = not certificate_trusted and (not write_once or auto_pin)
                     if review_usage or remember_certificate:
                         key = (token.id, token.generation, chosen, entry, credential_revision,
                                usage_origin(binding.action.url), certificate_pin)
@@ -589,6 +610,14 @@ class ScopedBroker:
                                     token.id, token.generation, chosen, entry, credential_revision,
                                     usage_origin(binding.action.url), certificate_pin, certificate_expected)
                                 certificate_committed = True
+                            elif approved_step and approved_step[0].pending_pin is not None:
+                                wf = approved_step[0]
+                                pin_origin, pin_digest, expected_pins = wf.pending_pin
+                                self.grants.trust_result_certificate(
+                                    token.id, token.generation, chosen, entry, credential_revision,
+                                    pin_origin, pin_digest, expected_pins)
+                                wf.trusted_endpoint = (pin_origin, pin_digest)
+                                wf.pending_pin = None
                             self.activity.dispatched(event)
                             dispatch_started = True
                         if receipt:

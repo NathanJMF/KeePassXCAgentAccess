@@ -200,10 +200,14 @@ class ProvisionTests(TestCase):
             grants.decide(grants.authenticate(self.credential, 123).id,
                           [grants.choices(item)[0] for item in pending.items], change_id=pending.id)
 
-            with self.assertRaises(ListingError) as untrusted:
-                self.reviewed(lambda: provision(str(uuid4())), inspect=inspect, approve=False)
-            self.assertEqual(untrusted.exception.code, "declined")
-            self.assertEqual(self.invoke("use_password", vault=vault, entry=admin, usage=read)["outcome"], "succeeded")
+            # After updating account's origin, admin's preserved pin lets provisioning
+            # auto-approve, while a changed cert without tls_cert_repin still prompts.
+            with self.assertRaises(ListingError) as changed_cert:
+                self.reviewed(
+                    lambda: self.invoke("use_password", vault=vault, entry=admin, receipt=str(uuid4()),
+                                        usage={**usage, "certificate_sha256": "b" * 64}, provision=binding),
+                    inspect=lambda ticket: self.assertIn("b" * 64, " ".join(ticket.scope)), approve=False)
+            self.assertEqual(changed_cert.exception.code, "declined")
             scoped_receipt = str(uuid4())
             response = provision(scoped_receipt)
             self.assertEqual(response["outcome"], "succeeded")

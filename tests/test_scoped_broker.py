@@ -328,6 +328,48 @@ class ScopedBrokerTests(unittest.TestCase):
         after_lock.pause(True)
         self.assertTrue(Workspace(self.workspace.directory, None).paused)
 
+    def test_credential_use_token_auto_approval_and_rotation_refresh(self):
+        vault = self.vaults[0]
+        cred_item = {"vault": vault, "entry": self.entry, "uses": ["https_results"], "origins": ["https://api.example.test/"]}
+        self.workspace.acknowledge_token_auto_approval(True)
+        self.workspace.set_token_auto_approval("auto_approve_tokens", True)
+        self.workspace.set_token_auto_approval("auto_approve_token_changes", True)
+        self.assertEqual(self.enroll([cred_item], 1), {"status": "pending"})
+
+        self.workspace.set_token_auto_approval("auto_approve_token_credential_uses", True)
+        self.assertEqual(self.enroll([cred_item], 2), {"status": "active"})
+        token_id = self.grants.credentials[self.credential_digest(2) if hasattr(self, "credential_digest") else next(
+            k for k, v in self.grants.credentials.items() if self.grants.records[v].identity == "Fixture agent 2")]
+        self.assertEqual(self.grants.records[token_id].scope[0].uses, ("https_results",))
+
+        # Rotation refresh updates use_revision and preserves pinned result certificates.
+        record = self.workspace.registrations[vault]
+        old_rev = record.credential_revision(self.entry)
+        self.grants.trust_result_certificate(
+            token_id, self.grants.records[token_id].generation, vault, self.entry, old_rev,
+            "https://api.example.test:443/", "a" * 64, (None,))
+        new_nonces = tuple((k, str(uuid4())) if k == self.entry else (k, v) for k, v in record.credential_nonces)
+        if not any(k == self.entry for k, _ in new_nonces):
+            new_nonces = (*new_nonces, (self.entry, str(uuid4())))
+        self.workspace._replace(replace(self.workspace.registrations[vault], credential_nonces=new_nonces))
+        new_rev = self.workspace.registrations[vault].credential_revision(self.entry)
+        self.assertNotEqual(old_rev, new_rev)
+        self.assertIsNone(self.grants.refresh_rotated_credential(token_id, vault, self.entry, new_rev))
+
+        self.workspace.set_token_auto_approval("auto_approve_token_rotations", True)
+        refreshed = self.grants.refresh_rotated_credential(token_id, vault, self.entry, new_rev)
+        self.assertIsNotNone(refreshed)
+        self.assertEqual(refreshed.scope[0].use_revision, new_rev)
+        self.assertEqual(refreshed.scope[0].result_certificates, (("https://api.example.test:443/", "a" * 64),))
+
+        # Disable credential uses auto-approve, bump nonce again, and verify rotation-only change_id still auto-approves.
+        self.workspace.set_token_auto_approval("auto_approve_token_credential_uses", False)
+        self.workspace.set_token_auto_approval("auto_approve_token_changes", False)
+        newest_nonces = tuple((k, str(uuid4())) if k == self.entry else (k, v) for k, v in self.workspace.registrations[vault].credential_nonces)
+        self.workspace._replace(replace(self.workspace.registrations[vault], credential_nonces=newest_nonces))
+        change = {"change_id": str(uuid4()), "items": [cred_item]}
+        self.assertEqual(self.invoke("request_access", 2, request=change), {"status": "active"})
+
     def test_main_auto_approve_must_be_on_for_both_token_switches(self):
         vault, other = self.vaults
         item = {"metadata": True, "entry": self.entry, "vault": vault}
@@ -481,11 +523,24 @@ class ScopedBrokerTests(unittest.TestCase):
             self.assertEqual(using.result(timeout=2), {"outcome": "succeeded", "http_status": 200})
 
             reading = pool.submit(self.invoke, "list_vaults")
-            next_ticket()
+            ticket = next_ticket()
+            before_gen = self.workspace.generation
             self.workspace.set_review_usage(False)
+            # Enabling auto-approve does not revoke active sessions or open dialogs;
+            # resolving the open ticket completes it once, and subsequent calls auto-approve.
+            self.assertEqual(self.workspace.generation, before_gen)
+            self.assertTrue(self.engine.approvals.resolve(ticket.id, True))
+            self.assertEqual(len(reading.result(timeout=2)["vaults"]), 1)
+
+            self.workspace.set_review_action("list_entries", True)
+            waiting = pool.submit(self.invoke, "list_entries")
+            next_ticket()
+            self.workspace.set_review_usage(True)
             with self.assertRaises(ListingError) as error:
-                reading.result(timeout=2)
+                waiting.result(timeout=2)
             self.assertEqual(error.exception.code, "revoked")
+            self.workspace.set_review_usage(False)
+            self.workspace.set_review_action("list_entries", False)
 
         self.assertFalse(Workspace(self.workspace.directory, None).review_usage)
         self.workspace.set_review_action("list_entries", True)
@@ -494,7 +549,7 @@ class ScopedBrokerTests(unittest.TestCase):
         self.assertFalse(reopened.requires_review("list_vaults"))
         self.assertEqual(len(self.invoke("list_vaults")["vaults"]), 1)
         self.assertEqual(self.enroll([item], 1), {"status": "pending"})
-        self.assertEqual(self.activity.rows(action="List entries")[0]["decision"], "Approved once")
+        self.assertIn("Approved once", {row["decision"] for row in self.activity.rows(action="List entries")})
 
     def test_identity_reserved_until_token_is_removed_or_denied(self):
         items = [{"label": "Example entry", "metadata": True}]
