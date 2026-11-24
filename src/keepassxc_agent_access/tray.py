@@ -5,11 +5,13 @@ from pathlib import Path
 import signal
 import sys
 from threading import Thread
+import traceback
 
 import gi
 
 gi.require_version("Gtk", "3.0")
-from gi.repository import Gio, GLib, Gtk
+gi.require_version("Gdk", "3.0")
+from gi.repository import Gdk, Gio, GLib, Gtk
 
 from . import APP_TITLE
 from .access import AccessEngine
@@ -125,9 +127,18 @@ class VaultApplication(Gtk.Application):
         self.tray_connected = False
         self.busy = False
         self.exiting = False
+        self.startup_failed = False
+        self.desktop = None
+        self.approval_poll = None
+        self.activity_prune = None
 
     def do_startup(self):
         Gtk.Application.do_startup(self)
+        if Gdk.Display.get_default() is None:
+            self.startup_failed = True
+            self.exiting = True
+            self.quit()
+            return
         self.hold()
         self.desktop = self.desktop_factory(self._desktop_lock, self._quit)
         try:
@@ -140,8 +151,16 @@ class VaultApplication(Gtk.Application):
             GLib.unix_signal_add(GLib.PRIORITY_DEFAULT, signum, self._quit)
 
     def do_activate(self):
+        if self.startup_failed:
+            return
         if self.window is None:
-            self._build_window()
+            try:
+                self._build_window()
+            except Exception:
+                traceback.print_exc()
+                self.startup_failed = True
+                self._quit()
+                return
             self._build_tray()
             self._refresh()
             if self.show_window or self.setup.controller.state(self._target() is not None) is VaultState.SETUP:
@@ -457,10 +476,13 @@ class VaultApplication(Gtk.Application):
         self.broker.stop()
         self.approval_ui.close()
         self.owner_views.close()
-        GLib.source_remove(self.approval_poll)
-        GLib.source_remove(self.activity_prune)
+        if self.approval_poll is not None:
+            GLib.source_remove(self.approval_poll)
+        if self.activity_prune is not None:
+            GLib.source_remove(self.activity_prune)
         self.setup.controller.lock()
-        self.desktop.close()
+        if self.desktop is not None:
+            self.desktop.close()
         Gtk.Application.do_shutdown(self)
 
 
@@ -471,4 +493,6 @@ def main():
     GLib.set_application_name(APP_TITLE)
     show_window = "--show-window" in sys.argv
     from .workspace_app import WorkspaceApplication
-    return WorkspaceApplication(show_window=show_window).run([arg for arg in sys.argv if arg != "--show-window"])
+    app = WorkspaceApplication(show_window=show_window)
+    status = app.run([arg for arg in sys.argv if arg != "--show-window"])
+    return 1 if app.startup_failed else status

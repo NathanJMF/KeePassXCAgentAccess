@@ -8,6 +8,7 @@ import pwd
 import signal
 from threading import Thread
 from time import monotonic
+import traceback
 from uuid import uuid4
 
 import gi
@@ -73,7 +74,12 @@ class WorkspaceApplication(Gtk.Application):
         self.tray_connected = False
         self.message = ""
         self.exiting = False
+        self.startup_failed = False
         self.busy = False
+        self.desktop = None
+        self.poll = None
+        self.prune = None
+        self.style = None
         self.selection = None
         self.tree_signature = None
         self.tree_open_vaults = set()
@@ -84,6 +90,11 @@ class WorkspaceApplication(Gtk.Application):
 
     def do_startup(self):
         Gtk.Application.do_startup(self)
+        if Gdk.Display.get_default() is None:
+            self.startup_failed = True
+            self.exiting = True
+            self.quit()
+            return
         self.hold()
         self.desktop = self.desktop_factory(self._desktop_lock, self._quit)
         try:
@@ -117,10 +128,18 @@ class WorkspaceApplication(Gtk.Application):
             GLib.unix_signal_add(GLib.PRIORITY_DEFAULT, signum, self._quit)
 
     def do_activate(self):
+        if self.startup_failed:
+            return
         if self.window:
             self._present()
             return
-        self._build_window()
+        try:
+            self._build_window()
+        except Exception:
+            traceback.print_exc()
+            self.startup_failed = True
+            self._quit()
+            return
         self._build_tray()
         self._refresh()
         if self.show_window or not self.workspace or not self.workspace.registrations:
@@ -1510,9 +1529,12 @@ class WorkspaceApplication(Gtk.Application):
             self.broker.stop()
         if self.workspace:
             self.workspace.lock_all()
-        self.desktop.close()
-        if self.window:
+        if self.desktop:
+            self.desktop.close()
+        if self.window and self.style:
             Gtk.StyleContext.remove_provider_for_screen(self.window.get_screen(), self.style)
-        GLib.source_remove(self.poll)
-        GLib.source_remove(self.prune)
+        if self.poll is not None:
+            GLib.source_remove(self.poll)
+        if self.prune is not None:
+            GLib.source_remove(self.prune)
         Gtk.Application.do_shutdown(self)

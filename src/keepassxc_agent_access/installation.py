@@ -83,7 +83,7 @@ def service_contents(app, uid):
     return f"""[Unit]
 Description=Keeper Agent Broker
 PartOf=graphical-session.target
-After=graphical-session-pre.target
+After=graphical-session.target
 
 [Service]
 Type=exec
@@ -94,6 +94,7 @@ Environment=KEEPASSXC_AGENT_UID={uid}
 ExecStartPre="{quoted}/keeper-run-agent" --prepare-socket
 ExecStart="{quoted}/run-tray"
 Restart=on-failure
+RestartSec=1
 
 [Install]
 WantedBy=graphical-session.target

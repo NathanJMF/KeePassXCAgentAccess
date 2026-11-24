@@ -7,12 +7,24 @@ from tempfile import TemporaryDirectory
 import unittest
 from unittest.mock import patch
 
-from keepassxc_agent_access.installation import Installation, SERVICE
+from keepassxc_agent_access.installation import Installation, SERVICE, service_contents
 from keepassxc_agent_access.agent_setup import unit_contents
 from keepassxc_agent_access.launcher import desktop_contents, skill_launcher_contents, _install_skill
 
 
 class InstallationTests(unittest.TestCase):
+    def test_agent_service_waits_for_graphical_session_and_paces_restarts(self):
+        unit = service_contents(Path("/tmp/keeper"), 100000)
+        for line in (
+            b"PartOf=graphical-session.target",
+            b"After=graphical-session.target",
+            b"Restart=on-failure",
+            b"RestartSec=1",
+            b"WantedBy=graphical-session.target",
+        ):
+            self.assertIn(line, unit)
+        self.assertNotIn(b"After=graphical-session-pre.target", unit)
+
     def test_agent_connection_uses_desktop_socket_and_protected_dedicated_service(self):
         listener, runner = unit_contents(1000, "keeper-agent-1000", Path('/run/keeper-broker-1000/broker.sock'),
                                          Path('/usr/local/lib/keeper-connect-1000'))
