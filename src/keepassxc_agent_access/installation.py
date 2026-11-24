@@ -8,6 +8,7 @@ from hashlib import sha256
 import json
 import os
 from pathlib import Path
+import pwd
 from shlex import join
 import shutil
 import signal
@@ -263,6 +264,13 @@ class Installation:
         except (OSError, ValueError):
             return True
         return False
+
+    def manages_system_connection(self):
+        try:
+            account_home = Path(pwd.getpwuid(os.getuid()).pw_dir)
+        except KeyError:
+            return False
+        return self.base.resolve() == (account_home / ".local/share/keeper").resolve()
 
     def agent_unit(self):
         try:
@@ -647,7 +655,7 @@ def main():
                     enable_agent, stop_existing=connect_agent, connect_agent=connect_agent
                 )
                 runner_updated = False
-                if connect_agent:
+                if connect_agent and installation.manages_system_connection():
                     existing_connection = installed_connection()
                     needs_admin = (
                         existing_connection is None
@@ -658,7 +666,7 @@ def main():
                         administer_connection("install", broker)
                         runner_updated = True
             print("Keeper is installed. Open Keeper from the application menu.")
-            if connect_agent:
+            if connect_agent and installation.manages_system_connection():
                 if runner_updated:
                     print("Open Keeper Settings → Connect an Agent for the skill and MCP command.")
                 else:
@@ -674,12 +682,13 @@ def main():
                     print("Open Keeper from the application menu to finish setup.")
         else:
             removed = False
+            manage_connection = installation.manages_system_connection()
             if installation.base.exists() or installation.base.is_symlink():
                 with installation.lock():
-                    if installed_connection():
+                    if manage_connection and installed_connection():
                         administer_connection("remove")
                     removed = installation.uninstall()
-            elif installed_connection():
+            elif manage_connection and installed_connection():
                 administer_connection("remove")
                 removed = True
             if removed:

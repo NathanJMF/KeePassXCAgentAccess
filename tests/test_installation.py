@@ -357,11 +357,24 @@ class InstallationTests(unittest.TestCase):
     def test_uninstall_removes_orphaned_connection_when_user_dir_missing(self):
         with patch("sys.argv", ["installation", "uninstall"]), \
              patch("keepassxc_agent_access.installation.os.geteuid", return_value=1000), \
+             patch.object(self.installation, "manages_system_connection", return_value=True), \
              patch("keepassxc_agent_access.installation.Installation", return_value=self.installation), \
              patch("keepassxc_agent_access.installation.installed_connection", return_value=object()), \
              patch("keepassxc_agent_access.installation.administer_connection") as admin:
             install_main()
         admin.assert_called_once_with("remove")
+
+    def test_isolated_xdg_uninstall_skips_system_connection_removal(self):
+        self.assertFalse(self.installation.manages_system_connection())
+        self.installation.install(False)
+        with patch("sys.argv", ["installation", "uninstall"]), \
+             patch("keepassxc_agent_access.installation.os.geteuid", return_value=1000), \
+             patch("keepassxc_agent_access.installation.Installation", return_value=self.installation), \
+             patch("keepassxc_agent_access.installation.installed_connection", return_value=object()), \
+             patch("keepassxc_agent_access.installation.administer_connection") as admin:
+            install_main()
+        admin.assert_not_called()
+        self.assertFalse(self.installation.app.exists())
 
     def test_connection_update_needed_compares_runtime_against_source(self):
         runtime = self.root / "usr/local/lib/keeper-connect-1000"
