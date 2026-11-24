@@ -17,7 +17,7 @@ from unittest.mock import Mock, patch
 from urllib.parse import parse_qs, quote
 
 from keepassxc_agent_access.result_delivery import (
-    BODY_LIMIT, ResultRequest, deliver_results, parse_result_usage,
+    BODY_LIMIT, GuestLoginCache, ResultRequest, _private_strings, _project, deliver_results, parse_result_usage,
 )
 from tls_fixture import tls_service
 
@@ -278,3 +278,66 @@ class ResultDeliveryTests(TestCase):
                 reply = deliver_results(request, site.entry, lambda: True)
             self.assertEqual(reply['outcome'], 'succeeded')
             self.assertEqual(reply['data'][1]['vmid'], site.vmid)
+
+    def test_get_scalar_basic_bearer_headers_private_strings_and_guest_output(self):
+        with inventory_service() as site:
+            # GET with result.scalar is allowed on non-private paths and custom basic/bearer headers work.
+            get_scalar = {
+                'type': 'https_results', 'origin': site.origin, 'certificate_sha256': site.pin,
+                'request': {'path': '/inventory', 'auth': 'basic', 'headers': {'Accept': 'application/json', 'X-Echo': 'running'}},
+                'result': {'path': '/data/1/status', 'scalar': 'state'},
+            }
+            reply = deliver_results(get_scalar, site.entry, lambda: True)
+            self.assertEqual(reply, {'outcome': 'succeeded', 'http_status': 200, 'data': [{'state': 'running'}]})
+            with self.assertRaises(ValueError):
+                parse_result_usage({**get_scalar, 'request': {'path': '/inventory', 'auth': 'bearer', 'headers': {'Authorization': 'x'}}})
+            with self.assertRaises(ValueError):
+                parse_result_usage({**get_scalar, 'result': {'path': '/data/ticket', 'scalar': 'state'}})
+
+            # GuestLoginCache works even without certificate_sha256 (pin=None).
+            cache = GuestLoginCache()
+            ca_req = workflow(site)
+            del ca_req['certificate_sha256']
+            with patch.dict(os.environ, SSL_CERT_FILE=str(site.certificate)):
+                ctx = {'key': 'guest-job-1', 'expires': monotonic() + 30, 'reuse': True}
+                first = deliver_results(ca_req, site.entry, lambda: True, login_context=ctx, login_cache=cache)
+                second = deliver_results(ca_req, site.entry, lambda: True, login_context=ctx, login_cache=cache)
+                self.assertEqual(first['outcome'], 'succeeded')
+                self.assertEqual(second['outcome'], 'succeeded')
+                self.assertEqual(sum(row[:2] == ('POST', '/login') for row in site.seen), 1)
+
+        # Non-guest https_results allow \n, \r, \t up to 512 chars.
+        projected = _project({'data': [{'msg': 'line1\n\tline2\r'}]}, {'path': '/data', 'columns': ['msg']}, ())
+        self.assertEqual(projected, [{'msg': 'line1\n\tline2\r'}])
+
+        # Guest output strips ANSI CSI/OSC and control chars and truncates instead of failing.
+        ansi_text = '\x1b]0;title\x07\x1b[31mhello\x1b[0m\x00\n' + ('x' * 2100)
+        guest_projected = _project({'data': [{'out': ansi_text}]}, {'path': '/data', 'columns': ['out']}, (), guest_output=True)
+        self.assertTrue(guest_projected[0]['out'].startswith('hello\n'))
+        self.assertTrue(guest_projected[0]['out'].endswith('\n...[truncated]'))
+        self.assertEqual(len(guest_projected[0]['out']), 2048)
+
+        # _private_strings ignores short/trivial non-secret strings while keeping private keys and long secrets.
+        doc = {'ok': 'ok', 'path': '/', 'flag': 'true', 'num': '12345678', 'token': 'abc',
+               'nested': {'secret_id': 's1', 'note': 'long-session-value-xyz'}}
+        self.assertEqual(_private_strings(doc), ['abc', 's1', 'long-session-value-xyz'])
+
+    def test_connection_falls_back_across_approved_addresses(self):
+        import ipaddress
+        from keepassxc_agent_access.result_delivery import _connection
+
+        attempted = []
+        with patch('keepassxc_agent_access.result_delivery.approved_addresses',
+                   return_value=(ipaddress.ip_address('2001:db8::1'), ipaddress.ip_address('127.0.0.1'))), \
+             patch('keepassxc_agent_access.result_delivery.socket.create_connection',
+                   side_effect=[OSError('unreachable'), Mock()]) as create_conn, \
+             patch('keepassxc_agent_access.result_delivery.HTTPSConnection') as https_conn:
+            conn_inst = https_conn.return_value
+            conn_inst.sock = Mock()
+            def run_connect():
+                attempted.append(conn_inst._create_connection(('example.test', 443), 2))
+            conn_inst.connect.side_effect = run_connect
+            with _connection('https://example.test/', None, monotonic() + 5):
+                pass
+        self.assertEqual([call.args[0] for call in create_conn.call_args_list],
+                         [('2001:db8::1', 443), ('127.0.0.1', 443)])

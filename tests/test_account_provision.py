@@ -218,7 +218,7 @@ class ProvisionTests(TestCase):
             decisions = {row["decision"] for row in activity.rows(action="Provision Account")}
             self.assertIn("Auto approved scoped account provisioning", decisions)
 
-    def test_field_collision_and_unpinned_writes_are_rejected(self):
+    def test_field_collision_and_unapproved_writes_are_rejected(self):
         proposed = {"entry": str(uuid4()), "body_type": "json", "fields": {"password": "password"}}
         workflow = {"type": "https_results", "origin": "https://fixture.test/", "certificate_sha256": "a" * 64,
                     "approve_write_once": True, "result": {"columns": ["status"]},
@@ -234,5 +234,7 @@ class ProvisionTests(TestCase):
         self.assertIn("--account=" + proposed["entry"], args)
         self.assertEqual(decode(body)["fields"], proposed["fields"])
         workflow.pop("certificate_sha256")
+        self.assertEqual(parse_provision(proposed, workflow), proposed)
+        workflow.pop("approve_write_once")
         with self.assertRaises(ValueError):
             parse_provision(proposed, workflow)

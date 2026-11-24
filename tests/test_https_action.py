@@ -1,3 +1,5 @@
+from io import BytesIO
+import gzip
 import os
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -9,6 +11,7 @@ from unittest.mock import MagicMock, Mock, patch
 from pykeepass import create_database
 
 from keepassxc_agent_access.access_settings import Action, ActionType
+from keepassxc_agent_access.browser_action import _HTML_LIMIT, _html
 from keepassxc_agent_access.https_action import authenticate, prepare_https
 from keepassxc_agent_access.protocol import ListingError
 from keepassxc_agent_access.vault import VaultTarget, open_vault
@@ -120,3 +123,78 @@ class HTTPSActionTests(TestCase):
                     self.assertEqual(worker.use(action("/slow"), allow), {"outcome": "failed"})
             self.assertEqual(calls, [("/check", AUTHORIZATION), ("/redirect", AUTHORIZATION),
                                     ("/slow", AUTHORIZATION)])
+
+    def test_basic_and_bearer_support_custom_headers_without_overriding_authorization(self):
+        entry = "229b7a79-bcb0-450c-a320-bfccdd672f75"
+        action = Action("custom", "Custom Headers", entry, "https://example.invalid/check",
+                        kind=ActionType.BEARER, headers=(("Accept", "application/json"), ("X-Trace", "1")))
+        self.assertEqual(action.headers, (("Accept", "application/json"), ("X-Trace", "1")))
+        for bad_headers in ((("Authorization", "Bearer override"),), (("X-Secret", "{{password}}"),)):
+            with self.subTest(bad_headers=bad_headers), self.assertRaises(ValueError):
+                Action("bad", "Bad", entry, "https://example.invalid/check",
+                       kind=ActionType.BEARER, headers=bad_headers)
+
+        connection = MagicMock()
+        connection.getresponse.return_value.__enter__.return_value.status = 200
+        self.assertEqual(authenticate(connection, "/check", SimpleNamespace(password="tok", username="user"),
+                                      ActionType.BEARER, headers=(("Accept", "application/json"),)),
+                         {"outcome": "succeeded", "http_status": 200})
+        sent_headers = connection.request.call_args.kwargs["headers"]
+        self.assertEqual(sent_headers, {"Accept": "application/json", "Authorization": "Bearer tok"})
+        self.assertEqual(authenticate(connection, "/check", SimpleNamespace(password="tok", username="user"),
+                                      ActionType.BASIC, headers=(("authorization", "Basic fake"),)),
+                         {"outcome": "failed"})
+
+    def test_browser_html_supports_gzip_and_blocks_decompression_bombs(self):
+        from email.message import EmailMessage
+
+        def make_response(payload, *, encoding=None):
+            headers = EmailMessage()
+            headers["Content-Type"] = "text/html; charset=utf-8"
+            if encoding is not None:
+                headers["Content-Encoding"] = encoding
+            stream = BytesIO(payload)
+            return SimpleNamespace(headers=headers, read=stream.read)
+
+        html = "<form id='f'>ok</form>"
+        self.assertEqual(_html(make_response(gzip.compress(html.encode("utf-8")), encoding="GZip")), html)
+        bomb = gzip.compress(b"a" * (_HTML_LIMIT + 100))
+        self.assertLess(len(bomb), _HTML_LIMIT)
+        self.assertIsNone(_html(make_response(bomb, encoding="gzip")))
+        self.assertIsNone(_html(make_response(b"not-gzip", encoding="gzip")))
+        self.assertIsNone(_html(make_response(html.encode("utf-8"), encoding="br")))
+
+    def test_browser_form_script_allows_checkbox_and_hidden_rails_pattern(self):
+        from keepassxc_agent_access.browser_document import display, inspect
+
+        cfg = {"form_id": "f", "username_field": "u", "password_field": "p"}
+        url = "https://example.test/login"
+        rails_checked = (
+            '<form id="f" method="post" action="/submit">'
+            '<input name="u" type="text"><input name="p" type="password">'
+            '<input name="rem" type="hidden" value="0">'
+            '<input name="rem" type="checkbox" value="1" checked>'
+            '<input name="opt" type="checkbox" value="yes">'
+            '<input name="agree" type="checkbox" value="on" checked>'
+            '</form>'
+        )
+        rails_unchecked = rails_checked.replace('value="1" checked', 'value="1"')
+        dup_pass = (
+            '<form id="f" method="post" action="/submit">'
+            '<input name="u" type="text"><input name="p" type="password">'
+            '<input name="p" type="checkbox" value="1">'
+            '</form>'
+        )
+        dup_hidden = (
+            '<form id="f" method="post" action="/submit">'
+            '<input name="u" type="text"><input name="p" type="password">'
+            '<input name="p" type="hidden" value="override">'
+            '</form>'
+        )
+        with patch.dict(os.environ, {}, clear=False), display():
+            self.assertEqual(inspect(rails_checked, url, cfg),
+                             {"action": "https://example.test/submit", "hidden": [["rem", "1"], ["agree", "on"]]})
+            self.assertEqual(inspect(rails_unchecked, url, cfg),
+                             {"action": "https://example.test/submit", "hidden": [["rem", "0"], ["agree", "on"]]})
+            self.assertIsNone(inspect(dup_pass, url, cfg))
+            self.assertIsNone(inspect(dup_hidden, url, cfg))

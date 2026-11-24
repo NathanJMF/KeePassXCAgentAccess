@@ -365,3 +365,88 @@ class WorkflowTests(TestCase):
         token, = self.grants.records.values()
         self.assertEqual(token.status, "pending")
         self.assertIsNone(token.workflow)
+
+    def test_unpinned_workflow_string_captures_failed_retries_and_credential_changed(self):
+        # Optional certificate_sha256 + safe string capture + path/JSON substitution + recovery.
+        manifest = {
+            "id": str(uuid4()), "vault": self.vaults[0], "entry": self.entry,
+            "origin": "https://fixtures.example.test/",
+            "steps": [
+                {"name": "create", "request": {"path": "/tasks", "method": "POST", "auth": "bearer",
+                                               "json": {"name": "synthetic"}},
+                 "result": {"path": "/data/id", "scalar": "task_id"}, "capture_id": True,
+                 "expected_id": "UPID:node1:0001"},
+                {"name": "check", "request": {"path": "/tasks/{create}/status", "method": "PUT", "auth": "bearer",
+                                              "json": {"upid": {"$from": "create"}}},
+                 "result": {"path": "/data", "columns": ["state"]}},
+            ],
+        }
+        # Unsafe path segments (e.g., containing '/' or '..') are rejected when substituted into URL path segments.
+        for bad_id in ("bad/id", "..", ".", "bad?id", True, "a{{password}}"):
+            bad = {**manifest, "id": str(uuid4()), "steps": [{**manifest["steps"][0], "expected_id": bad_id}, manifest["steps"][1]]}
+            with self.subTest(bad_id=bad_id), self.assertRaises(ValueError):
+                parse_workflow(bad)
+
+        identifier = self.approve([{"vault": manifest["vault"], "entry": manifest["entry"],
+                                    "uses": ["https_results", "https"], "origins": [manifest["origin"]]}])
+        self.workspace.set_review_action("read_results", False)
+        self.workspace.set_scoped_auto_approval("workflow", True)
+        details = self.invoke("workflow_request", request=manifest)
+        self.assertEqual(details["id"], manifest["id"])
+
+        worker = self.workspace.session(self.vaults[0]).worker
+        seen_paths = []
+        fail_next = [True]
+
+        def worker_use(action, gate, **_kwargs):
+            self.assertTrue(gate(lambda: None))
+            req = json.loads(action.result_request)["request"]
+            seen_paths.append(req["path"])
+            if req["path"] == "/tasks":
+                return {"outcome": "succeeded", "http_status": 200, "data": [{"task_id": "UPID:node1:0001"}]}
+            if fail_next[0]:
+                fail_next[0] = False
+                return {"outcome": "failed", "http_status": 500}
+            return {"outcome": "succeeded", "http_status": 200, "data": [{"state": "done"}]}
+
+        with patch.object(worker, "use", side_effect=worker_use):
+            self.assertEqual(self.run_step(manifest, "create")["data"], [{"task_id": "UPID:node1:0001"}])
+            # Failed step returns failed and can be retried with the same receipt.
+            self.assertEqual(self.run_step(manifest, "check")["outcome"], "failed")
+            self.assertEqual(self.invoke("write_status", receipt=details["receipts"]["check"])["status"], "failed")
+            self.assertEqual(self.run_step(manifest, "check")["data"], [{"state": "done"}])
+            self.assertEqual(self.invoke("write_status", receipt=details["receipts"]["check"])["status"], "succeeded")
+            # Succeeded step still refuses replay.
+            with self.assertRaises(ListingError) as dup:
+                self.run_step(manifest, "check")
+            self.assertEqual(dup.exception.code, "receipt_exists")
+        self.assertEqual(seen_paths, ["/tasks", "/tasks/UPID:node1:0001/status", "/tasks/UPID:node1:0001/status"])
+
+        # String capture persists across activity recovery & workflow re-request.
+        manifest2 = {**manifest, "id": str(uuid4()),
+                     "steps": [{k: v for k, v in manifest["steps"][0].items() if k != "expected_id"}, manifest["steps"][1]]}
+        with patch.object(worker, "use", side_effect=lambda a, g, **_k: (g(lambda: None), {"outcome": "succeeded", "http_status": 200, "data": [{"task_id": "job-abc"}]})[1]):
+            self.invoke("workflow_request", request=manifest2)
+            self.run_step(manifest2, "create")
+        self.engine.workflows = WorkflowAccess(self.engine)
+        self.activity.recover(30)
+        self.invoke("workflow_request", request=manifest2)
+        with patch.object(worker, "use", side_effect=worker_use):
+            self.assertEqual(self.run_step(manifest2, "check")["data"], [{"state": "done"}])
+        self.assertEqual(seen_paths[-1], "/tasks/job-abc/status")
+
+        # Unsafe runtime string capture fails cleanly with dependency_unavailable when bound into a URL path.
+        manifest3 = {**manifest2, "id": str(uuid4())}
+        self.invoke("workflow_request", request=manifest3)
+        with patch.object(worker, "use", side_effect=lambda a, g, **_k: (g(lambda: None), {"outcome": "succeeded", "http_status": 200, "data": [{"task_id": "bad/seg"}]})[1]):
+            self.run_step(manifest3, "create")
+        with self.assertRaises(ListingError) as dep:
+            self.run_step(manifest3, "check")
+        self.assertEqual(dep.exception.code, "dependency_unavailable")
+
+        # Credential rotation raises credential_changed instead of ineligible.
+        self.workspace._invalidate_changed_credentials(self.vaults[0], self.workspace.session(self.vaults[0]),
+            {"entry": self.entry, "username": "rotated-user", "password": None})
+        with self.assertRaises(ListingError) as changed:
+            self.invoke("workflow_request", request={**manifest, "id": str(uuid4())})
+        self.assertEqual(changed.exception.code, "credential_changed")

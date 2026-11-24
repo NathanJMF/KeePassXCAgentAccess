@@ -17,7 +17,7 @@ from threading import Event, Thread
 from time import monotonic
 from types import SimpleNamespace
 from unittest import TestCase
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 from urllib.parse import parse_qs, urlsplit
 
 from Cryptodome.Cipher import DES
@@ -493,6 +493,82 @@ class ConsoleReuseTests(TestCase):
             self.assertEqual(error.exception.code, "invalid_request")
         self.workspace.set_review_usage(True)
         self.assertFalse(self.workspace.guest_auto_approval_enabled("console_open"))
+
+    def test_modifier_key_combos_and_console_timeout_handling(self):
+        from keepassxc_agent_access.console_transport import Console, ConsoleTimeoutError, _key_press, validate_inputs
+        from keepassxc_agent_access import vault_worker
+
+        combos = [{"key": "Ctrl+c"}, {"key": "Ctrl+C"}, {"key": "Ctrl+Shift+C"},
+                  {"key": "Ctrl+Alt+Del"}, {"key": "Ctrl+Alt+Delete"}, {"key": "Alt+F4"}, {"key": "Shift+Tab"}]
+        self.assertEqual(validate_inputs(combos), combos)
+        for bad in ([{"key": "Ctrl+"}], [{"key": "Ctrl+Ctrl+c"}], [{"key": "Unknown+c"}], [{"key": "Ctrl+Enter+c"}]):
+            with self.subTest(bad=bad), self.assertRaises(ValueError):
+                validate_inputs(bad)
+
+        def unpack_events(raw):
+            return [unpack("!BBHI", raw[i:i + 8]) for i in range(0, len(raw), 8)]
+
+        self.assertEqual(unpack_events(_key_press("Ctrl+C")),
+                         [(4, 1, 0, 0xffe3), (4, 1, 0, ord("c")), (4, 0, 0, ord("c")), (4, 0, 0, 0xffe3)])
+        self.assertEqual(unpack_events(_key_press("Ctrl+Shift+C")),
+                         [(4, 1, 0, 0xffe3), (4, 1, 0, 0xffe1), (4, 1, 0, ord("C")),
+                          (4, 0, 0, ord("C")), (4, 0, 0, 0xffe1), (4, 0, 0, 0xffe3)])
+        self.assertEqual(unpack_events(_key_press("Ctrl+Alt+Del")),
+                         [(4, 1, 0, 0xffe3), (4, 1, 0, 0xffe9), (4, 1, 0, 0xffff),
+                          (4, 0, 0, 0xffff), (4, 0, 0, 0xffe9), (4, 0, 0, 0xffe3)])
+
+        # Clean boundary TimeoutError raises ConsoleTimeoutError without closing; mid-frame raises TimeoutError.
+        console = Console.__new__(Console)
+        console.expires = monotonic() + 30
+        console.width, console.height = 8, 4
+        console.rgb = bytearray(8 * 4 * 3)
+        console.previous_frame = None
+        console.ws = SimpleNamespace(remaining=0, fragmented=False, incoming=bytearray(),
+                                     send=Mock(), read=Mock(side_effect=TimeoutError))
+        with self.assertRaises(ConsoleTimeoutError):
+            console.view()
+        console.ws.remaining = 2
+        with self.assertRaises(TimeoutError) as err:
+            console.view()
+        self.assertNotIsInstance(err.exception, ConsoleTimeoutError)
+
+        console.ws = SimpleNamespace(remaining=0, fragmented=False, incoming=bytearray(),
+                                     send=Mock(side_effect=TimeoutError))
+        with self.assertRaises(ConsoleTimeoutError):
+            console.input([{"key": "Enter"}])
+
+        # Worker preserves console handle across ConsoleTimeoutError.
+        fake_console = SimpleNamespace(expires=monotonic() + 30, view=Mock(side_effect=ConsoleTimeoutError), close=Mock())
+        consoles_map = {"c1": fake_console}
+        with patch.object(vault_worker, "reply"), \
+             patch("keepassxc_agent_access.vault_worker.sys.stdin") as fake_stdin:
+            fake_stdin.buffer.readline.return_value = b"dispatch\n"
+            res = vault_worker.use_console(consoles_map, {"operation": "console_view", "console": "c1", "entry": "e1"},
+                                           SimpleNamespace(password="pw"))
+        self.assertEqual(res, {"error": "console_timeout"})
+        self.assertIn("c1", consoles_map)
+        fake_console.close.assert_not_called()
+
+        # ConsoleAccess keeps session open on console_timeout and raises credential_changed on rotated cred.
+        vault = self.vaults[0]
+        self.setup_token()
+        worker = self.workspace.session(vault).worker
+        with patch.object(worker, "console", side_effect=self.worker_exchange, create=True):
+            opened = self.reviewed(self.open)
+        cid = opened["console"]
+        with patch.object(worker, "console", side_effect=lambda _req, gate: gate(lambda: None) and {"error": "console_timeout"}, create=True):
+            with self.assertRaises(ListingError) as err:
+                self.invoke("console_view", console=cid)
+            self.assertEqual(err.exception.code, "console_timeout")
+        self.assertIn(cid, self.engine.console_access.sessions)
+        with patch.object(worker, "console", side_effect=self.worker_exchange, create=True):
+            self.close(opened)
+
+        self.workspace._invalidate_changed_credentials(vault, self.workspace.session(vault),
+            {"entry": self.entry, "username": "rotated-user", "password": None})
+        with self.assertRaises(ListingError) as err:
+            self.open()
+        self.assertEqual(err.exception.code, "credential_changed")
 
 
 if __name__ == "__main__":

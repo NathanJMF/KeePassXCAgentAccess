@@ -262,3 +262,33 @@ class GuestTests(TestCase):
                                                "workflow": workflow(), "guest_command": "status", "reuse_minutes": 6})
         self.assertIn("--receipt=" + receipt, args)
         self.assertEqual(decode(body)["command"], "status")
+
+    def test_optional_certificate_sha256_and_credential_changed_detection(self):
+        descriptor = workflow()
+        del descriptor["certificate_sha256"]
+        parsed = parse_guest_request(descriptor)
+        self.assertNotIn("certificate_sha256", parsed.submit.data)
+
+        vault = self.vaults[0]
+        identifier = self.approve([{"vault": vault, "entry": self.entry, "uses": ["https_results", "https_body", "https"],
+                                    "origins": [descriptor["origin"]]}])
+        self.workspace.set_review_action("read_results", False)
+        self.workspace.set_guest_auto_approval("guest_run", True)
+        self.workspace.set_scoped_auto_approval("guest_first_use", True)
+
+        def worker_use(_action, gate, **_kwargs):
+            self.assertTrue(gate(lambda: None))
+            return {"outcome": "succeeded", "http_status": 200, "data": [{"job_id": 22}]}
+
+        worker = self.workspace.session(vault).worker
+        with patch.object(worker, "use", side_effect=worker_use):
+            approved = self.run_guest(workflow=descriptor, reuse_minutes=3)
+            self.assertGreater(approved["reuse_expires_in"], 0)
+        self.assertEqual(self.grants.records[identifier].scope[0].result_certificates, ())
+
+        session = self.workspace.session(vault)
+        self.workspace._invalidate_changed_credentials(vault, session,
+            {"entry": self.entry, "username": "rotated-user", "password": None})
+        with self.assertRaises(ListingError) as err:
+            self.run_guest(workflow=descriptor)
+        self.assertEqual(err.exception.code, "credential_changed")
