@@ -413,6 +413,28 @@ class ConsoleReuseTests(TestCase):
             self.close(handle)
         self.assertIn("Auto approved scoped console", {r["decision"] for r in self.activity.rows()})
 
+    def test_console_open_supports_tls_first_pin_and_ca_trusted_reuse(self):
+        vault = self.vaults[0]
+        origin = "https://console.test/"
+        identifier = self.approve([{"vault": vault, "entry": self.entry,
+                                    "uses": ["https_results", "https_body", "https"], "origins": [origin]}])
+        self.workspace.set_review_action("read_results", False)
+        self.workspace.set_guest_auto_approval("console_open", True)
+        self.workspace.set_scoped_auto_approval("guest_first_use", True)
+        self.workspace.set_scoped_auto_approval("tls_first_pin", True)
+        worker = self.workspace.session(vault).worker
+        with patch.object(worker, "console", side_effect=self.worker_exchange, create=True):
+            pinned = self.open(reuse_minutes=2)
+            self.assertGreater(pinned["reuse_expires_in"], 0)
+            self.close(pinned)
+            self.assertEqual(self.grants.records[identifier].scope[0].result_certificates,
+                             (("https://console.test:443/", "a" * 64),))
+
+            ca_request = {k: v for k, v in descriptor(origin, "a" * 64).items() if k != "certificate_sha256"}
+            ca_handle = self.open(request=ca_request, reuse_minutes=2)
+            self.assertGreater(ca_handle["reuse_expires_in"], 0)
+            self.close(ca_handle)
+
     def test_reconnect_requires_exact_live_permission_and_does_not_extend_it(self):
         self.setup_token()
         self.setup_token(index=1)

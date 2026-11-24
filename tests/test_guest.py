@@ -75,6 +75,28 @@ class GuestTests(TestCase):
             send.assert_called_once()
         self.assertIn("Auto approved scoped guest command", {r["decision"] for r in self.activity.rows()})
 
+    def test_guest_command_honors_tls_first_pin_and_persists_pin(self):
+        descriptor = workflow()
+        self.scope(descriptor["origin"])
+        vault = self.vaults[0]
+        identifier = self.approve([{"vault": vault, "entry": self.entry, "uses": ["https_results", "https"],
+                                    "origins": [descriptor["origin"]]}], index=1)
+        self.workspace.set_review_action("read_results", False)
+        self.workspace.set_guest_auto_approval("guest_run", True)
+        self.workspace.set_scoped_auto_approval("guest_first_use", True)
+        self.workspace.set_scoped_auto_approval("tls_first_pin", True)
+
+        def worker_use(_action, gate, **_kwargs):
+            self.assertTrue(gate(lambda: None))
+            return {"outcome": "succeeded", "http_status": 200, "data": [{"job_id": 14}]}
+
+        worker = self.workspace.session(vault).worker
+        with patch.object(worker, "use", side_effect=worker_use):
+            approved = self.run_guest(index=1, reuse_minutes=3)
+            self.assertGreater(approved["reuse_expires_in"], 0)
+        self.assertEqual(self.grants.records[identifier].scope[0].result_certificates,
+                         (("https://guest.example.test:443/", descriptor["certificate_sha256"]),))
+
     def test_reuse_is_explicit_exact_and_job_polling_needs_no_second_review(self):
         origin = "https://guest.example.test/"
         self.scope(origin)

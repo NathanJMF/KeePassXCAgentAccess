@@ -154,10 +154,12 @@ class Workflow:
     captures: dict
     opened: set
     trusted_endpoint: tuple[str, str] | None = None
+    auto_approved: bool = False
+    pending_pin: tuple[str, str, tuple] | None = None
 
     @property
     def step_authorization(self):
-        return "Auto approved workflow step" if self.trusted_endpoint else "Approved in workflow review"
+        return "Auto approved workflow step" if (self.trusted_endpoint or self.auto_approved) else "Approved in workflow review"
 
 
 class WorkflowAccess:
@@ -222,21 +224,46 @@ class WorkflowAccess:
             if token.workflow and token.workflow != (identifier, digest):
                 raise ListingError("receipt_conflict")
             revision = registration.credential_revision(entry)
-            matching = tuple(scope for scope in token.scope
+
+            def matching_scopes(active_token):
+                return tuple(scope for scope in active_token.scope
                              if (scope.vault, scope.entry, scope.use_revision) == (vault, entry, revision)
                              and needed <= set(scope.uses) and origin in scope.origins)
+
+            matching = matching_scopes(token)
+            if not matching and draft is None:
+                refreshed = grants.refresh_rotated_credential(token.id, vault, entry, revision)
+                if refreshed is not None:
+                    token = refreshed
+                    matching = matching_scopes(token)
             if not matching:
                 raise ListingError("ineligible")
             guest_operations = {"guest": "guest_run", "console": "console_open"}
-            automatic = (
-                draft is None and token.workflow is None and any("https" in scope.uses for scope in matching)
-                and self.workspace.scoped_auto_approval_enabled("workflow")
-                and grants.result_certificate_trusted(token, vault, entry, revision, origin, common["certificate_sha256"])
-                and all(step.kind == "write" or (
-                    self.workspace.scoped_auto_approval_enabled("guest_first_use")
-                    and self.workspace.guest_auto_approval_enabled(guest_operations[step.kind]))
-                        for step in steps.values())
-            )
+            if draft is not None:
+                expected_pins, cert_trusted, auto_pin = (None,), False, self.workspace.scoped_auto_approval_enabled("tls_first_pin")
+            else:
+                expected_pins, cert_trusted, auto_pin = grants.result_certificate_auto_pin(
+                    token, vault, entry, revision, origin, common["certificate_sha256"])
+            steps_auto = all(step.kind == "write" or (
+                self.workspace.scoped_auto_approval_enabled("guest_first_use")
+                and self.workspace.guest_auto_approval_enabled(guest_operations[step.kind]))
+                             for step in steps.values())
+            if draft is None and token.workflow is None:
+                automatic = (
+                    any("https" in scope.uses for scope in matching)
+                    and self.workspace.scoped_auto_approval_enabled("workflow")
+                    and (cert_trusted or auto_pin)
+                    and steps_auto
+                )
+            else:
+                automatic = (
+                    not self.workspace.paused
+                    and self.workspace.token_auto_approval_enabled("auto_approve_tokens")
+                    and self.workspace.token_auto_approval_enabled("auto_approve_token_credential_uses")
+                    and self.workspace.scoped_auto_approval_enabled("workflow")
+                    and (cert_trusted or auto_pin)
+                    and steps_auto
+                )
             self.active = {key: value for key, value in self.active.items() if self.current(value)}
             key = (token.id, identifier)
             pending_key = (hashed, None if draft else identifier)
@@ -249,9 +276,12 @@ class WorkflowAccess:
             if key in self.active:
                 raise ListingError("receipt_exists")
             review_deadline = monotonic() + self.approvals.timeout
+            pending_pin = (origin, common["certificate_sha256"], expected_pins) if (
+                automatic and not cert_trusted and auto_pin) else None
             workflow = Workflow(identifier, token.id, token.generation, self.workspace.generation, vault, entry,
                                 revision, session, review_deadline + 1, common, steps, {}, set(),
-                                (origin, common["certificate_sha256"]) if automatic else None)
+                                (origin, common["certificate_sha256"]) if (automatic and cert_trusted) else None,
+                                auto_approved=automatic, pending_pin=pending_pin)
             folder, name = entry_target_labels(session.entries, entry)
             action = "Review Workflow"
             event = self.activity.begin(uid, context, action, origin, entry, vault=registration.name, vault_id=vault,

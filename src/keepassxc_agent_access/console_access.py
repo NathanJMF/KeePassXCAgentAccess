@@ -102,8 +102,7 @@ class ConsoleAccess:
                 descriptor = parse_console(payload["request"])
                 if "reuse_minutes" in keys:
                     requested_minutes = payload["reuse_minutes"]
-                    if (type(requested_minutes) is not int or not 1 <= requested_minutes <= MAX_CONSOLE_REUSE_MINUTES
-                            or "certificate_sha256" not in descriptor):
+                    if type(requested_minutes) is not int or not 1 <= requested_minutes <= MAX_CONSOLE_REUSE_MINUTES:
                         raise ValueError
             elif operation in CONSOLE_OPERATIONS - {"console_open"}:
                 expected = {"console", "events"} if operation == "console_input" else {"console"}
@@ -123,6 +122,7 @@ class ConsoleAccess:
 
         with self.workspace.mutex:
             auto_open = False
+            pending_pin = None
             if not live():
                 raise ListingError("revoked")
             if self.workspace.paused:
@@ -139,9 +139,18 @@ class ConsoleAccess:
                     raise ListingError("ineligible")
                 revision = registration.credential_revision(entry)
                 origin = descriptor["origin"]
-                matching = tuple(scope for scope in token.scope
+
+                def matching_scopes(active_token):
+                    return tuple(scope for scope in active_token.scope
                                  if (scope.vault, scope.entry, scope.use_revision) == (vault, entry, revision)
                                  and {"https_results", "https_body"} <= set(scope.uses) and origin in scope.origins)
+
+                matching = matching_scopes(token)
+                if not matching:
+                    refreshed = self.broker.grants.refresh_rotated_credential(token.id, vault, entry, revision)
+                    if refreshed is not None:
+                        token = refreshed
+                        matching = matching_scopes(token)
                 if not matching:
                     raise ListingError("ineligible")
                 if session.worker.available is False:
@@ -158,7 +167,7 @@ class ConsoleAccess:
                     self.broker.workflows.claim_console(workflow, step)
                     grant = replace(grant, workflow_id=workflow.id, workflow_step=step)
                     reuse_until = workflow.deadline
-                elif self.workspace.guest_auto_approval_enabled(operation) and "certificate_sha256" in descriptor:
+                elif self.workspace.guest_auto_approval_enabled(operation):
                     digest = sha256(encode(descriptor)).hexdigest()
                     reuse_key = (token.id, vault, entry, digest)
                     self.reusable = {key: permit for key, permit in self.reusable.items() if self.current(permit)}
@@ -168,13 +177,23 @@ class ConsoleAccess:
                     else:
                         if len(self.reusable) + len(self.sessions) < MAX_REUSABLE_CONSOLES:
                             reuse_minutes = requested_minutes
-                        pin = descriptor["certificate_sha256"]
-                        auto_open = (self.workspace.scoped_auto_approval_enabled("guest_first_use")
-                                     and any("https" in scope.uses for scope in matching)
-                                     and self.broker.grants.result_certificate_trusted(token, vault, entry, revision, origin, pin))
-                        if auto_open:
-                            grant = replace(grant, trusted_pin=pin)
-                            if reuse_minutes:
+                        first_eligible = (self.workspace.scoped_auto_approval_enabled("guest_first_use")
+                                          and any("https" in scope.uses for scope in matching))
+                        if "certificate_sha256" in descriptor:
+                            pin = descriptor["certificate_sha256"]
+                            expected_pins, cert_trusted, auto_pin = self.broker.grants.result_certificate_auto_pin(
+                                token, vault, entry, revision, origin, pin)
+                            auto_open = first_eligible and (cert_trusted or auto_pin)
+                            if auto_open:
+                                if cert_trusted:
+                                    grant = replace(grant, trusted_pin=pin)
+                                else:
+                                    pending_pin = (origin, pin, expected_pins)
+                                if reuse_minutes:
+                                    reuse_until = monotonic() + reuse_minutes * 60
+                        else:
+                            auto_open = first_eligible
+                            if auto_open and reuse_minutes:
                                 reuse_until = monotonic() + reuse_minutes * 60
                 self.sessions[identifier] = grant
             else:
@@ -243,8 +262,23 @@ class ConsoleAccess:
             self.activity.authorize(event, authorization)
             def gate(send):
                 def authorize():
-                    nonlocal dispatched
+                    nonlocal dispatched, grant
                     if not dispatched:
+                        if operation == "console_open" and pending_pin is not None:
+                            pin_origin, pin_digest, expected_pins = pending_pin
+                            self.broker.grants.trust_result_certificate(
+                                token.id, token.generation, grant.vault, grant.entry, grant.credential_revision,
+                                pin_origin, pin_digest, expected_pins)
+                            grant = replace(grant, trusted_pin=pin_digest)
+                            self.sessions[identifier] = grant
+                        elif approved_step and approved_step[0].pending_pin is not None:
+                            wf = approved_step[0]
+                            pin_origin, pin_digest, expected_pins = wf.pending_pin
+                            self.broker.grants.trust_result_certificate(
+                                token.id, token.generation, grant.vault, grant.entry, grant.credential_revision,
+                                pin_origin, pin_digest, expected_pins)
+                            wf.trusted_endpoint = (pin_origin, pin_digest)
+                            wf.pending_pin = None
                         self.activity.dispatched(event)
                         dispatched = True
                     send()

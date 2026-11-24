@@ -78,6 +78,44 @@ class WorkflowTests(TestCase):
             self.run_step(manifest, "start", index=1)
         self.assertEqual(revoked.exception.code, "workflow_unavailable")
 
+    def test_workflow_request_honors_tls_first_pin_and_enrollment_auto_approval(self):
+        manifest = self.manifest()
+        self.register(manifest)
+        identifier = self.approve([{"vault": manifest["vault"], "entry": manifest["entry"],
+                                    "uses": ["https_results", "https"], "origins": [manifest["origin"]]}], index=1)
+        self.workspace.set_review_action("read_results", False)
+        self.workspace.set_scoped_auto_approval("workflow", True)
+        self.workspace.set_scoped_auto_approval("tls_first_pin", True)
+        allowed = self.invoke("workflow_request", request=manifest, index=1)
+        self.assertEqual(allowed["id"], manifest["id"])
+        worker = self.workspace.session(manifest["vault"]).worker
+
+        def worker_use(_action, gate, **_kwargs):
+            self.assertTrue(gate(lambda: None))
+            return {"outcome": "succeeded", "http_status": 200, "data": [{"guest_id": 842}]}
+
+        with patch.object(worker, "use", side_effect=worker_use):
+            self.assertEqual(self.run_step(manifest, "create", index=1)["data"], [{"guest_id": 842}])
+        self.assertEqual(self.grants.records[identifier].scope[0].result_certificates,
+                         (("https://fixtures.example.test:443/", manifest["certificate_sha256"]),))
+
+        # Enrollment via workflow_request auto-approves only when token credential-uses opt-in is enabled.
+        manifest2 = self.manifest()
+        manifest2["id"] = str(uuid4())
+        self.workspace.acknowledge_token_auto_approval(True)
+        self.workspace.set_token_auto_approval("auto_approve_tokens", True)
+        with self.assertRaises(ListingError) as denied:
+            self.reviewed(lambda: self.invoke(
+                "workflow_request", request=manifest2,
+                enrollment={"identity": "Manual workflow agent", "project": "Fixture"}, index=2), approve=False)
+        self.assertEqual(denied.exception.code, "declined")
+        self.workspace.set_token_auto_approval("auto_approve_token_credential_uses", True)
+        manifest3 = self.manifest()
+        manifest3["id"] = str(uuid4())
+        enrolled = self.invoke("workflow_request", request=manifest3,
+                               enrollment={"identity": "Auto workflow agent", "project": "Fixture"}, index=2)
+        self.assertEqual(enrolled["id"], manifest3["id"])
+
     def test_two_writes_share_one_review_and_one_immutable_dependency(self):
         manifest = self.manifest()
         self.register(manifest)

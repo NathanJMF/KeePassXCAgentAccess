@@ -101,9 +101,17 @@ class GuestAccess:
                     raise ListingError("ineligible")
                 revision = registration.credential_revision(entry)
                 needed = {"https_results", "https_body"} if "login" in request.data else {"https_results"}
-                matching = tuple(scope for scope in token.scope
+                def matching_scopes(active_token):
+                    return tuple(scope for scope in active_token.scope
                                  if (scope.vault, scope.entry, scope.use_revision) == (vault, entry, revision)
                                  and needed <= set(scope.uses) and request.origin in scope.origins)
+
+                matching = matching_scopes(token)
+                if not matching:
+                    refreshed = self.broker.grants.refresh_rotated_credential(token.id, vault, entry, revision)
+                    if refreshed is not None:
+                        token = refreshed
+                        matching = matching_scopes(token)
                 if not matching:
                     raise ListingError("ineligible")
                 grant_key = (token.id, vault, entry, fingerprint)
@@ -114,13 +122,18 @@ class GuestAccess:
                     reuse_minutes = requested_minutes
                 grant = permit or GuestGrant(token.id, token.generation, self.workspace.generation, vault, entry,
                                              revision, session, monotonic() + self.broker.approvals.timeout + 30)
+                pending_pin = None
                 if automatic and not reused and self.workspace.scoped_auto_approval_enabled("guest_first_use"):
                     endpoint = (request.origin, request.data["certificate_sha256"])
-                    auto_start = (any("https" in scope.uses for scope in matching)
-                                  and self.broker.grants.result_certificate_trusted(token, vault, entry, revision, *endpoint))
+                    expected_pins, cert_trusted, auto_pin = self.broker.grants.result_certificate_auto_pin(
+                        token, vault, entry, revision, *endpoint)
+                    auto_start = any("https" in scope.uses for scope in matching) and (cert_trusted or auto_pin)
                     if auto_start:
                         expires = monotonic() + (reuse_minutes * 60 if reuse_minutes else JOB_SECONDS)
-                        grant = replace(grant, expires=expires, trusted_endpoint=endpoint)
+                        grant = replace(grant, expires=expires,
+                                        trusted_endpoint=endpoint if cert_trusted else None)
+                        if not cert_trusted:
+                            pending_pin = (*endpoint, expected_pins)
                 if approved_step:
                     task, step = approved_step
                     grant = replace(grant, expires=task.deadline, workflow_id=task.id, workflow_step=step)
@@ -213,9 +226,23 @@ class GuestAccess:
 
             def gate(send):
                 def record_dispatch():
-                    nonlocal dispatches, stage
+                    nonlocal dispatches, stage, grant
                     dispatches += 1
                     if dispatches == 1:
+                        if starting and pending_pin is not None:
+                            pin_origin, pin_digest, expected_pins = pending_pin
+                            self.broker.grants.trust_result_certificate(
+                                token.id, token.generation, grant.vault, grant.entry, grant.revision,
+                                pin_origin, pin_digest, expected_pins)
+                            grant = replace(grant, trusted_endpoint=(pin_origin, pin_digest))
+                        elif approved_step and approved_step[0].pending_pin is not None:
+                            wf = approved_step[0]
+                            pin_origin, pin_digest, expected_pins = wf.pending_pin
+                            self.broker.grants.trust_result_certificate(
+                                token.id, token.generation, grant.vault, grant.entry, grant.revision,
+                                pin_origin, pin_digest, expected_pins)
+                            wf.trusted_endpoint = (pin_origin, pin_digest)
+                            wf.pending_pin = None
                         self.activity.dispatched(event)
                     if starting and dispatches == (2 if "login" in request.data else 1):
                         self.activity.advance_write(token.id, receipt, "pending", "dispatching")
