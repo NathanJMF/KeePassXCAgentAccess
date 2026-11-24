@@ -1,5 +1,6 @@
 """Install the per-user GNOME launcher and Keeper skill from the trusted checkout."""
 
+from dataclasses import dataclass
 import json
 import os
 from pathlib import Path
@@ -32,16 +33,29 @@ def skill_destination():
     return documents / "Skills" / "Keeper" / SKILL_PATH.name
 
 
+@dataclass(frozen=True)
+class AgentClient:
+    key: str
+    label: str
+    skill_path: Path
+    mcp_path: Path | None
+    mcp_format: str
+
+
+def _non_symlink_dir(path):
+    return not path.is_symlink() and path.is_dir()
+
+
 def antigravity_skill_destination():
     config = Path.home() / ".gemini" / "config"
-    if config.is_symlink() or not config.is_dir():
+    if not _non_symlink_dir(config):
         return None
     return config / "skills" / "keeper" / "SKILL.md"
 
 
 def antigravity_mcp_config_destination():
     config = Path.home() / ".gemini" / "config"
-    if config.is_symlink() or not config.is_dir():
+    if not _non_symlink_dir(config):
         return None
     return config / "mcp_config.json"
 
@@ -52,6 +66,53 @@ def antigravity_mcp_entry(command):
 
 def antigravity_mcp_snippet(command):
     return json.dumps({"mcpServers": {"keeper": antigravity_mcp_entry(command)}}, indent=2)
+
+
+def codex_skill_destination():
+    codex = Path.home() / ".codex"
+    if not _non_symlink_dir(codex):
+        return None
+    return codex / "skills" / "keeper" / "SKILL.md"
+
+
+def codex_mcp_config_destination():
+    codex = Path.home() / ".codex"
+    if not _non_symlink_dir(codex):
+        return None
+    return codex / "config.toml"
+
+
+def codex_mcp_snippet(command):
+    return f"[mcp_servers.keeper]\ncommand = {json.dumps(str(command))}\nargs = []"
+
+
+def codex_mcp_entry(command):
+    return f"# BEGIN KEEPER MCP\n{codex_mcp_snippet(command)}\n# END KEEPER MCP\n"
+
+
+def claude_skill_destination():
+    claude = Path.home() / ".claude"
+    if not _non_symlink_dir(claude):
+        return None
+    return claude / "skills" / "keeper" / "SKILL.md"
+
+
+def claude_mcp_config_destination():
+    claude = Path.home() / ".claude"
+    if not _non_symlink_dir(claude):
+        return None
+    return Path.home() / ".claude.json"
+
+
+def detected_agent_clients():
+    clients = []
+    if (ag_skill := antigravity_skill_destination()) is not None:
+        clients.append(AgentClient("antigravity", "Antigravity", ag_skill, antigravity_mcp_config_destination(), "json"))
+    if (cx_skill := codex_skill_destination()) is not None:
+        clients.append(AgentClient("codex", "Codex", cx_skill, codex_mcp_config_destination(), "toml"))
+    if (cc_skill := claude_skill_destination()) is not None:
+        clients.append(AgentClient("claude", "Claude Code", cc_skill, claude_mcp_config_destination(), "json"))
+    return clients
 
 
 def desktop_icon(contents):

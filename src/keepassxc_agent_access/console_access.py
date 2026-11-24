@@ -12,7 +12,7 @@ from .approvals import Approval
 from .console_request import parse_console
 from .console_transport import validate_inputs
 from .grants import verifier
-from .protocol import CONSOLE_OPERATIONS, CONSOLE_SECONDS, MAX_CONSOLE_REUSE_MINUTES, ListingError, encode
+from .protocol import CONSOLE_OPERATIONS, CONSOLE_SECONDS, ERRORS, MAX_CONSOLE_REUSE_MINUTES, ListingError, encode
 from .workspace import new_id
 
 
@@ -341,7 +341,7 @@ class ConsoleAccess:
                        "console_timeout": "Timed out"}.get(error.code, "Failed")
             if operation == "console_input" and dispatched:
                 outcome = "Interrupted · outcome unknown"
-            self.activity.finish(event, outcome)
+            self.activity.finish(event, outcome, detail=(error.detail or ERRORS.get(error.code)))
             raise
         finally:
             if operation == "console_open" and not keep_console:

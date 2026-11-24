@@ -16,10 +16,32 @@ ACTIVE_ICON = "keeper-agent-access-active"
 EMBED_TIMEOUT_MS = 1000
 
 
+def _parse_tray_state(text, paused=True, pending=0):
+    """Parse legacy bare P/A updates and '<P|A> <pending>' lines."""
+    for raw_line in text.replace("\r", "\n").split("\n"):
+        parts = raw_line.strip().split()
+        if not parts:
+            continue
+        flag = parts[0]
+        if flag in ("P", "A"):
+            paused = flag == "P"
+            if len(parts) >= 2:
+                try:
+                    pending = max(0, int(parts[1]))
+                except ValueError:
+                    pass
+            else:
+                pending = 0
+        elif len(parts) == 1 and set(flag) <= {"P", "A"}:
+            paused = flag[-1] == "P"
+            pending = 0
+    return paused, pending
+
+
 class LegacyTray:
-    def __init__(self, on_open, on_connected, on_exit):
+    def __init__(self, on_open, on_connected=None, on_exit=None, on_toggle_pause=None):
         # Only the icon and its Open Keeper menu live on the X11 connection.
-        # The private pipes carry pause state and the open/connected events.
+        # The private pipes carry pause state and the open/connected/toggle events.
         launcher = Gio.SubprocessLauncher.new(
             Gio.SubprocessFlags.STDIN_PIPE | Gio.SubprocessFlags.STDOUT_PIPE
         )
@@ -31,7 +53,9 @@ class LegacyTray:
         self.on_open = on_open
         self.on_connected = on_connected
         self.on_exit = on_exit
+        self.on_toggle_pause = on_toggle_pause
         self.paused = True
+        self.pending = 0
         self.stopping = False
         self._listen(self.process.get_stdout_pipe())
 
@@ -47,22 +71,32 @@ class LegacyTray:
             events = b""
         if not events:
             self.close()
-            self.on_exit()
+            if self.on_exit is not None:
+                self.on_exit()
             return
         for event in events:
             if event == ord("O"):
                 self.on_open()
-            elif event == ord("C"):
+            elif event == ord("C") and self.on_connected is not None:
                 self.on_connected()
+            elif event == ord("T") and self.on_toggle_pause is not None:
+                self.on_toggle_pause()
         self._listen(stream)
 
-    def set_paused(self, paused):
-        if self.paused != paused:
+    def set_state(self, paused, pending=0):
+        pending = max(0, int(pending))
+        if self.paused != paused or self.pending != pending:
             self.paused = paused
+            self.pending = pending
             try:
-                self.process.get_stdin_pipe().write_all(b"P" if paused else b"A", None)
+                self.process.get_stdin_pipe().write_all(
+                    f"{'P' if paused else 'A'} {pending}\n".encode("ascii"), None
+                )
             except GLib.Error:
                 pass
+
+    def set_paused(self, paused):
+        self.set_state(paused, self.pending)
 
     def close(self):
         self.stopping = True
@@ -121,7 +155,9 @@ def main():
     icon.set_name("Keeper")
     menu = Gtk.Menu()
     show = Gtk.MenuItem(label="Open Keeper")
+    toggle = Gtk.MenuItem(label="Resume Agent Access")
     menu.append(show)
+    menu.append(toggle)
     menu.show_all()
 
     def send(event):
@@ -171,17 +207,24 @@ def main():
         GLib.idle_add(shape_icon)
         return False
 
-    def set_icon(paused):
+    tray_state = {"paused": True, "pending": 0, "buffer": b""}
+
+    def set_icon(paused, pending=0):
         name = PAUSED_ICON if paused else ACTIVE_ICON
         icon.set_from_file(str(ICON_DIRECTORY / f"{name}.png"))
-        icon.set_tooltip_text("Keeper · " + ("Agent access paused" if paused else "Agent access active"))
+        toggle.set_label("Resume Agent Access" if paused else "Pause Agent Access")
+        state_text = "Agent access paused" if paused else "Agent access active"
+        if pending > 0:
+            icon.set_tooltip_text(f"Keeper · {pending} pending · {state_text}")
+        else:
+            icon.set_tooltip_text(f"Keeper · {state_text}")
         GLib.idle_add(shape_icon)
 
     def embedded(*_):
         if icon.is_embedded():
             GLib.idle_add(shape_icon)
             GLib.timeout_add(100, shape_icon)
-            send(b"C")
+            send(b"C\n")
         else:
             Gtk.main_quit()
 
@@ -195,19 +238,33 @@ def main():
         if not status:
             Gtk.main_quit()
             return GLib.SOURCE_REMOVE
-        set_icon(status[-1:] == b"P")
+        chunk = tray_state["buffer"] + status
+        if chunk.endswith(b"\n") or (not tray_state["buffer"] and set(status) <= {ord("P"), ord("A")}):
+            complete, tray_state["buffer"] = chunk, b""
+        elif b"\n" in chunk:
+            head, _, tray_state["buffer"] = chunk.rpartition(b"\n")
+            complete = head + b"\n"
+        else:
+            tray_state["buffer"] = chunk
+            return GLib.SOURCE_CONTINUE
+        paused, pending = _parse_tray_state(
+            complete.decode("ascii", "ignore"), tray_state["paused"], tray_state["pending"]
+        )
+        tray_state["paused"], tray_state["pending"] = paused, pending
+        set_icon(paused, pending)
         return GLib.SOURCE_CONTINUE
 
-    icon.connect("activate", lambda *_: send(b"O"))
-    show.connect("activate", lambda *_: send(b"O"))
+    icon.connect("activate", lambda *_: send(b"O\n"))
+    show.connect("activate", lambda *_: send(b"O\n"))
+    toggle.connect("activate", lambda *_: send(b"T\n"))
     icon.connect("popup-menu", lambda *_: menu.popup_at_pointer(None))
     icon.connect("notify::embedded", embedded)
     icon.connect("size-changed", size_changed)
-    set_icon(True)
+    set_icon(True, 0)
     GLib.timeout_add(EMBED_TIMEOUT_MS, check_embedded)
     GLib.io_add_watch(sys.stdin, GLib.PRIORITY_DEFAULT, GLib.IO_IN | GLib.IO_HUP, update_state)
     if icon.is_embedded():
-        send(b"C")
+        send(b"C\n")
     Gtk.main()
 
 

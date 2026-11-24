@@ -10,6 +10,7 @@ import stat
 from time import time
 
 from .access_settings import label
+from .protocol import sanitize_error_detail
 
 
 class ActivityError(Exception):
@@ -76,7 +77,8 @@ CREATE TABLE IF NOT EXISTS activity (
     note TEXT,
     decision TEXT,
     outcome TEXT NOT NULL,
-    status INTEGER
+    status INTEGER,
+    detail TEXT
 );
 CREATE INDEX IF NOT EXISTS activity_requested ON activity(requested DESC, id DESC);
 CREATE TABLE IF NOT EXISTS write_receipts (
@@ -134,7 +136,7 @@ class ActivityStore:
             db.executescript(SCHEMA)
             columns = {column["name"] for column in db.execute("PRAGMA table_info(activity)")}
             for name in ("entry", "vault", "vault_id", "token", "agent", "project", "scope", "folder", "entry_title",
-                         "group_id", "edit_request_id", "workflow_id", "workflow_step", "note"):
+                         "group_id", "edit_request_id", "workflow_id", "workflow_step", "note", "detail"):
                 if name not in columns:
                     db.execute(f"ALTER TABLE activity ADD COLUMN {name} TEXT")
             receipt_columns = {column["name"] for column in db.execute("PRAGMA table_info(write_receipts)")}
@@ -197,15 +199,22 @@ class ActivityStore:
             if changed != 1:
                 raise ActivityError()
 
-    def finish(self, event, outcome, status=None, *, entry=None, group_id=None, folder=None, entry_title=None):
+    def finish(self, event, outcome, status=None, *, entry=None, group_id=None, folder=None, entry_title=None,
+               detail=None):
         now = time()
+        cleaned = sanitize_error_detail(detail)
         with self.connection() as db:
             db.execute(
                 """UPDATE activity SET decided=coalesce(decided, ?), completed=?, outcome=?, status=?,
                     entry=coalesce(entry, ?), group_id=coalesce(?, group_id), folder=coalesce(?, folder),
-                    entry_title=coalesce(?, entry_title) WHERE id=?""",
-                (now, now, outcome, status, entry, group_id, folder, entry_title, event),
+                    entry_title=coalesce(?, entry_title), detail=coalesce(?, detail) WHERE id=?""",
+                (now, now, outcome, status, entry, group_id, folder, entry_title, cleaned, event),
             )
+
+    def count(self):
+        """Return total number of recorded activity rows."""
+        with self.connection() as db:
+            return int(db.execute("SELECT COUNT(*) FROM activity").fetchone()[0])
 
     def claim_write(self, token, identifier, generation, vault, entry, revision, digest, *, secondary_entry=None):
         with self.connection() as db:

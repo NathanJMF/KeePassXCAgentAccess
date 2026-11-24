@@ -30,7 +30,8 @@ def event_time(row):
 def event_relationship(row):
     action = row["action"]
     stage, _, operation = action.partition(" · ")
-    if token := row.get("token"):
+    token = row.get("token")
+    if token:
         if workflow := row.get("workflow_id"):
             return ("workflow", token, workflow), "Workflow"
         if stage in EDIT_STAGES:
@@ -40,14 +41,20 @@ def event_relationship(row):
         if action in TOKEN_EVENTS:
             return ("token", token), "Access token"
 
-        chat = row.get("chat_id")
-        vault, entry = row.get("vault_id"), row.get("entry")
-        comparable = (action == "List vaults" or action == "List entries" and vault
-                      or stage == "Use password" and vault and entry and row.get("destination"))
-        if chat and comparable:
-            key = ("operation", token, row.get("uid"), chat, action, vault, entry, row.get("destination"),
-                   row.get("scope"))
-            return key, action
+    chat_key = row.get("chat_id") or ""
+    vault, entry = row.get("vault_id"), row.get("entry")
+    comparable = (
+        action == "Discover resources"
+        or bool(token) and (
+            action == "List vaults"
+            or action == "List entries" and vault
+            or stage == "Use password" and vault and entry and row.get("destination")
+        )
+    )
+    if comparable:
+        key = ("operation", token, row.get("uid"), chat_key, action, vault, entry, row.get("destination"),
+               row.get("scope"))
+        return key, action
     return ("event", row["id"]), action
 
 

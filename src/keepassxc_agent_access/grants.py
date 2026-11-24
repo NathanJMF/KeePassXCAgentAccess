@@ -376,6 +376,46 @@ class Grants:
                          decision="Auto approved rotated password")
             return updated
 
+    def is_stale(self, record):
+        """Return True if any credential-use scope on an active/disabled grant is stale."""
+        if record.status not in ("active", "disabled"):
+            return False
+        with self.workspace.mutex:
+            for scope in record.scope:
+                if not scope.uses:
+                    continue
+                registration = self.workspace.registrations.get(scope.vault)
+                if registration is None or scope.use_revision != registration.credential_revision(scope.entry):
+                    return True
+            return False
+
+    def reapprove_credentials(self, identifier):
+        """Re-approve current vault credential revisions for an active or disabled grant."""
+        with self.workspace.mutex:
+            record = self.records.get(identifier)
+            if record is None or record.status not in ("active", "disabled"):
+                raise ListingError("revoked")
+            updated_scope = []
+            for scope in record.scope:
+                if scope.uses and (scope.vault, scope.entry) not in record.released_entries:
+                    reg = self.workspace.registrations.get(scope.vault)
+                    stale = reg is None or scope.use_revision != reg.credential_revision(scope.entry)
+                    if reg is None or self.workspace.session(scope.vault) is None:
+                        if stale:
+                            raise ValueError("Unlock all affected vaults before re-approving current credentials.")
+                    else:
+                        rev = reg.credential_revision(scope.entry)
+                        if rev is not None and rev != scope.use_revision:
+                            scope = replace(scope, use_revision=rev)
+                updated_scope.append(scope)
+            updated_scope = tuple(updated_scope)
+            if updated_scope == record.scope:
+                raise ValueError("All approved credentials are already current.")
+            updated = replace(record, scope=updated_scope)
+            self._change(updated, "Approve token permissions", "Approved",
+                         decision="Re-approved current credential in Access")
+            return updated
+
     def result_certificate_trusted(self, record, vault, entry, revision, origin, fingerprint):
         pins = self.result_certificate_pins(record, vault, entry, revision, origin)
         return bool(pins) and all(pin == fingerprint for pin in pins)

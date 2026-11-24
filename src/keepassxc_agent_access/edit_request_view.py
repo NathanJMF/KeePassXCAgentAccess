@@ -61,7 +61,11 @@ def _request_details(container, app, record, preview):
     fields = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=5, margin_top=8, margin_start=12)
     details.add(fields)
     _add(fields, f"Requested  {_time(record.requested)}")
-    _add(fields, "Agent name and project are reported by the runner.")
+    _add(fields, "Agent name, project, model, and chat are reported by the runner.")
+    if record.context and record.context.model:
+        _add(fields, f"Model  {record.context.model} (reported)")
+    if record.context and record.context.chat:
+        _add(fields, f"Chat  {record.context.chat} (reported)")
     grant = app.grants.records.get(record.token_id)
     if grant:
         _add(fields, f"Linux UID  {grant.uid} (verified)")
@@ -147,6 +151,9 @@ def review_edit(app, record, *, standalone=False):
         vault = app.workspace.registrations.get(record.request.vault)
         if vault and not app.workspace.session(vault.id):
             panel.pack_start(app.unlock_review_button(vault, dialog), False, False, 0)
+    note = record.context.note if record.context and record.context.note else None
+    _add(panel, "Audit Note", "keeper-review-label")
+    _add(panel, note or "No note provided.", *(() if note else ("keeper-review-muted",)))
     _request_details(panel, app, record, preview)
 
     blocker = styled(Gtk.Box(spacing=10, valign=Gtk.Align.CENTER), "keeper-review-blocker")

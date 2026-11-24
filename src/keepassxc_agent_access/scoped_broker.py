@@ -15,7 +15,7 @@ from .activity import ActivityError, Attribution, entry_label, entry_target_labe
 from .console_access import ConsoleAccess
 from .grants import OPTIONAL_METADATA_FIELDS, verifier
 from .guest_access import GuestAccess
-from .protocol import (CONSOLE_OPERATIONS, GUEST_OPERATIONS, RESPONSE_LIMIT, WORKFLOW_OPERATIONS, ListingError,
+from .protocol import (CONSOLE_OPERATIONS, ERRORS, GUEST_OPERATIONS, RESPONSE_LIMIT, WORKFLOW_OPERATIONS, ListingError,
                        decode, encode, validate_command, validate_upload)
 from .result_delivery import result_fields
 from .settings import SettingsError
@@ -708,7 +708,7 @@ class ScopedBroker:
                 outcome = "Expired"
             elif error.code == "credential_changed":
                 outcome = "Stale"
-            self.activity.finish(event, outcome)
+            self.activity.finish(event, outcome, detail=(error.detail or ERRORS.get(error.code)))
             raise
         finally:
             if receipt_stage:
@@ -797,7 +797,11 @@ class ScopedBroker:
                 raise ListingError("revoked")
             self.activity.finish(event, "Succeeded")
         except ListingError as error:
-            self.activity.finish(event, {"paused": "Paused", "too_large": "Too large"}.get(error.code, "Revoked"))
+            self.activity.finish(
+                event,
+                {"paused": "Paused", "too_large": "Too large"}.get(error.code, "Revoked"),
+                detail=(error.detail or ERRORS.get(error.code)),
+            )
             raise
         return None
 

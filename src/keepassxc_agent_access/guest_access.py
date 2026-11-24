@@ -11,7 +11,7 @@ from .access_settings import uuid_text
 from .activity import entry_target_labels
 from .approvals import Approval
 from .guest_request import parse_guest_request
-from .protocol import ListingError, MAX_GUEST_REUSE_MINUTES, encode
+from .protocol import ERRORS, ListingError, MAX_GUEST_REUSE_MINUTES, encode
 from .usage import usage_action
 
 
@@ -308,7 +308,11 @@ class GuestAccess:
             return None
         except ListingError as error:
             outcome = {"declined": "Denied", "expired": "Expired", "revoked": "Revoked"}.get(error.code, "Failed")
-            self.activity.finish(event, "Interrupted · outcome unknown" if stage == "dispatching" else outcome)
+            self.activity.finish(
+                event,
+                "Interrupted · outcome unknown" if stage == "dispatching" else outcome,
+                detail=(error.detail or ERRORS.get(error.code)),
+            )
             raise
         finally:
             if reserved:

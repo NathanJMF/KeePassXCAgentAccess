@@ -9,6 +9,7 @@ import json
 import os
 from pathlib import Path
 import pwd
+import re
 from shlex import join
 import shutil
 import signal
@@ -16,6 +17,7 @@ import stat
 import subprocess
 from tempfile import NamedTemporaryFile, TemporaryDirectory
 from time import monotonic, sleep
+import tomllib
 
 from gi.repository import Gio, GLib
 
@@ -26,8 +28,10 @@ from .isolated_runner import broker_path, namespace, owned, subordinate_ids
 from .keyring import KeyringError, SystemKeyring
 from .launcher import (
     DESKTOP_ID, SKILL_PATH, antigravity_mcp_config_destination, antigravity_mcp_entry,
-    antigravity_skill_destination, desktop_contents, desktop_icon, normalize_desktop_icon,
-    skill_destination, skill_launcher_contents,
+    antigravity_skill_destination, claude_mcp_config_destination, claude_skill_destination,
+    codex_mcp_config_destination, codex_mcp_entry, codex_skill_destination, desktop_contents,
+    desktop_icon, detected_agent_clients, normalize_desktop_icon, skill_destination,
+    skill_launcher_contents,
 )
 from .settings import SettingsError, SettingsStore
 
@@ -288,12 +292,15 @@ class Installation:
                              "Keep that configuration, or clear it in Keeper before enabling the bundled runner.")
         return service_contents(self.app, uid)
 
+    _CLIENT_KEYS = ("antigravity", "codex", "claude")
+    _MCP_MARKER_RE = re.compile(r"(?m)^# BEGIN KEEPER MCP\n.*?^# END KEEPER MCP(?:\n|$)", re.DOTALL)
+
     @staticmethod
     def _launcher_digest(data):
         return digest(normalize_desktop_icon(data.decode("utf-8", "replace")).encode("utf-8"))
 
     @staticmethod
-    def _antigravity_mcp_update(mcp_path, command, previous_entry):
+    def _json_mcp_update(mcp_path, command, previous_entry):
         if mcp_path is None or mcp_path.is_symlink():
             return None
         try:
@@ -319,6 +326,122 @@ class Installation:
         servers["keeper"] = entry
         updated = (json.dumps({**data, "mcpServers": servers}, indent=2) + "\n").encode("utf-8")
         return (mcp_path, updated, old_bytes, entry)
+
+    _antigravity_mcp_update = _json_mcp_update
+
+    @classmethod
+    def _codex_mcp_update(cls, mcp_path, command, previous_block):
+        if mcp_path is None or mcp_path.is_symlink():
+            return None
+        block = codex_mcp_entry(command)
+        try:
+            old_bytes = regular_file(mcp_path)
+        except (OSError, ValueError):
+            return None
+        if old_bytes is None:
+            return (mcp_path, block.encode("utf-8"), None, block)
+        try:
+            text = old_bytes.decode("utf-8")
+            data = tomllib.loads(text)
+        except (UnicodeDecodeError, tomllib.TOMLDecodeError):
+            return None
+        mcp_servers = data.get("mcp_servers")
+        if "mcp_servers" in data and not isinstance(mcp_servers, dict):
+            return None
+        matches = list(cls._MCP_MARKER_RE.finditer(text))
+        if len(matches) > 1:
+            return None
+        if matches:
+            match = matches[0]
+            existing_block = match.group(0)
+            normalized = existing_block if existing_block.endswith("\n") else existing_block + "\n"
+            if normalized == block:
+                return (mcp_path, None, old_bytes, block)
+            if previous_block is None or normalized != previous_block:
+                return None
+            new_text = text[:match.start()] + block + text[match.end():]
+        else:
+            if "# BEGIN KEEPER MCP" in text or "# END KEEPER MCP" in text:
+                return None
+            if isinstance(mcp_servers, dict) and "keeper" in mcp_servers:
+                return None
+            if not text:
+                new_text = block
+            elif text.endswith("\n\n"):
+                new_text = text + block
+            elif text.endswith("\n"):
+                new_text = text + "\n" + block
+            else:
+                new_text = text + "\n\n" + block
+        try:
+            tomllib.loads(new_text)
+        except tomllib.TOMLDecodeError:
+            return None
+        return (mcp_path, new_text.encode("utf-8"), old_bytes, block)
+
+    @staticmethod
+    def _previous_skill_state(previous, key):
+        entry = (previous.get("client_skills") or {}).get(key)
+        if isinstance(entry, dict):
+            return entry.get("path"), entry.get("sha256")
+        if key == "antigravity":
+            return previous.get("antigravity_skill_path"), previous.get("antigravity_skill")
+        return None, None
+
+    @staticmethod
+    def _previous_mcp_state(previous, key):
+        entry = (previous.get("client_mcps") or {}).get(key)
+        if isinstance(entry, dict):
+            return entry
+        if key == "antigravity" and previous.get("antigravity_mcp_path"):
+            return {
+                "path": previous.get("antigravity_mcp_path"),
+                "format": "json",
+                "entry": previous.get("antigravity_mcp_entry"),
+                "created": bool(previous.get("antigravity_mcp_created")),
+            }
+        if key == "codex" and previous.get("codex_mcp_path"):
+            return {
+                "path": previous.get("codex_mcp_path"),
+                "format": "toml",
+                "block": previous.get("codex_mcp_block"),
+                "created": bool(previous.get("codex_mcp_created")),
+            }
+        return None
+
+    @staticmethod
+    def _record_client_skill(state, key, skill_path, checksum):
+        skills = dict(state.get("client_skills") or {})
+        skills[key] = {"path": str(skill_path), "sha256": checksum}
+        state["client_skills"] = skills
+        if key == "antigravity":
+            state.update(antigravity_skill_path=str(skill_path), antigravity_skill=checksum)
+
+    @staticmethod
+    def _record_client_mcp(state, key, mcp_path, mcp_format, value, created):
+        mcps = dict(state.get("client_mcps") or {})
+        record = {"path": str(mcp_path), "format": mcp_format, "created": bool(created)}
+        if mcp_format == "toml":
+            record["block"] = value
+            state.update(codex_mcp_path=str(mcp_path), codex_mcp_block=value)
+            if created:
+                state["codex_mcp_created"] = True
+        else:
+            record["entry"] = value
+            if key == "antigravity":
+                state.update(antigravity_mcp_path=str(mcp_path), antigravity_mcp_entry=value)
+                if created:
+                    state["antigravity_mcp_created"] = True
+        mcps[key] = record
+        state["client_mcps"] = mcps
+
+    @staticmethod
+    def _client_targets():
+        return (
+            ("antigravity", antigravity_skill_destination(), antigravity_mcp_config_destination(), "json"),
+            ("codex", codex_skill_destination(), codex_mcp_config_destination(), "toml"),
+            ("claude", claude_skill_destination(), claude_mcp_config_destination(), "json"),
+        )
 
     def install(self, enable_agent, *, stop_existing=False, connect_agent=False):
         previous = self.installed()
@@ -365,16 +488,15 @@ class Installation:
         manage_skill = old_skill is None or (
             previous.get("skill_path") == str(skill) and previous.get("skill") == digest(old_skill)
         )
-        ag_skill = antigravity_skill_destination()
-        old_ag_skill = None
-        manage_ag_skill = False
-        if (ag_skill is not None and not ag_skill.parent.is_symlink()
-                and not ag_skill.parent.parent.is_symlink()):
-            old_ag_skill = regular_file(ag_skill) if not ag_skill.is_symlink() else b""
-            manage_ag_skill = old_ag_skill is None or (
-                previous.get("antigravity_skill_path") == str(ag_skill)
-                and previous.get("antigravity_skill") == digest(old_ag_skill)
-            )
+        client_targets = self._client_targets()
+        client_skill_writes = []
+        for client_key, client_skill_path, _, _ in client_targets:
+            if (client_skill_path is not None and not client_skill_path.parent.is_symlink()
+                    and not client_skill_path.parent.parent.is_symlink()):
+                old_client_skill = regular_file(client_skill_path) if not client_skill_path.is_symlink() else b""
+                prev_path, prev_digest = self._previous_skill_state(previous, client_key)
+                if old_client_skill is None or (prev_path == str(client_skill_path) and prev_digest == digest(old_client_skill)):
+                    client_skill_writes.append((client_key, client_skill_path, old_client_skill))
         skill_launcher = skill.with_name("keeper-agent")
         source_skill_launcher = skill_launcher_contents(self.app / "keeper-agent")
         install_skill_launcher = agent or not connect_agent
@@ -396,11 +518,19 @@ class Installation:
             old_skill_launcher = regular_file(skill_launcher)
             if old_skill_launcher is not None and digest(old_skill_launcher) == previous.get("skill_launcher"):
                 remove_old_skill_launcher = True
-        mcp_update = None
+        mcp_updates = []
         if connect_agent and not agent:
-            mcp_update = self._antigravity_mcp_update(
-                antigravity_mcp_config_destination(), self.app / "keeper-connect", previous.get("antigravity_mcp_entry")
-            )
+            command = self.app / "keeper-connect"
+            for client_key, _, client_mcp_path, mcp_format in client_targets:
+                if client_mcp_path is None:
+                    continue
+                prev_mcp = self._previous_mcp_state(previous, client_key) or {}
+                if mcp_format == "toml":
+                    update = self._codex_mcp_update(client_mcp_path, command, prev_mcp.get("block"))
+                else:
+                    update = self._json_mcp_update(client_mcp_path, command, prev_mcp.get("entry"))
+                if update is not None:
+                    mcp_updates.append((client_key, mcp_format, bool(prev_mcp.get("created")), update))
         state = {"version": 1, "launcher": self._launcher_digest(launcher)}
         upstream = None
         if (CHECKOUT / ".git").exists():
@@ -421,17 +551,15 @@ class Installation:
         if manage_skill:
             state.update(skill_path=str(skill), skill=digest(source_skill))
             writes.append((skill, source_skill, old_skill, 0o644))
-        if manage_ag_skill:
-            state.update(antigravity_skill_path=str(ag_skill), antigravity_skill=digest(source_skill))
-            writes.append((ag_skill, source_skill, old_ag_skill, 0o644))
+        for client_key, client_skill_path, old_client_skill in client_skill_writes:
+            self._record_client_skill(state, client_key, client_skill_path, digest(source_skill))
+            writes.append((client_skill_path, source_skill, old_client_skill, 0o644))
         if install_skill_launcher:
             state.update(skill_launcher_path=str(skill_launcher), skill_launcher=digest(source_skill_launcher))
             writes.append((skill_launcher, source_skill_launcher, old_skill_launcher, 0o755))
-        if mcp_update is not None:
-            mcp_path, mcp_bytes, old_mcp_bytes, mcp_entry = mcp_update
-            state.update(antigravity_mcp_path=str(mcp_path), antigravity_mcp_entry=mcp_entry)
-            if old_mcp_bytes is None or previous.get("antigravity_mcp_created"):
-                state["antigravity_mcp_created"] = True
+        for client_key, mcp_format, prev_created, (mcp_path, mcp_bytes, old_mcp_bytes, mcp_value) in mcp_updates:
+            created = old_mcp_bytes is None or prev_created
+            self._record_client_mcp(state, client_key, mcp_path, mcp_format, mcp_value, created)
             if mcp_bytes is not None:
                 writes.append((mcp_path, mcp_bytes, old_mcp_bytes, 0o600))
         if agent:
@@ -534,6 +662,54 @@ class Installation:
                     systemctl("enable", "--now", DESKTOP_SERVICE, check=False)
                 raise
         return self.launcher, self.app / "keeper-run-agent" if agent else None
+
+    def install_client_integration(self, client_key):
+        """Install SKILL.md and configure the MCP entry for one detected agent client."""
+        if client_key not in self._CLIENT_KEYS:
+            raise ValueError(f"Unsupported client integration: {client_key}")
+        client = next((item for item in detected_agent_clients() if item.key == client_key), None)
+        if client is None:
+            raise ValueError(f"{client_key} was not detected.")
+        with self.lock():
+            state = self.installed()
+            if not state:
+                raise ValueError("Run ./install first to install Keeper.")
+            source_skill = (CHECKOUT / "skills" / SKILL_PATH).read_bytes()
+            source_digest = digest(source_skill)
+            skill_installed = False
+            skill_path = client.skill_path
+            if (skill_path is not None and not skill_path.is_symlink()
+                    and not skill_path.parent.is_symlink()
+                    and not skill_path.parent.parent.is_symlink()):
+                old_skill = regular_file(skill_path)
+                prev_path, prev_digest = self._previous_skill_state(state, client_key)
+                if old_skill is None or old_skill == source_skill or (
+                    prev_path == str(skill_path) and prev_digest == digest(old_skill)
+                ):
+                    if old_skill != source_skill:
+                        publish(skill_path, source_skill, mode=0o644)
+                    self._record_client_skill(state, client_key, skill_path, source_digest)
+                    skill_installed = True
+
+            mcp_configured = False
+            if client.mcp_path is not None:
+                prev_mcp = self._previous_mcp_state(state, client_key) or {}
+                command = self.app / "keeper-connect"
+                if client.mcp_format == "toml":
+                    update = self._codex_mcp_update(client.mcp_path, command, prev_mcp.get("block"))
+                else:
+                    update = self._json_mcp_update(client.mcp_path, command, prev_mcp.get("entry"))
+                if update is not None:
+                    mcp_path, mcp_bytes, old_mcp_bytes, mcp_value = update
+                    if mcp_bytes is not None:
+                        mode = stat.S_IMODE(mcp_path.stat().st_mode) if old_mcp_bytes is not None else 0o600
+                        publish(mcp_path, mcp_bytes, mode=mode)
+                    created = old_mcp_bytes is None or bool(prev_mcp.get("created"))
+                    self._record_client_mcp(state, client_key, mcp_path, client.mcp_format, mcp_value, created)
+                    mcp_configured = True
+
+            publish(self.manifest, json.dumps(state).encode())
+            return {"skill_installed": skill_installed, "mcp_configured": mcp_configured}
 
     @staticmethod
     def check_replaceable(original, saved, expected, title):
@@ -654,6 +830,61 @@ class Installation:
         except OSError:
             pass
 
+    @staticmethod
+    def _remove_json_mcp(mcp_path, mcp_entry, created):
+        if mcp_entry is None or mcp_path.is_symlink() or mcp_path.parent.is_symlink():
+            return
+        try:
+            raw = regular_file(mcp_path)
+            data = json.loads(raw.decode("utf-8")) if raw is not None else None
+        except (OSError, ValueError, UnicodeDecodeError):
+            data = None
+        if isinstance(data, dict) and isinstance(data.get("mcpServers"), dict) and data["mcpServers"].get("keeper") == mcp_entry:
+            servers = dict(data["mcpServers"])
+            del servers["keeper"]
+            if created and not servers and set(data) <= {"mcpServers"}:
+                mcp_path.unlink(missing_ok=True)
+            else:
+                publish(mcp_path, (json.dumps({**data, "mcpServers": servers}, indent=2) + "\n").encode("utf-8"),
+                        mode=stat.S_IMODE(mcp_path.stat().st_mode))
+
+    @classmethod
+    def _remove_codex_mcp(cls, mcp_path, expected_block, created):
+        if expected_block is None or mcp_path.is_symlink() or mcp_path.parent.is_symlink():
+            return
+        try:
+            raw = regular_file(mcp_path)
+            if raw is None:
+                return
+            text = raw.decode("utf-8")
+        except (OSError, ValueError, UnicodeDecodeError):
+            return
+        matches = list(cls._MCP_MARKER_RE.finditer(text))
+        if len(matches) != 1:
+            return
+        match = matches[0]
+        existing_block = match.group(0)
+        normalized = existing_block if existing_block.endswith("\n") else existing_block + "\n"
+        if normalized != expected_block:
+            return
+        before = text[:match.start()]
+        after = text[match.end():]
+        if not before.strip() and not after.strip():
+            remaining = ""
+        elif not after.strip():
+            remaining = before.rstrip("\n") + "\n"
+        elif not before.strip():
+            remaining = after.lstrip("\n")
+        else:
+            remaining = before.rstrip("\n") + "\n\n" + after.lstrip("\n")
+        if not remaining:
+            if created:
+                mcp_path.unlink(missing_ok=True)
+            else:
+                publish(mcp_path, b"", mode=stat.S_IMODE(mcp_path.stat().st_mode))
+        else:
+            publish(mcp_path, remaining.encode("utf-8"), mode=stat.S_IMODE(mcp_path.stat().st_mode))
+
     def uninstall(self, *, keep_data=False):
         state = self.installed()
         removed = bool(state)
@@ -683,27 +914,34 @@ class Installation:
             for path in (skill, skill.parents[1] / SKILL_PATH):
                 if state.get("skill_path") == str(path) and not path.parent.is_symlink():
                     self.remove_matching(path, state.get("skill"))
-            if ag_path_text := state.get("antigravity_skill_path"):
-                ag_path = Path(ag_path_text)
-                if not ag_path.parent.is_symlink():
-                    self.remove_matching(ag_path, state.get("antigravity_skill"))
-                    self._prune_empty_dirs((ag_path.parent, ag_path.parent.parent if ag_path.parent.parent.name == "skills" else None))
-            if (mcp_path_text := state.get("antigravity_mcp_path")) and (mcp_entry := state.get("antigravity_mcp_entry")):
-                mcp_path = Path(mcp_path_text)
-                if not mcp_path.is_symlink() and not mcp_path.parent.is_symlink():
-                    try:
-                        raw = regular_file(mcp_path)
-                        data = json.loads(raw.decode("utf-8")) if raw is not None else None
-                    except (OSError, ValueError, UnicodeDecodeError):
-                        data = None
-                    if isinstance(data, dict) and isinstance(data.get("mcpServers"), dict) and data["mcpServers"].get("keeper") == mcp_entry:
-                        servers = dict(data["mcpServers"])
-                        del servers["keeper"]
-                        if state.get("antigravity_mcp_created") and not servers and set(data) <= {"mcpServers"}:
-                            mcp_path.unlink(missing_ok=True)
-                        else:
-                            publish(mcp_path, (json.dumps({**data, "mcpServers": servers}, indent=2) + "\n").encode("utf-8"),
-                                    mode=stat.S_IMODE(mcp_path.stat().st_mode))
+            skill_entries = dict(state.get("client_skills") or {})
+            if state.get("antigravity_skill_path") and "antigravity" not in skill_entries:
+                skill_entries["antigravity"] = {
+                    "path": state.get("antigravity_skill_path"),
+                    "sha256": state.get("antigravity_skill"),
+                }
+            for entry in skill_entries.values():
+                if not isinstance(entry, dict) or not entry.get("path"):
+                    continue
+                client_skill = Path(entry["path"])
+                if not client_skill.parent.is_symlink():
+                    self.remove_matching(client_skill, entry.get("sha256"))
+                    self._prune_empty_dirs((
+                        client_skill.parent,
+                        client_skill.parent.parent if client_skill.parent.parent.name == "skills" else None,
+                    ))
+            mcp_entries = dict(state.get("client_mcps") or {})
+            for key in self._CLIENT_KEYS:
+                if key not in mcp_entries and (legacy := self._previous_mcp_state(state, key)):
+                    mcp_entries[key] = legacy
+            for entry in mcp_entries.values():
+                if not isinstance(entry, dict) or not entry.get("path"):
+                    continue
+                mcp_path = Path(entry["path"])
+                if entry.get("format") == "toml":
+                    self._remove_codex_mcp(mcp_path, entry.get("block"), bool(entry.get("created")))
+                else:
+                    self._remove_json_mcp(mcp_path, entry.get("entry"), bool(entry.get("created")))
             skill_launcher = skill.with_name("keeper-agent")
             if state.get("skill_launcher_path") == str(skill_launcher) and not skill_launcher.parent.is_symlink():
                 self.remove_matching(skill_launcher, state.get("skill_launcher"))

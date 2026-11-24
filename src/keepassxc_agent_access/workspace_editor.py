@@ -186,6 +186,39 @@ def _entry_form(app, vault, group, entry, saved_notes):
             password.set_text("")
 
     change_password.connect("toggled", change)
+    if entry is not None:
+        affected_grants = []
+        if app.grants is not None:
+            auto_rotate = app.workspace.token_auto_approval_enabled("auto_approve_token_rotations")
+            entry_id = entry["id"]
+            with app.workspace.mutex:
+                for grant in app.grants.records.values():
+                    if grant.status not in ("active", "disabled"):
+                        continue
+                    if any(
+                        (scope.vault, scope.entry) == (vault, entry_id)
+                        and (scope.uses or scope.action is not None)
+                        and (not auto_rotate or scope.action is not None or grant.workflow is not None)
+                        for scope in grant.scope
+                    ):
+                        affected_grants.append(grant)
+        count_text = "1 approved token" if len(affected_grants) == 1 else f"{len(affected_grants)} approved tokens"
+        warning = Gtk.Label(
+            label=f"Saving a new username or password will require fresh approval for {count_text}.",
+            xalign=0, wrap=True, no_show_all=True,
+        )
+        warning.set_name("entry-grant-warning")
+        warning.get_style_context().add_class("keeper-warning")
+        # Keep the warning outside Gtk.Grid so grid caption assertions stay unchanged.
+        dialog.get_content_area().pack_start(warning, False, False, 0)
+
+        def update_warning(*_):
+            changed = change_password.get_active() or fields["username"].get_text() != entry["username"]
+            warning.set_visible(bool(affected_grants) and changed)
+
+        change_password.connect("toggled", update_warning)
+        fields["username"].connect("changed", update_warning)
+        update_warning()
     _require_name(dialog, fields["title"], group_choice=group_choice, destination=destination)
     fields["title"].grab_focus()
     response = app.run_dialog(dialog)

@@ -14,7 +14,7 @@ from .approvals import Approval
 from .console_request import parse_console
 from .guest_request import parse_guest_request
 from .grants import verifier
-from .protocol import ListingError, decode, encode
+from .protocol import ERRORS, ListingError, decode, encode
 from .result_delivery import parse_result_usage
 
 
@@ -332,6 +332,7 @@ class WorkflowAccess:
                           project=token.project, requested=time(), workflow_review=True,
                           workflow_enrollment=draft is not None, resume_access=resume_access)
         outcome = "Revoked"
+        detail = None
         try:
             if not automatic:
                 answer = self.approvals.wait(ticket, lambda: guard(live))
@@ -376,10 +377,13 @@ class WorkflowAccess:
                 raise ListingError("revoked")
             outcome = "Approved"
             deliver(encode(self.detail(workflow)), guard)
+        except ListingError as error:
+            detail = error.detail or ERRORS.get(error.code)
+            raise
         finally:
             with self.workspace.mutex:
                 self.pending.discard(pending_key)
-            self.activity.finish(event, outcome)
+            self.activity.finish(event, outcome, detail=detail)
 
     @staticmethod
     def detail(workflow):

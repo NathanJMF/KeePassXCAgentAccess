@@ -7,13 +7,14 @@ PASSWORD_CLIPBOARD_TIMEOUT_MS = 30_000
 
 
 class PasswordClipboard:
-    def __init__(self, screen):
+    def __init__(self, screen, on_clear=None):
         self._clipboard = Gtk.Clipboard.get_for_display(screen.get_display(), Gdk.SELECTION_CLIPBOARD)
         self._buffer = Gtk.TextBuffer()
         # Use GTK's clipboard backend, including its Wayland data-device integration.
         self._buffer.add_selection_clipboard(self._clipboard)
         self._is_current = None
         self._timer = None
+        self._on_clear = on_clear
 
     def copy(self, text, is_current):
         self.clear()
@@ -36,11 +37,14 @@ class PasswordClipboard:
             self.clear()
 
     def clear(self):
+        had_copy = self._timer is not None or self._is_current is not None
         if self._timer is not None:
             GLib.source_remove(self._timer)
             self._timer = None
         self._is_current = None
         self._buffer.set_text("")
+        if had_copy and self._on_clear is not None:
+            self._on_clear()
 
     def close(self):
         self.clear()
