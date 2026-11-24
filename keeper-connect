@@ -1,28 +1,223 @@
-#!/bin/sh
-set -eu
+#!/usr/bin/python3 -I
+"""Proxy Keeper MCP stdio JSON-RPC over the owner's local Unix socket."""
 
-endpoint=/run/keeper-connect-$(/usr/bin/id -u).sock
-case $#:$* in
-    '0:') exec /usr/bin/socat STDIO "UNIX-CONNECT:$endpoint" ;;
-    '1:--help')
-        printf '%s\n' 'Usage: keeper-connect [--profile NAME]' 'Start Keeper MCP on standard input and output.'
-        exit 0 ;;
-esac
-if [ "$#" -ne 2 ] || [ "$1" != --profile ]; then
-    echo 'Usage: keeper-connect [--profile NAME]' >&2
-    exit 2
-fi
-profile=$2
-case $profile in
-    ''|[!A-Za-z0-9]*|*[!A-Za-z0-9_-]*)
-        echo 'Choose a profile name with letters, numbers, underscores, or hyphens.' >&2
-        exit 2 ;;
-esac
-if [ "${#profile}" -gt 64 ]; then
-    echo 'Choose a profile name of at most 64 characters.' >&2
-    exit 2
-fi
-{
-    printf '{"jsonrpc":"2.0","method":"keeper/profile","params":{"name":"%s"}}\n' "$profile"
-    /usr/bin/cat
-} | /usr/bin/socat STDIO "UNIX-CONNECT:$endpoint"
+import base64
+import json
+import os
+import re
+import socket
+import stat
+import sys
+import threading
+
+
+MAX_INPUT_BYTES = 8 * 1024 * 1024
+MAX_LINE_BYTES = 16 * 1024 * 1024
+PROFILE_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]*")
+INPUT_PATH_SCHEMA = {
+    "type": "string",
+    "description": (
+        "Optional local file path read and base64-encoded by keeper-connect for a "
+        "networked command (mutually exclusive with input_base64)."
+    ),
+}
+
+
+def encode_message(message):
+    return json.dumps(message, ensure_ascii=True, separators=(",", ":")).encode("ascii") + b"\n"
+
+
+def _local_tool_error(request_id, text):
+    return encode_message({
+        "jsonrpc": "2.0",
+        "id": request_id,
+        "result": {"content": [{"type": "text", "text": text}], "isError": True},
+    })
+
+
+def _read_regular_file(path):
+    if not isinstance(path, str) or not path or "\0" in path:
+        raise ValueError("input_path must be a non-empty file path.")
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_CLOEXEC)
+    except OSError:
+        raise ValueError("Could not open input_path.") from None
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise ValueError("input_path must refer to a regular file.")
+        chunks = []
+        total = 0
+        while total <= MAX_INPUT_BYTES:
+            chunk = os.read(fd, min(65536, MAX_INPUT_BYTES + 1 - total))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            total += len(chunk)
+        data = b"".join(chunks)
+    except OSError:
+        raise ValueError("Could not read input_path.") from None
+    finally:
+        os.close(fd)
+    if not data:
+        raise ValueError("input_path file must not be empty.")
+    if len(data) > MAX_INPUT_BYTES:
+        raise ValueError("input_path file exceeds the 8 MiB limit.")
+    return data
+
+
+def process_outgoing_line(line):
+    """Rewrite use_password input_path into input_base64, or emit a local error."""
+    try:
+        req = json.loads(line.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError, ValueError):
+        return line, None
+    if not isinstance(req, dict) or req.get("method") != "tools/call":
+        return line, None
+    params = req.get("params")
+    if not isinstance(params, dict) or params.get("name") != "use_password":
+        return line, None
+    args = params.get("arguments")
+    if not isinstance(args, dict) or "input_path" not in args:
+        return line, None
+
+    def error_reply(message):
+        if "id" in req:
+            return None, _local_tool_error(req["id"], message)
+        return None, None
+
+    if "input_base64" in args:
+        return error_reply("Pass either input_path or input_base64, not both.")
+    try:
+        data = _read_regular_file(args["input_path"])
+    except ValueError as error:
+        return error_reply(str(error))
+    updated_args = {key: value for key, value in args.items() if key != "input_path"}
+    updated_args["input_base64"] = base64.b64encode(data).decode("ascii")
+    updated_req = {**req, "params": {**params, "arguments": updated_args}}
+    return encode_message(updated_req), None
+
+
+def process_incoming_line(line):
+    """Inject input_path into the advertised use_password schema on tools/list."""
+    try:
+        resp = json.loads(line.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError, ValueError):
+        return line
+    if not isinstance(resp, dict):
+        return line
+    result = resp.get("result")
+    if not isinstance(result, dict) or not isinstance(result.get("tools"), list):
+        return line
+    changed = False
+    for item in result["tools"]:
+        if isinstance(item, dict) and item.get("name") == "use_password":
+            schema = item.get("inputSchema")
+            props = schema.get("properties") if isinstance(schema, dict) else None
+            if isinstance(props, dict) and "input_path" not in props:
+                props["input_path"] = dict(INPUT_PATH_SCHEMA)
+                changed = True
+    return encode_message(resp) if changed else line
+
+
+def parse_args(argv):
+    if argv == ["--help"]:
+        print("Usage: keeper-connect [--profile NAME]\nStart Keeper MCP on standard input and output.")
+        return None, True
+    if not argv:
+        return None, False
+    if len(argv) != 2 or argv[0] != "--profile":
+        print("Usage: keeper-connect [--profile NAME]", file=sys.stderr)
+        raise SystemExit(2)
+    profile = argv[1]
+    if not profile or not PROFILE_PATTERN.fullmatch(profile):
+        print("Choose a profile name with letters, numbers, underscores, or hyphens.", file=sys.stderr)
+        raise SystemExit(2)
+    if len(profile) > 64:
+        print("Choose a profile name of at most 64 characters.", file=sys.stderr)
+        raise SystemExit(2)
+    return profile, False
+
+
+def proxy(stdin_stream, stdout_stream, sock, profile=None):
+    send_lock = threading.Lock()
+
+    def write_stdout(data):
+        with send_lock:
+            stdout_stream.write(data)
+            stdout_stream.flush()
+
+    if profile is not None:
+        sock.sendall(encode_message({"jsonrpc": "2.0", "method": "keeper/profile", "params": {"name": profile}}))
+
+    def forward_stdin():
+        try:
+            while True:
+                line = stdin_stream.readline(MAX_LINE_BYTES + 1)
+                if not line:
+                    break
+                if len(line) > MAX_LINE_BYTES and not line.endswith(b"\n"):
+                    while True:
+                        chunk = stdin_stream.readline(65536)
+                        if not chunk or chunk.endswith(b"\n"):
+                            break
+                    write_stdout(encode_message({
+                        "jsonrpc": "2.0",
+                        "error": {"code": -32600, "message": "Message exceeds maximum size limit."},
+                        "id": None,
+                    }))
+                    continue
+                outgoing, local_reply = process_outgoing_line(line)
+                if outgoing is not None:
+                    sock.sendall(outgoing)
+                if local_reply is not None:
+                    write_stdout(local_reply)
+        except OSError:
+            pass
+        finally:
+            try:
+                sock.shutdown(socket.SHUT_WR)
+            except OSError:
+                pass
+
+    def forward_socket():
+        try:
+            with sock.makefile("rb") as sock_in:
+                while True:
+                    line = sock_in.readline(MAX_LINE_BYTES + 1)
+                    if not line:
+                        break
+                    if len(line) > MAX_LINE_BYTES and not line.endswith(b"\n"):
+                        while True:
+                            chunk = sock_in.readline(65536)
+                            if not chunk or chunk.endswith(b"\n"):
+                                break
+                        continue
+                    write_stdout(process_incoming_line(line))
+        except OSError:
+            pass
+
+    stdin_thread = threading.Thread(target=forward_stdin, daemon=True)
+    sock_thread = threading.Thread(target=forward_socket, daemon=True)
+    stdin_thread.start()
+    sock_thread.start()
+    sock_thread.join()
+    stdin_thread.join(timeout=0.2)
+
+
+def main(argv=None, endpoint=None):
+    profile, helped = parse_args(sys.argv[1:] if argv is None else argv)
+    if helped:
+        return 0
+    target = endpoint or f"/run/keeper-connect-{os.getuid()}.sock"
+    try:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
+            sock.connect(str(target))
+            proxy(sys.stdin.buffer, sys.stdout.buffer, sock, profile=profile)
+    except OSError as error:
+        print(f"Could not connect to Keeper socket {target}: {error}", file=sys.stderr)
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

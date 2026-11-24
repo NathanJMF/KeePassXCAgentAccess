@@ -5,7 +5,7 @@ import re
 from time import monotonic
 
 
-REQUEST_LIMIT = 4 * 1024
+REQUEST_LIMIT = 32 * 1024
 UPLOAD_LIMIT = 8 * 1024**2
 RESPONSE_LIMIT = 1024 * 1024
 CONSOLE_OPERATIONS = frozenset({"console_open", "console_view", "console_input", "console_close"})
@@ -21,12 +21,12 @@ WORKER_TIMEOUT = 3
 APPROVAL_TIMEOUT = 60
 CLIENT_TIMEOUT = APPROVAL_TIMEOUT + 35
 _MAX_ARGS = 32
-_MAX_ARG_BYTES = 512
+_MAX_ARG_BYTES = 4096
 LIST_REQUEST = {"version": 1, "operation": "list_entries"}
 ERRORS = {
     "unavailable": "Agent access is unavailable. Ask the vault owner to check broker access.",
-    "invalid_request": "The broker rejected the listing request.",
-    "invalid_response": "The broker returned an invalid listing response.",
+    "invalid_request": "The broker rejected the request.",
+    "invalid_response": "The broker returned an invalid response.",
     "declined": "The owner declined the request.",
     "expired": "The approval request timed out.",
     "revoked": "Agent access changed before the request completed.",
@@ -38,10 +38,11 @@ ERRORS = {
     "receipt_conflict": "This receipt ID already refers to another write. Check the original receipt.",
     "receipt_limit": "This token has reached its write receipt limit. Ask the vault owner for a new task token.",
     "console_closed": "This console is closed or unavailable to this token. Request a new console if you still need it.",
+    "console_timeout": "The console did not respond in time. The session is still open; retry viewing or sending input.",
     "console_failed": "Keeper could not complete the console operation. Check the approved endpoint and certificate or reopen the console.",
     "guest_job_unavailable": "This guest job is unavailable to the profile. Check its write receipt and verify the remote state before submitting again.",
     "workflow_unavailable": "This reviewed workflow is unavailable to the profile. Check the individual write receipts before requesting new approval.",
-    "dependency_unavailable": "An earlier workflow step has not supplied the expected integer result. Check its receipt and the remote state.",
+    "dependency_unavailable": "An earlier workflow step has not supplied the expected result. Check its receipt and the remote state.",
     "wait_elapsed": "The wait ended before Keeper received a status response. Check the existing operation again without resubmitting it.",
     "credential_changed": "That entry's credential changed after approval. Request a permission change for owner review.",
     "token_change_pending": "This token already has a permission change awaiting review.",
@@ -51,14 +52,27 @@ ERRORS = {
     "select_vault": "Choose a vault with --vault using your scoped vault catalog.",
     "token_storage": "The runner token file is unavailable or unsafe.",
     "audit_unavailable": "The broker could not verify settings or record the decision.",
-    "too_large": "The vault listing exceeds the response size limit.",
+    "too_large": "The request or response exceeds the size limit.",
 }
 
 
+def sanitize_error_detail(detail):
+    if not isinstance(detail, str):
+        return None
+    cleaned = " ".join(part for part in "".join(
+        char if char.isprintable() else " " for char in detail
+    ).split())
+    if not cleaned:
+        return None
+    return cleaned[:240]
+
+
 class ListingError(Exception):
-    def __init__(self, code="unavailable"):
+    def __init__(self, code="unavailable", detail=None):
         self.code = code
-        super().__init__(ERRORS[code])
+        self.detail = sanitize_error_detail(detail)
+        message = f"{ERRORS[code]} {self.detail}" if self.detail else ERRORS[code]
+        super().__init__(message)
 
 
 def validate_command(command):
@@ -66,7 +80,7 @@ def validate_command(command):
             or any(not isinstance(arg, str) or "\0" in arg or len(arg.encode("utf-8")) > _MAX_ARG_BYTES
                    or arg and not arg.isprintable() for arg in command)
             or not re.fullmatch(r"/usr/bin/[A-Za-z0-9._+-]+", command[0])
-            or command[0].endswith(("/.", "/..")) or len(encode(command)) > 2400):
+            or command[0].endswith(("/.", "/..")) or len(encode(command)) > 16384):
         raise ValueError("Choose an executable in /usr/bin and a short list of literal arguments.")
     return tuple(command)
 

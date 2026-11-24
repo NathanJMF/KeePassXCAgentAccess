@@ -252,7 +252,7 @@ class Installation:
         return state
 
     def connection_update_needed(self, source=None):
-        if not installed_connection():
+        if not self.manages_system_connection() or not installed_connection():
             return False
         root = source or self.app
         runtime = Path(f"/usr/local/lib/keeper-connect-{os.getuid()}")

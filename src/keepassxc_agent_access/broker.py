@@ -292,7 +292,7 @@ class ListingBroker:
             except ListingError as error:
                 try:
                     if not sent_response:
-                        deliver(encode({"error": error.code}))
+                        deliver(encode({"error": error.code, "detail": error.detail} if error.detail else {"error": error.code}))
                 except (OSError, ValueError):
                     pass
             except (OSError, ValueError):
