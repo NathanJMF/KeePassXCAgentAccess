@@ -118,3 +118,25 @@ class BrokerTests(TestCase):
         owner_config = BrokerConfig(self.path, os.geteuid())
         with self.assertRaises(ListingError):
             ListingBroker(owner_config, lambda: self.session, self.handle).start()
+
+    def test_start_unlinks_stale_dead_socket(self):
+        stale = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        stale.bind(str(self.path))
+        stale.close()
+        self.assertTrue(self.path.is_socket())
+        with patch("keepassxc_agent_access.broker.peer_uid", return_value=self.agent_uid):
+            self.broker.start()
+            self.assertTrue(self.broker.enabled)
+            self.assertEqual(self.invoke(encode(LIST_REQUEST)), {"entries": []})
+
+    def test_start_refuses_active_listening_socket(self):
+        active = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        self.addCleanup(active.close)
+        active.bind(str(self.path))
+        active.listen(1)
+        with self.assertRaises(ListingError):
+            self.broker.start()
+        self.assertFalse(self.broker.enabled)
+        with self.connection() as client:
+            accepted, _ = active.accept()
+            accepted.close()
