@@ -8,6 +8,7 @@ import pwd
 import signal
 from threading import Thread
 from time import monotonic
+import tomllib
 import traceback
 from uuid import uuid4
 
@@ -28,7 +29,10 @@ from .edit_requests import EditRequests
 from .grants import Grants
 from .installation import Installation, administer_connection
 from .keyring import KeyringError, SystemKeyring
-from .launcher import antigravity_mcp_snippet, antigravity_skill_destination, skill_destination
+from .launcher import (
+    antigravity_mcp_snippet, codex_mcp_snippet, codex_skill_destination, detected_agent_clients,
+    skill_destination,
+)
 from .legacy_tray import ACTIVE_ICON as TRAY_ACTIVE_ICON, ICON_DIRECTORY as TRAY_ICON_DIRECTORY
 from .legacy_tray import PAUSED_ICON as TRAY_PAUSED_ICON, LegacyTray
 from .owner_views import _dialog, _label, _scroll, table_time
@@ -92,6 +96,7 @@ class WorkspaceApplication(Gtk.Application):
         self.review_popups = ReviewPopups(Path(self.directory) / "desktop-notifications.json")
         self.popup_source = None
         self._fallback_source = None
+        self._notified_pending = None
 
     def do_startup(self):
         Gtk.Application.do_startup(self)
@@ -177,10 +182,20 @@ class WorkspaceApplication(Gtk.Application):
             not self.desktop.locked or not getattr(self.desktop, "available", True)
         ):
             self.window.present()
+            self._refresh()
+
+    def _password_clipboard_cleared(self):
+        if self.message == "Password copied.":
+            self.message = None
+            if self.notice and getattr(self.desktop, "available", True):
+                self.notice.set_text("")
+                self.notice.hide()
 
     def _build_window(self):
         self.window = Gtk.ApplicationWindow(application=self, title=APP_TITLE)
-        self.password_clipboard = PasswordClipboard(self.window.get_screen())
+        self.password_clipboard = PasswordClipboard(
+            self.window.get_screen(), on_clear=self._password_clipboard_cleared,
+        )
         self.window.set_default_size(1120, 700)
         self.window.connect("delete-event", self._window_closed)
         self.window.connect("key-press-event", self._keyboard)
@@ -410,6 +425,7 @@ class WorkspaceApplication(Gtk.Application):
             try:
                 self.legacy_tray = LegacyTray(
                     self._present, lambda: self._tray_status(None, True), self._on_legacy_tray_exit,
+                    on_toggle_pause=self._toggle_pause,
                 )
                 return
             except GLib.Error:
@@ -464,6 +480,27 @@ class WorkspaceApplication(Gtk.Application):
             self.window.iconify()
 
     def _window_closed(self, *_):
+        active_session = bool(self.workspace and (not self.workspace.paused or self.workspace.sessions))
+        has_pending = bool(self._review_requests())
+        if self.tray_connected and not self.desktop.locked and (active_session or has_pending):
+            dialog = styled(Gtk.MessageDialog(
+                transient_for=self.window, modal=True,
+                text="Keeper is still active",
+                secondary_text="Minimize to the tray to keep agent access running, or quit Keeper.",
+                buttons=Gtk.ButtonsType.NONE,
+            ), "keeper-dialog")
+            dialog.add_buttons(
+                "Cancel", Gtk.ResponseType.CANCEL,
+                "Quit Keeper", Gtk.ResponseType.REJECT,
+                "Minimize to Tray", Gtk.ResponseType.ACCEPT,
+            )
+            dialog.set_default_response(Gtk.ResponseType.ACCEPT)
+            response = self.run_dialog(dialog)
+            if response == Gtk.ResponseType.ACCEPT:
+                self._minimize()
+            elif response == Gtk.ResponseType.REJECT:
+                self._quit()
+            return True
         self._quit()
         return True
 
@@ -483,44 +520,75 @@ class WorkspaceApplication(Gtk.Application):
         elif name == "activity":
             self.activity_view.refresh()
 
+    def _sync_pending_notification(self, pending):
+        pending_ids = frozenset(pending)
+        if not pending_ids:
+            if self._notified_pending is not None:
+                self.withdraw_notification("pending-requests")
+                self._notified_pending = None
+            return
+        popups_blocked = (
+            not self.review_popups.enabled
+            or self.dialog is not None
+            or self.busy
+            or (not self.window.get_visible() and self.review_popups.next_request(pending) is None)
+        )
+        if popups_blocked and pending_ids != self._notified_pending:
+            count = len(pending_ids)
+            note = Gio.Notification.new("Keeper")
+            note.set_body(
+                "Keeper has 1 pending agent request" if count == 1
+                else f"Keeper has {count} pending agent requests"
+            )
+            self.send_notification("pending-requests", note)
+            self._notified_pending = pending_ids
+
     def _refresh(self):
         if self.password_clipboard:
             self.password_clipboard.check()
         if self.window and not self.exiting:
-            if self.workspace:
-                self._refresh_tree()
-            self._refresh_vault_lock()
-            self._browse()
-            notice = self.message
-            if not getattr(self.desktop, "available", True):
-                notice = "Desktop lock status is unavailable. Vaults stay locked until monitoring recovers."
-            self.notice.set_text(notice)
-            self.notice.set_visible(bool(notice))
             paused = not self.workspace or self.workspace.paused
-            pause_label = "Resume Agent Access" if paused else "Pause Agent Access"
-            if self.pause_labels.get_visible_child_name() != pause_label:
-                self._show_toolbar_label(self.pause_button, self.pause_labels, pause_label)
-                style = self.pause_button.get_style_context()
-                style.add_class("keeper-paused" if paused else "keeper-live")
-                style.remove_class("keeper-live" if paused else "keeper-paused")
-            self.pause_button.set_sensitive(bool(self.broker and self.broker.enabled and not self.desktop.locked))
-            self.usage_button.set_sensitive(bool(self.workspace and not self.desktop.locked))
             pending = self._review_requests()
             count = len(pending)
-            access_label = f"Access ({count})" if count else "Access"
-            self.access_button.set_label(access_label)
             if self.indicator:
+                description = "Agent access paused" if paused else "Agent access active"
+                if count:
+                    description = f"{description} · {count} pending"
+                self.indicator.set_title(f"{APP_TITLE} ({count} pending)" if count else APP_TITLE)
                 self.indicator.set_icon_full(
                     TRAY_PAUSED_ICON if paused else TRAY_ACTIVE_ICON,
-                    "Agent access paused" if paused else "Agent access active",
+                    description,
                 )
             if self.legacy_tray:
-                self.legacy_tray.set_paused(paused)
-            if self.stack.get_visible_child_name() == "access":
-                self.access_view.refresh()
-            elif self.stack.get_visible_child_name() == "activity":
-                self.activity_view.refresh()
+                self.legacy_tray.set_state(paused, pending=count)
+            self._sync_pending_notification(pending)
             self._schedule_request_popup(pending)
+            if self.window.get_visible():
+                if self.workspace:
+                    self._refresh_tree()
+                self._refresh_vault_lock()
+                current_view = self.stack.get_visible_child_name()
+                if current_view == "browse":
+                    self._browse()
+                notice = self.message or ""
+                if not getattr(self.desktop, "available", True):
+                    notice = "Desktop lock status is unavailable. Vaults stay locked until monitoring recovers."
+                self.notice.set_text(notice)
+                self.notice.set_visible(bool(notice))
+                pause_label = "Resume Agent Access" if paused else "Pause Agent Access"
+                if self.pause_labels.get_visible_child_name() != pause_label:
+                    self._show_toolbar_label(self.pause_button, self.pause_labels, pause_label)
+                    style = self.pause_button.get_style_context()
+                    style.add_class("keeper-paused" if paused else "keeper-live")
+                    style.remove_class("keeper-live" if paused else "keeper-paused")
+                self.pause_button.set_sensitive(bool(self.broker and self.broker.enabled and not self.desktop.locked))
+                self.usage_button.set_sensitive(bool(self.workspace and not self.desktop.locked))
+                access_label = f"Access ({count})" if count else "Access"
+                self.access_button.set_label(access_label)
+                if current_view == "access":
+                    self.access_view.refresh()
+                elif current_view == "activity":
+                    self.activity_view.refresh()
         return GLib.SOURCE_CONTINUE
 
     def _review_requests(self):
@@ -1137,6 +1205,7 @@ class WorkspaceApplication(Gtk.Application):
     def _toggle_pause(self, *_):
         if self.workspace:
             self.set_agent_paused(not self.workspace.paused)
+        return GLib.SOURCE_REMOVE
 
     def set_agent_paused(self, paused):
         if self.broker and self.broker.enabled and not self.desktop.locked:
@@ -1283,7 +1352,31 @@ class WorkspaceApplication(Gtk.Application):
         stack.set_visible_child_name("auto-approve")
         return dialog
 
+    @staticmethod
+    def _client_mcp_configured(client):
+        path = client.mcp_path
+        if path is None:
+            return True
+        if not path.is_file():
+            return False
+        try:
+            text = path.read_text(encoding="utf-8")
+            if client.mcp_format == "json":
+                data = json.loads(text)
+                return (isinstance(data, dict) and isinstance(data.get("mcpServers"), dict)
+                        and "keeper" in data["mcpServers"])
+            if client.mcp_format == "toml":
+                data = tomllib.loads(text)
+                return (isinstance(data, dict) and isinstance(data.get("mcp_servers"), dict)
+                        and "keeper" in data["mcp_servers"])
+        except (OSError, ValueError):
+            return False
+        return "keeper" in text
+
     def _connect_agent_page(self, page):
+        def copy_text(value):
+            Gtk.Clipboard.get(Gdk.SELECTION_CLIPBOARD).set_text(str(value), -1)
+
         def field(title, value, description):
             card = self._settings_card(page)
             card.pack_start(styled(_label(title), "keeper-settings-caption"), False, False, 0)
@@ -1294,14 +1387,67 @@ class WorkspaceApplication(Gtk.Application):
             row.pack_start(entry, True, True, 0)
             copy = Gtk.Button(label="Copy")
             copy.get_accessible().set_name(f"Copy {title}")
-            copy.connect("clicked", lambda *_: Gtk.Clipboard.get(Gdk.SELECTION_CLIPBOARD).set_text(str(value), -1))
+            copy.connect("clicked", lambda *_: copy_text(value))
             row.pack_start(copy, False, False, 0)
             card.pack_start(row, False, False, 0)
 
+        def client_card(client):
+            title = f"{client.label} Skill"
+            description = (f"Skill and MCP configuration for {client.label}."
+                           if client.mcp_path else f"Skill instructions for {client.label}.")
+            card = self._settings_card(page)
+            card.pack_start(styled(_label(title), "keeper-settings-caption"), False, False, 0)
+            card.pack_start(styled(_label(description), "keeper-settings-description"), False, False, 0)
+            row = Gtk.Box(spacing=8)
+            entry = Gtk.Entry(text=str(client.skill_path), editable=False, hexpand=True)
+            entry.get_accessible().set_name(title)
+            row.pack_start(entry, True, True, 0)
+            installed = client.skill_path.exists() and self._client_mcp_configured(client)
+            action = Gtk.Button(label="Copy" if installed else "Install")
+            action.get_accessible().set_name(f"Copy {title}" if installed else f"Install {client.label}")
+            row.pack_start(action, False, False, 0)
+            card.pack_start(row, False, False, 0)
+            status = styled(_label(""), "keeper-settings-description")
+            status.set_no_show_all(True)
+            card.pack_start(status, False, False, 0)
+
+            def on_click(*_):
+                nonlocal installed
+                if installed:
+                    copy_text(client.skill_path)
+                    return
+                try:
+                    Installation().install_client_integration(client.key)
+                except (*OWNER_ERRORS, ValueError) as failure:
+                    status.set_text(str(failure) or f"Could not install {client.label} integration.")
+                    status.show()
+                    return
+                installed = True
+                action.set_label("Copy")
+                action.get_accessible().set_name(f"Copy {title}")
+                status.set_text("Installed")
+                status.show()
+
+            action.connect("clicked", on_click)
+
+        def snippet_card(title, description, snippet, button_label):
+            card = self._settings_card(page)
+            card.pack_start(styled(_label(title), "keeper-settings-caption"), False, False, 0)
+            card.pack_start(styled(_label(description), "keeper-settings-description"), False, False, 0)
+            view = Gtk.TextView(editable=False, cursor_visible=False, wrap_mode=Gtk.WrapMode.WORD_CHAR, monospace=True)
+            view.get_buffer().set_text(snippet)
+            view.get_accessible().set_name(title)
+            scroll = _scroll(view)
+            scroll.set_min_content_height(110)
+            card.pack_start(scroll, False, False, 0)
+            copy_button = Gtk.Button(label=button_label, halign=Gtk.Align.START)
+            copy_button.get_accessible().set_name(f"Copy {title}")
+            copy_button.connect("clicked", lambda *_: copy_text(snippet))
+            card.pack_start(copy_button, False, False, 0)
+
         field("Keeper Skill", skill_destination(), "Give this file to your agent for instructions on using Keeper.")
-        if (ag_skill := antigravity_skill_destination()) is not None:
-            field("Antigravity Skill", ag_skill,
-                  "Installed automatically for Antigravity when ~/.gemini/config is present.")
+        for client in detected_agent_clients():
+            client_card(client)
         configured = installed_connection()
         if not configured or not connection_socket(os.getuid()).is_socket():
             card = self._settings_card(page)
@@ -1322,23 +1468,20 @@ class WorkspaceApplication(Gtk.Application):
         command = Installation().app / "keeper-connect"
         field("MCP Command", command,
               "Add this command as a local standard input/output MCP server in your agent client.")
-        snippet = antigravity_mcp_snippet(command)
-        json_card = self._settings_card(page)
-        json_card.pack_start(styled(_label("MCP Config JSON"), "keeper-settings-caption"), False, False, 0)
-        json_card.pack_start(styled(_label(
+        snippet_card(
+            "MCP Config JSON",
             "Snippet for ~/.gemini/config/mcp_config.json or other MCP clients (configured automatically when "
-            "Antigravity is present)."
-        ), "keeper-settings-description"), False, False, 0)
-        view = Gtk.TextView(editable=False, cursor_visible=False, wrap_mode=Gtk.WrapMode.WORD_CHAR, monospace=True)
-        view.get_buffer().set_text(snippet)
-        view.get_accessible().set_name("MCP Config JSON")
-        scroll = _scroll(view)
-        scroll.set_min_content_height(110)
-        json_card.pack_start(scroll, False, False, 0)
-        copy_json = Gtk.Button(label="Copy JSON", halign=Gtk.Align.START)
-        copy_json.get_accessible().set_name("Copy MCP Config JSON")
-        copy_json.connect("clicked", lambda *_: Gtk.Clipboard.get(Gdk.SELECTION_CLIPBOARD).set_text(snippet, -1))
-        json_card.pack_start(copy_json, False, False, 0)
+            "Antigravity is present).",
+            antigravity_mcp_snippet(command),
+            "Copy JSON",
+        )
+        if codex_skill_destination() is not None:
+            snippet_card(
+                "Codex MCP Config (TOML)",
+                "Snippet for ~/.codex/config.toml (configured automatically when Codex is installed).",
+                codex_mcp_snippet(command),
+                "Copy TOML",
+            )
         if Installation().connection_update_needed():
             card = self._settings_card(page)
             description = styled(_label(

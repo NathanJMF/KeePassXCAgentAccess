@@ -6,15 +6,18 @@ from math import ceil
 from shlex import join, split
 from time import monotonic
 
-from gi.repository import GLib, Gtk, Pango
+from gi.repository import Gdk, GLib, Gtk, Pango
 
 from .access_settings import Action, ActionType, BrowserForm, HTTPS_METHODS, HTTPS_WRITE_METHODS
 from .activity import ActivityError
-from .activity_grouping import EDIT_STAGES, ActivityResources, activity_groups, activity_matches, event_time
+from .activity_grouping import EDIT_STAGES, RESOURCE_REFS, ActivityResources, activity_groups, event_time
 from .command_action import executable_digest
 from .edit_request_view import review_edit
 from .grants import CREDENTIAL_USES, EDIT_PERMISSIONS, group_location
-from .owner_views import _dialog, _label, _scroll, _table, _time, require_mouse_decisions, table_time
+from .owner_views import _dialog, _label, _scroll, _table, _time, mouse_click, require_mouse_decisions, table_time
+from .protocol import ListingError
+from .settings import SettingsError
+from .vault import VaultError
 from .workspace_context import DELETE_LABEL, attach_row_context
 from .workspace_editor import delete_entry, edit_entry
 from .workspace_style import styled
@@ -250,6 +253,7 @@ ACCESS_STATES = {
     "Applying Edit": ("content-loading-symbolic", "keeper_accent"),
     "Usage Pending": ("appointment-soon-symbolic", "keeper_warning"),
     "Active": ("emblem-default-symbolic", "keeper_success"),
+    "Active · Credential Changed": ("dialog-warning-symbolic", "keeper_warning"),
     "Workflow Only": ("emblem-default-symbolic", "keeper_success"),
     "Disabled": ("action-unavailable-symbolic", "keeper_muted"),
 }
@@ -258,13 +262,22 @@ ACTIVITY_STATES = {
     "Succeeded": ("emblem-ok-symbolic", "keeper_success"),
     "Acknowledged · result unavailable": ("dialog-warning-symbolic", "keeper_warning"),
     "Results Not Delivered": ("dialog-warning-symbolic", "keeper_warning"),
+    "Interrupted · outcome unknown": ("dialog-warning-symbolic", "keeper_warning"),
     "Dispatched": ("mail-send-symbolic", "keeper_accent"),
+    "Submitted": ("mail-send-symbolic", "keeper_accent"),
     "Pending approval": ("appointment-soon-symbolic", "keeper_warning"),
     "Pending review": ("appointment-soon-symbolic", "keeper_warning"),
+    "Pending": ("appointment-soon-symbolic", "keeper_warning"),
+    "Active": ("emblem-default-symbolic", "keeper_success"),
+    "Authorized": ("emblem-ok-symbolic", "keeper_success"),
+    "Dispatching": ("content-loading-symbolic", "keeper_accent"),
     "Expired": ("appointment-soon-symbolic", "keeper_muted"),
+    "Timed out": ("appointment-soon-symbolic", "keeper_warning"),
+    "Too large": ("dialog-warning-symbolic", "keeper_warning"),
     "Stale": ("action-unavailable-symbolic", "keeper_muted"),
     "Failed": ("dialog-error-symbolic", "keeper_failure"),
     "Denied": ("action-unavailable-symbolic", "keeper_failure"),
+    "Declined": ("action-unavailable-symbolic", "keeper_failure"),
     "Paused": ("media-playback-pause-symbolic", "keeper_warning"),
     "Disabled": ("action-unavailable-symbolic", "keeper_muted"),
     "Removed": ("user-trash-symbolic", "keeper_muted"),
@@ -278,6 +291,18 @@ ACTIVITY_ACTION_ICONS = {
     "List vaults": "drive-harddisk-symbolic",
     "List entries": "view-list-symbolic",
     "Use password": "dialog-password-symbolic",
+    "Provision Account": "avatar-default-symbolic",
+    "Review Workflow": "system-run-symbolic",
+    "Run Guest Command": "utilities-terminal-symbolic",
+    "Check Guest Command": "utilities-terminal-symbolic",
+    "Release Guest Command": "changes-prevent-symbolic",
+    "Open Guest Console": "video-display-symbolic",
+    "View Guest Console": "video-display-symbolic",
+    "Send Guest Console Input": "input-keyboard-symbolic",
+    "Close Guest Console": "window-close-symbolic",
+    "Check Guest Console": "video-display-symbolic",
+    "Discover resources": "system-search-symbolic",
+    "Broker request rate limit": "appointment-soon-symbolic",
     "Request token": "dialog-question-symbolic",
     "Approve token": "changes-allow-symbolic",
     "Deny token": "changes-prevent-symbolic",
@@ -289,6 +314,75 @@ ACTIVITY_ACTION_ICONS = {
     "Remove token": "user-trash-symbolic",
     "Release entry access": "changes-prevent-symbolic",
 }
+
+
+EXTRA_ACTIVITY_FIELDS = {
+    "action": ("destination", "note"),
+    "outcome": ("detail",),
+}
+
+
+def activity_matches(row, resource, filters):
+    """Match an activity row against filter fields, including note, destination, and detail."""
+    labels = dict(zip(RESOURCE_REFS, resource))
+    for field, query in filters.items():
+        value = labels.get(field) if field in RESOURCE_REFS else row.get(field)
+        reference = row.get(RESOURCE_REFS.get(field, ""))
+        extras = tuple(row.get(extra) for extra in EXTRA_ACTIVITY_FIELDS.get(field, ()))
+        searchable = " ".join(str(part) for part in (value, reference, *extras) if part)
+        if query not in searchable.casefold():
+            return False
+    return True
+
+
+def _is_copy_shortcut(event):
+    modifiers = event.state & Gtk.accelerator_get_default_mod_mask()
+    return modifiers == Gdk.ModifierType.CONTROL_MASK and event.keyval in (Gdk.KEY_c, Gdk.KEY_C)
+
+
+def _install_review_key_handler(dialog):
+    """Allow Ctrl+C copying and Escape dismissal while keeping Return/Space blocked."""
+    def on_key_press(_widget, event):
+        if _is_copy_shortcut(event):
+            return False
+        if event.keyval == Gdk.KEY_Escape:
+            dialog.response(Gtk.ResponseType.DELETE_EVENT)
+            return True
+        return True
+
+    def on_key_release(_widget, event):
+        return not _is_copy_shortcut(event)
+
+    dialog.connect("key-press-event", on_key_press)
+    dialog.connect("key-release-event", on_key_release)
+
+
+def _pause_blocker(app, subtitle):
+    """Build a live pause notice banner with a mouse-only Resume Agent Access button."""
+    blocker = styled(Gtk.Box(spacing=10, valign=Gtk.Align.CENTER), "keeper-access-notice", "keeper-review-blocker")
+    blocker.pack_start(Gtk.Image.new_from_icon_name("changes-prevent-symbolic", Gtk.IconSize.MENU), False, False, 0)
+    text = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=3)
+    text.pack_start(styled(_label("Agent access is paused"), "keeper-access-caption"), False, False, 0)
+    reason = _label(subtitle)
+    text.pack_start(reason, False, False, 0)
+    blocker.pack_start(text, True, True, 0)
+    resume = Gtk.Button(label="Resume Agent Access", valign=Gtk.Align.CENTER)
+    resume.set_can_focus(False)
+    resume.connect("clicked", lambda *_: app.set_agent_paused(False) if mouse_click() else None)
+    blocker.pack_end(resume, False, False, 0)
+    blocker.show_all()
+    blocker.set_no_show_all(True)
+    return blocker, reason, resume
+
+
+def _reported_context_text(context):
+    if not context:
+        return ""
+    parts = [f"{caption}: {value}" for caption, value in (
+        ("Model", getattr(context, "model", None)),
+        ("Chat", getattr(context, "chat", None)),
+    ) if value]
+    return " · ".join(parts)
 
 
 def table_card(scroll, empty):
@@ -456,13 +550,20 @@ class AccessView(Gtk.Box):
     REQUESTED_TIME, LAST_USED_TIME, REVIEW_GROUP = 9, 10, 11
     ROW_KEY, SEPARATOR_OFFSETS = 12, 13
     REMOVE = "Remove Token…"
+    REAPPROVE_RESPONSE = 1
 
     def __init__(self, app):
         super().__init__(orientation=Gtk.Orientation.VERTICAL, spacing=18)
         self.app = app
         header, _, _, _ = section_heading("Agent Access", "changes-prevent-symbolic")
-        tools = Gtk.Box(valign=Gtk.Align.CENTER)
+        tools = Gtk.Box(spacing=6, valign=Gtk.Align.CENTER)
         header.pack_end(tools, False, False, 0)
+        self.search = styled(Gtk.SearchEntry(placeholder_text="Search tokens…", width_chars=18,
+                                             valign=Gtk.Align.CENTER), "keeper-search")
+        self.search.connect("changed", lambda *_: self.refresh())
+        tools.pack_start(self.search, False, False, 0)
+        self.remove_multiple = button(tools, "Remove Multiple…", self._remove_multiple, icon="user-trash-symbolic")
+        self.remove_multiple.set_sensitive(False)
         self.next_review = button(tools, "Review Next", self._open_next, icon="appointment-soon-symbolic")
         self.next_review.set_sensitive(False)
         self.review_button = button(tools, "Open Details", self._open, icon="view-reveal-symbolic")
@@ -485,12 +586,24 @@ class AccessView(Gtk.Box):
         attach_row_context(self.table, self._context, destructive_labels=(self.REMOVE,))
         self.table.get_selection().connect("changed", lambda *_: self.review_button.set_sensitive(
             bool(selected_key(self.table, self.RECORD_ID))))
-        self.empty, _, _ = empty_state("changes-prevent-symbolic", "No access requests or tokens")
+        self.empty, self.empty_label, _ = empty_state("changes-prevent-symbolic", "No access requests or tokens")
         self.pack_start(table_card(scroll, self.empty), True, True, 0)
+
+    def _is_stale(self, grant):
+        return bool(grant and self.app.grants and getattr(self.app.grants, "is_stale", None)
+                    and self.app.grants.is_stale(grant))
+
+    @staticmethod
+    def _matches_search(query, *parts):
+        if not query:
+            return True
+        haystack = " ".join(str(part) for part in parts if part).casefold()
+        return query in haystack
 
     def refresh(self):
         grants = self.app.grants.rows() if self.app.grants else []
         edits = self.app.pending_edits()
+        query = self.search.get_text().strip().casefold()
         rows = []
         snapshots = {}
         for grant in grants:
@@ -499,8 +612,15 @@ class AccessView(Gtk.Box):
             scope = self._scope_rows(grant, snapshots) if grant.status == "active" or other else ()
             requested = change.requested if change else grant.requested
             context = change.context if change else grant.context
+            stale = self._is_stale(grant)
             state = ("Permission Change Pending" if change else
+                     "Active · Credential Changed" if grant.status == "active" and stale else
                      "Workflow Only" if grant.workflow and grant.status == "active" else grant.status.capitalize())
+            scope_text = " ".join(f"{child[self.IDENTITY]} {child[self.PROJECT]}" for child in scope)
+            if not self._matches_search(
+                query, grant.identity, grant.project, context.model, context.chat, state, scope_text,
+            ):
+                continue
             identifier, kind = (f"{grant.id}/{change.id}", "grant-change") if change else (grant.id, "grant")
             rows.append((bool(other), -requested,
                          (table_time(requested), table_time(grant.last_used),
@@ -509,25 +629,37 @@ class AccessView(Gtk.Box):
                           requested, grant.last_used, bool(other), ("grant", grant.id), (), scope)))
         for edit in edits:
             state = "Edit Pending" if edit.status == "pending" else "Applying Edit"
+            model = edit.context.model if edit.context else None
+            chat = edit.context.chat if edit.context else None
+            if not self._matches_search(query, edit.identity, edit.project, model, chat, state):
+                continue
             rows.append((False, -edit.requested,
                          (table_time(edit.requested), "—", reported(edit.identity),
-                          reported(edit.context.model if edit.context else None), reported(edit.project),
-                          reported(edit.context.chat if edit.context else None),
+                          reported(model), reported(edit.project), reported(chat),
                           state, f"{edit.token_id}/{edit.id}", "edit", edit.requested, None,
                           False, ("edit", edit.token_id, edit.id), (), ())))
         for ticket in self.app.usage_approvals.pending():
             identifier = str(ticket.id)
+            state = "Usage Pending"
+            if not self._matches_search(
+                query, ticket.identity, ticket.project, ticket.context.model, ticket.context.chat,
+                state, ticket.action, ticket.destination, " ".join(ticket.scope),
+            ):
+                continue
             rows.append((False, -ticket.requested,
                          (table_time(ticket.requested), "—", reported(ticket.identity),
                           reported(ticket.context.model), reported(ticket.project), reported(ticket.context.chat),
-                          "Usage Pending", identifier, "usage", ticket.requested, None,
+                          state, identifier, "usage", ticket.requested, None,
                           False, ("usage", identifier), (), ())))
         rows.sort()
         fill_table(self.table, [columns for _, _, columns in rows], self.ROW_KEY)
+        self.empty_label.set_text("No tokens match this search" if query else "No access requests or tokens")
         self.empty.set_visible(not rows)
         pending = len(self.app._review_requests())
         self.next_review.set_sensitive(bool(pending) and not self.app.busy and not self.app.desktop.locked)
         self.next_review.set_label(f"Review Next ({pending})" if pending else "Review Next")
+        removable = any(grant.status in ("active", "disabled") for grant in grants)
+        self.remove_multiple.set_sensitive(removable and not self.app.busy and not self.app.desktop.locked)
 
     def _scope_label(self, _column, cell, model, iterator, *_):
         cell.inline_scope = model[iterator][self.KIND] == "scope"
@@ -644,11 +776,16 @@ class AccessView(Gtk.Box):
             ]
         if state in ("Pending", "Usage Pending"):
             return [[("Review Request…", open_selected)]]
-        active = state in ("Active", "Workflow Only")
+        active = state in ("Active", "Workflow Only", "Active · Credential Changed")
         change = "disabled" if active else "active"
         label = "Disable Token" if active else "Re-enable Token"
+        grant = self.app.grants.records.get(identifier) if self.app.grants else None
+        actions = [("View Permissions…", open_selected)]
+        if self._is_stale(grant):
+            actions.append(("Re-approve Current Credential", lambda: self._reapprove_credentials(identifier)))
+        actions.append((label, lambda: self._update_token(identifier, change)))
         return [
-            [("View Permissions…", open_selected), (label, lambda: self._update_token(identifier, change))],
+            actions,
             [(self.REMOVE, lambda: self._update_token(identifier, "removed"))],
         ]
 
@@ -700,30 +837,31 @@ class AccessView(Gtk.Box):
         dialog.set_name("keeper-access-review")
         dialog.set_position(Gtk.WindowPosition.CENTER_ON_PARENT)
         dialog.set_modal(True)
-        if ticket.resume_access:
-            approve_label = "Resume Access and Approve"
-        elif ticket.reuse_minutes:
-            approve_label = f"Allow for {ticket.reuse_minutes} min"
+        if ticket.reuse_minutes:
+            base_label = f"Allow for {ticket.reuse_minutes} min"
         elif ticket.opens_console:
-            approve_label = "Open Console"
+            base_label = "Open Console"
         elif ticket.guest_command:
-            approve_label = "Run Command Once"
+            base_label = "Run Command Once"
         elif ticket.workflow_review:
-            approve_label = "Register and Approve" if ticket.workflow_enrollment else "Approve Workflow"
+            base_label = "Register and Approve" if ticket.workflow_enrollment else "Approve Workflow"
         elif ticket.provision_account:
-            approve_label = "Provision Once"
+            base_label = "Provision Once"
         else:
-            approve_label = "Approve Write Once" if ticket.write_once else (
+            base_label = "Approve Write Once" if ticket.write_once else (
                 "Approve and Trust Certificate" if ticket.trusts_certificate else "Approve Once")
+        approve_label = "Resume Access and Approve" if ticket.resume_access else base_label
         dialog.add_buttons("Deny", Gtk.ResponseType.REJECT, approve_label, Gtk.ResponseType.ACCEPT)
-        dialog.connect("key-press-event", lambda *_: True)
-        dialog.connect("key-release-event", lambda *_: True)
+        _install_review_key_handler(dialog)
         require_mouse_decisions(dialog)
-        styled(dialog.get_widget_for_response(Gtk.ResponseType.ACCEPT), "keeper-access-approve")
+        approve_button = styled(dialog.get_widget_for_response(Gtk.ResponseType.ACCEPT), "keeper-access-approve")
         styled(dialog.get_widget_for_response(Gtk.ResponseType.REJECT), "keeper-access-deny")
         add_label(body, "Requested by · agent-reported")
         body.pack_start(styled(_label(ticket.identity), "keeper-access-agent"), False, False, 0)
         add_label(body, ticket.project)
+        context_text = _reported_context_text(ticket.context)
+        if context_text:
+            body.pack_start(styled(_label(context_text), "keeper-event-caption"), False, False, 0)
         if ticket.opens_console:
             add_label(body, "Allow screenshots and input for the guest shown below.")
         elif ticket.guest_command:
@@ -733,9 +871,8 @@ class AccessView(Gtk.Box):
             add_label(body, "Send the stored account password to this service using the admin credential shown below.")
         elif ticket.write_once:
             add_label(body, "This request changes data on the destination. Review the method, path and request body below.")
-        if ticket.write_once or ticket.opens_console or ticket.guest_command or ticket.workflow_review:
-            if ticket.context.note:
-                add_label(body, ticket.context.note)
+        if ticket.context.note:
+            add_label(body, ticket.context.note)
         details = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
         add_activity_section(details, ticket.action, (("Scope", "\n".join(ticket.scope) or "No vaults in scope"),
                                                      ("Destination", ticket.destination)))
@@ -746,24 +883,58 @@ class AccessView(Gtk.Box):
         scroll.add(details)
         body.pack_start(scroll, True, True, 0)
         add_label(body, usage_approval_caption(ticket))
-        if ticket.resume_access:
-            add_label(body, "Agent access is paused. Approving also resumes access for all approved agents.")
+        blocker, reason, resume_button = _pause_blocker(
+            self.app,
+            "Approving also resumes access for all approved agents." if ticket.resume_access
+            else "Resuming lets all approved tokens run again.",
+        )
+        body.pack_start(blocker, False, False, 0)
         remaining = Gtk.Label(xalign=0)
         body.pack_start(styled(remaining, "keeper-event-caption"), False, False, 0)
+
+        def sync_pause(*_):
+            workspace = getattr(self.app, "workspace", None)
+            paused = bool(workspace.paused) if workspace is not None else bool(ticket.resume_access)
+            broker = getattr(self.app, "broker", None)
+            desktop = getattr(self.app, "desktop", None)
+            can_resume = bool(broker and broker.enabled and not (desktop and desktop.locked))
+            blocker.set_visible(paused)
+            resume_button.set_sensitive(can_resume)
+            if paused and ticket.resume_access:
+                approve_button.set_label("Resume Access and Approve")
+                approve_button.set_sensitive(can_resume)
+                reason.set_text("Approving also resumes access for all approved agents.")
+            elif paused:
+                approve_button.set_label(base_label)
+                approve_button.set_sensitive(False)
+                reason.set_text("Resuming lets all approved tokens run again." if can_resume
+                                else "Close this review and check Broker settings.")
+            else:
+                approve_button.set_label(base_label)
+                approve_button.set_sensitive(True)
 
         def check_pending():
             if ticket not in queue.pending():
                 dialog.response(Gtk.ResponseType.CANCEL)
             else:
                 remaining.set_text(f"Expires in {max(0, ceil(ticket.expires - monotonic()))} seconds")
+                sync_pause()
             return GLib.SOURCE_CONTINUE
 
+        signals = []
+        for attr, signal_name in (("pause_labels", "notify::visible-child-name"),
+                                  ("pause_button", "notify::sensitive")):
+            widget = getattr(self.app, attr, None)
+            if widget is not None and hasattr(widget, "connect"):
+                signals.append((widget, widget.connect(signal_name, sync_pause)))
         check_pending()
         watch = GLib.timeout_add(200, check_pending)
         try:
             response = self.app.run_dialog(dialog, standalone=standalone)
         finally:
             GLib.source_remove(watch)
+            for widget, signal_id in signals:
+                widget.disconnect(signal_id)
         if response in (Gtk.ResponseType.ACCEPT, Gtk.ResponseType.REJECT):
             queue.resolve(ticket.id, response == Gtk.ResponseType.ACCEPT)
             self.app._refresh()
@@ -776,8 +947,7 @@ class AccessView(Gtk.Box):
         dialog.set_position(Gtk.WindowPosition.CENTER_ON_PARENT)
         dialog.set_modal(True)
         dialog.add_buttons("Deny", Gtk.ResponseType.REJECT, "Approve", Gtk.ResponseType.ACCEPT)
-        dialog.connect("key-press-event", lambda *_: True)
-        dialog.connect("key-release-event", lambda *_: True)
+        _install_review_key_handler(dialog)
         require_mouse_decisions(dialog)
         approve = styled(dialog.get_widget_for_response(Gtk.ResponseType.ACCEPT), "keeper-access-approve")
         styled(dialog.get_widget_for_response(Gtk.ResponseType.REJECT), "keeper-access-deny")
@@ -797,12 +967,29 @@ class AccessView(Gtk.Box):
         project = styled(_label(grant.project), "keeper-event-caption")
         project.set_tooltip_text("Reported project")
         identity.pack_start(project, False, False, 0)
+        context_text = _reported_context_text(request.context)
+        if context_text:
+            context_label = styled(_label(context_text), "keeper-event-caption")
+            context_label.set_tooltip_text("Agent-reported context")
+            identity.pack_start(context_label, False, False, 0)
         body.pack_start(requester, False, False, 0)
+        if request.context.note:
+            note_box = styled(Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2), "keeper-event-section")
+            note_box.pack_start(styled(_label("Agent Note"), "keeper-access-caption"), False, False, 0)
+            note_box.pack_start(_label(request.context.note), False, False, 0)
+            body.pack_start(note_box, False, False, 0)
 
         if change:
             add_label(body, "Approving replaces this token’s current permissions with the scope below.")
         count = len(request.items)
         review = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
+        diff_rows = None
+        if change:
+            diff_box = styled(Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6), "keeper-event-section")
+            diff_box.pack_start(styled(_label("Permission Changes"), "keeper-access-caption"), False, False, 0)
+            diff_rows = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
+            diff_box.pack_start(diff_rows, False, False, 0)
+            review.pack_start(diff_box, False, False, 0)
         if count > 1:
             caption = "Requested Resources" if any(item.group for item in request.items) else "Requested Entries"
             heading = styled(_label(f"{caption} ({count})"), "keeper-access-caption")
@@ -813,15 +1000,9 @@ class AccessView(Gtk.Box):
         scroll.set_max_content_height(440)
         scroll.add(review)
         body.pack_start(scroll, True, True, 0)
-        pause_notice = Gtk.Box(spacing=10)
-        pause_icon = Gtk.Image.new_from_icon_name("changes-prevent-symbolic", Gtk.IconSize.MENU)
-        pause_notice.pack_start(pause_icon, False, False, 0)
-        pause_text = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=3)
-        pause_text.pack_start(styled(_label("Agent access is paused"), "keeper-access-caption"), False, False, 0)
-        add_label(pause_text, "Approving also resumes access for all approved agents.")
-        pause_notice.pack_start(pause_text, True, True, 0)
-        styled(pause_notice, "keeper-access-notice").show_all()
-        pause_notice.set_no_show_all(True)
+        pause_notice, _pause_reason, resume_button = _pause_blocker(
+            self.app, "Approving also resumes access for all approved agents.",
+        )
         body.pack_start(pause_notice, False, False, 0)
 
         technical = Gtk.Expander(label="Technical Details")
@@ -843,11 +1024,14 @@ class AccessView(Gtk.Box):
 
         def changed(*_):
             paused = self.app.workspace.paused
+            can_resume = bool(self.app.broker and self.app.broker.enabled and not self.app.desktop.locked)
             approve.set_label(resume_label if paused else "Approve")
             pause_notice.set_visible(paused)
+            resume_button.set_sensitive(can_resume)
             ready = bool(controls) and all(combo.get_active() >= 0 for combo, _ in controls)
-            can_resume = self.app.broker and self.app.broker.enabled
-            approve.set_sensitive(ready and (not paused or bool(can_resume)))
+            approve.set_sensitive(ready and (not paused or can_resume))
+            if diff_rows is not None:
+                self._render_permission_changes(diff_rows, grant.scope, request.items, controls)
             return GLib.SOURCE_CONTINUE
 
         for combo, _ in controls:
@@ -994,50 +1178,211 @@ class AccessView(Gtk.Box):
             show_choice(combo)
         return combo, choices
 
+    def _scope_permission_items(self, scope):
+        record = self.app.workspace.registrations.get(scope.vault) if self.app.workspace else None
+        items = list(metadata_labels(scope))
+        items.extend(EDIT_PERMISSIONS[operation] for operation in scope.edits)
+        items.extend(CREDENTIAL_USES[use] for use in scope.uses)
+        if scope.origins:
+            items.append("Approved Destinations: " + "; ".join(scope.origins))
+        if scope.action:
+            binding = record.binding(scope.entry, scope.action) if record else None
+            items.append(f"Run {binding.action.name}" if binding else f"Run {scope.action}")
+        return tuple(dict.fromkeys(items))
+
+    def _scope_map(self, scopes):
+        resources, _ = approved_resources(self.app.workspace, scopes, {})
+        names = {}
+        labels = {}
+        for item in resources:
+            parent = names.get(item.parent, ())
+            if item.key[0] not in ("entry", "group-scope"):
+                names[item.key] = (*parent, item.name)
+                continue
+            target = (item.key[1], "group" if item.key[0] == "group-scope" else "entry", item.key[2])
+            labels[target] = " › ".join((*parent, item.name))
+        grouped = {}
+        for scope in scopes:
+            target = (scope.vault, "group" if scope.group is not None else "entry",
+                      scope.group if scope.group is not None else scope.entry)
+            label = labels.get(target, scope.vault)
+            perms = grouped.setdefault(target, (label, []))[1]
+            for perm in self._scope_permission_items(scope):
+                if perm not in perms:
+                    perms.append(perm)
+        return {key: (label, tuple(perms)) for key, (label, perms) in grouped.items()}
+
+    def _render_permission_changes(self, container, current_scopes, items, controls):
+        for child in container.get_children():
+            container.remove(child)
+        current = self._scope_map(current_scopes)
+        proposed = {}
+        unresolved = []
+        for item, (combo, options) in zip(items, controls):
+            index = combo.get_active()
+            if index < 0:
+                unresolved.append(item.label or "Pending selection")
+                continue
+            choice = options[index]
+            scope = choice.scope
+            target = (scope.vault, "group" if scope.group is not None else "entry",
+                      scope.group if scope.group is not None else scope.entry)
+            label = " › ".join((choice.vault_name, *choice.path))
+            perms = proposed.setdefault(target, (label, []))[1]
+            for perm in self._scope_permission_items(scope):
+                if perm not in perms:
+                    perms.append(perm)
+        proposed = {key: (label, tuple(perms)) for key, (label, perms) in proposed.items()}
+
+        added, removed, changed, unchanged = [], [], [], []
+        for key in dict.fromkeys((*current, *proposed)):
+            if key not in current:
+                label, new_perms = proposed[key]
+                added.append(f"{label}: {', '.join(new_perms)}")
+            elif key not in proposed:
+                label, old_perms = current[key]
+                removed.append(f"{label}: {', '.join(old_perms)}")
+            else:
+                label, old_perms = current[key]
+                _, new_perms = proposed[key]
+                if old_perms == new_perms:
+                    unchanged.append(f"{label}: {', '.join(new_perms)}")
+                else:
+                    gained = [p for p in new_perms if p not in old_perms]
+                    lost = [p for p in old_perms if p not in new_perms]
+                    parts = [*(f"+ {p}" for p in gained), *(f"− {p}" for p in lost)]
+                    changed.append(f"{label}: {'; '.join(parts)}" if parts else f"{label}: Updated permissions")
+
+        sections = (
+            ("Added", "keeper-diff-added", added),
+            ("Removed", "keeper-diff-removed", removed),
+            ("Changed", "keeper-diff-changed", changed),
+            ("Unchanged", "keeper-diff-unchanged", unchanged),
+        )
+        for heading, css_class, entries in sections:
+            if not entries:
+                continue
+            container.pack_start(styled(_label(heading), css_class), False, False, 0)
+            for entry in entries:
+                container.pack_start(_label(entry), False, False, 0)
+        for label in unresolved:
+            container.pack_start(styled(_label(f"Pending selection: {label}"), "keeper-event-caption"), False, False, 0)
+        container.show_all()
+
     def _manage(self, grant):
-        dialog, body = _dialog(self.app, "Access Token", 690, -1)
-        dialog.set_name("keeper-access-detail")
+        while grant and not self.app.desktop.locked and not self.app.exiting:
+            stale = self._is_stale(grant)
+            dialog, body = _dialog(self.app, "Access Token", 690, -1)
+            dialog.set_name("keeper-access-detail")
+            dialog.set_modal(True)
+            dialog.add_buttons("Close", Gtk.ResponseType.CLOSE, "Remove Token…", Gtk.ResponseType.REJECT)
+            styled(dialog.get_widget_for_response(Gtk.ResponseType.REJECT), "keeper-delete")
+            dialog.set_default_response(Gtk.ResponseType.CLOSE)
+            if grant.status == "active":
+                dialog.add_button("Disable", Gtk.ResponseType.APPLY)
+            elif grant.status == "disabled":
+                dialog.add_button("Re-enable", Gtk.ResponseType.APPLY)
+            if stale:
+                dialog.add_button("Re-approve Current Credential", self.REAPPROVE_RESPONSE)
+
+            status_text = ("Active · Credential Changed" if grant.status == "active" and stale
+                           else "Workflow Only" if grant.workflow and grant.status == "active"
+                           else grant.status.capitalize())
+            status = styled(_label(status_text), "keeper-event-title")
+            body.pack_start(status, False, False, 0)
+            body.pack_start(activity_facts((
+                ("Identity", reported(grant.identity)), ("Project", reported(grant.project)),
+                ("Model", reported(grant.context.model)), ("Chat", reported(grant.context.chat)),
+                ("Requested", table_time(grant.requested)),
+                ("Last Used", table_time(grant.last_used) if grant.last_used is not None else "Never"),
+                ("Workflow", grant.workflow[0] if grant.workflow else None),
+            )), False, False, 0)
+            body.pack_start(styled(Gtk.Label(label="Approved Entries", xalign=0), "keeper-event-section-title"),
+                            False, False, 0)
+            if grant.scope:
+                tree, needs_unlock = approved_entries_tree(self.app.workspace, grant.scope)
+                scroll = _scroll(tree)
+                scroll.set_propagate_natural_height(True)
+                scroll.set_min_content_height(95)
+                scroll.set_max_content_height(335)
+                body.pack_start(scroll, True, True, 0)
+                if needs_unlock:
+                    add_label(body, "Unlock a database to see its group and entry names.")
+            else:
+                add_label(body, "This token has no approved entries or groups.")
+            technical = Gtk.Expander(label="Technical Details")
+            technical.add(activity_facts((("Verified Linux UID", grant.uid), ("Token Record", grant.id))))
+            body.pack_start(technical, False, False, 0)
+
+            response = self.app.run_dialog(dialog)
+            if response == self.REAPPROVE_RESPONSE:
+                self._reapprove_credentials(grant.id)
+                grant = self.app.grants.records.get(grant.id) if self.app.grants else None
+                continue
+            if response == Gtk.ResponseType.REJECT:
+                self._update_token(grant.id, "removed")
+            elif response == Gtk.ResponseType.APPLY:
+                self._update_token(grant.id, "disabled" if grant.status == "active" else "active")
+            return
+
+    def _reapprove_credentials(self, grant_id):
+        if self.app.desktop.locked or not self.app.grants:
+            return
+        try:
+            self.app.grants.reapprove_credentials(grant_id)
+        except (ActivityError, ListingError, OSError, SettingsError, ValueError, VaultError) as error:
+            dialog = styled(Gtk.MessageDialog(
+                transient_for=self.app.window, modal=True, message_type=Gtk.MessageType.ERROR,
+                buttons=Gtk.ButtonsType.CLOSE, text="Could not re-approve credentials",
+                secondary_text=str(error) or "Unlock the affected vaults and try again.",
+            ), "keeper-dialog")
+            self.app.run_dialog(dialog)
+            return
+        self.app._refresh()
+
+    def _remove_multiple(self, *_):
+        if self.app.desktop.locked or self.app.busy or not self.app.grants:
+            return
+        candidates = [grant for grant in self.app.grants.rows() if grant.status in ("active", "disabled")]
+        if not candidates:
+            return
+        dialog, body = _dialog(self.app, "Remove Multiple Tokens", 580, 380)
         dialog.set_modal(True)
-        dialog.add_buttons("Close", Gtk.ResponseType.CLOSE, "Remove Token…", Gtk.ResponseType.REJECT)
-        styled(dialog.get_widget_for_response(Gtk.ResponseType.REJECT), "keeper-delete")
-        dialog.set_default_response(Gtk.ResponseType.CLOSE)
-        if grant.status == "active":
-            dialog.add_button("Disable", Gtk.ResponseType.APPLY)
-        elif grant.status == "disabled":
-            dialog.add_button("Re-enable", Gtk.ResponseType.APPLY)
+        dialog.add_buttons("Cancel", Gtk.ResponseType.CANCEL, "Remove Selected", Gtk.ResponseType.OK)
+        remove_button = styled(dialog.get_widget_for_response(Gtk.ResponseType.OK), "keeper-delete")
+        remove_button.set_sensitive(False)
+        add_label(body, "Select active or disabled tokens to remove:")
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        checks = []
 
-        status = styled(_label("Workflow Only" if grant.workflow and grant.status == "active"
-                               else grant.status.capitalize()), "keeper-event-title")
-        body.pack_start(status, False, False, 0)
-        body.pack_start(activity_facts((
-            ("Identity", reported(grant.identity)), ("Project", reported(grant.project)),
-            ("Model", reported(grant.context.model)), ("Chat", reported(grant.context.chat)),
-            ("Requested", table_time(grant.requested)),
-            ("Last Used", table_time(grant.last_used) if grant.last_used is not None else "Never"),
-            ("Workflow", grant.workflow[0] if grant.workflow else None),
-        )), False, False, 0)
-        body.pack_start(styled(Gtk.Label(label="Approved Entries", xalign=0), "keeper-event-section-title"),
-                        False, False, 0)
-        if grant.scope:
-            tree, needs_unlock = approved_entries_tree(self.app.workspace, grant.scope)
-            scroll = _scroll(tree)
-            scroll.set_propagate_natural_height(True)
-            scroll.set_min_content_height(95)
-            scroll.set_max_content_height(335)
-            body.pack_start(scroll, True, True, 0)
-            if needs_unlock:
-                add_label(body, "Unlock a database to see its group and entry names.")
-        else:
-            add_label(body, "This token has no approved entries or groups.")
-        technical = Gtk.Expander(label="Technical Details")
-        technical.add(activity_facts((("Verified Linux UID", grant.uid), ("Token Record", grant.id))))
-        body.pack_start(technical, False, False, 0)
+        def update_sensitivity(*_):
+            remove_button.set_sensitive(any(check.get_active() for _, check in checks))
 
-        response = self.app.run_dialog(dialog)
-        if response == Gtk.ResponseType.REJECT:
-            self._update_token(grant.id, "removed")
-        elif response == Gtk.ResponseType.APPLY:
-            self._update_token(grant.id, "disabled" if grant.status == "active" else "active")
+        for grant in candidates:
+            state = "Active · Credential Changed" if grant.status == "active" and self._is_stale(grant) else grant.status.capitalize()
+            check = Gtk.CheckButton(label=f"{grant.identity} · {grant.project} ({state})")
+            check.connect("toggled", update_sensitivity)
+            box.pack_start(check, False, False, 0)
+            checks.append((grant.id, check))
+        scroll = _scroll(box)
+        body.pack_start(scroll, True, True, 0)
+        if self.app.run_dialog(dialog) != Gtk.ResponseType.OK:
+            return
+        selected = [identifier for identifier, check in checks if check.get_active()]
+        if not selected:
+            return
+        noun = "token" if len(selected) == 1 else "tokens"
+        if not self.app.confirm(
+            f"Remove {len(selected)} {noun}?",
+            "The runners will need fresh requests and approvals.",
+        ):
+            return
+
+        def remove_all():
+            for identifier in selected:
+                self.app.grants.transition(identifier, "removed")
+
+        self.app.owner_operation(remove_all)
 
     def _update_token(self, identifier, status):
         if self.app.desktop.locked:
@@ -1119,6 +1464,7 @@ def activity_execution(row):
     fields = activity_edit_fields(row)
     facts = (
         ("Destination", row.get("destination")), ("Authorization", row.get("decision")),
+        ("Reason", row.get("detail")),
         ("Workflow Step", row.get("workflow_step")),
         ("HTTP Status", row.get("status")), ("Decided", decided if decided not in (requested, completed) else None),
         ("Completed", completed if completed != requested else None),
@@ -1221,6 +1567,7 @@ class ActivityView(Gtk.Box):
         super().__init__(orientation=Gtk.Orientation.VERTICAL, spacing=18)
         self.app = app
         self.rows = {}
+        self.show_all = False
         header, _, _, _ = section_heading("Activity", "document-open-recent-symbolic")
         tools = Gtk.Box(valign=Gtk.Align.CENTER)
         header.pack_end(tools, False, False, 0)
@@ -1251,7 +1598,20 @@ class ActivityView(Gtk.Box):
         self.table.set_expander_column(self.table.get_column(0))
         self.table.connect("row-activated", self._details)
         self.empty, self.empty_label, _ = empty_state("document-open-recent-symbolic", "No activity recorded")
-        self.pack_start(table_card(scroll, self.empty), True, True, 0)
+        card = table_card(scroll, self.empty)
+        self.truncation_banner = styled(Gtk.Box(spacing=10), "keeper-card-toolbar")
+        self.truncation_label = styled(_label(""), "keeper-muted")
+        self.truncation_banner.pack_start(self.truncation_label, True, True, 0)
+        self.show_all_button = button(self.truncation_banner, "Show All", self._show_all_events)
+        self.truncation_banner.show_all()
+        self.truncation_banner.set_no_show_all(True)
+        self.truncation_banner.hide()
+        card.pack_end(self.truncation_banner, False, False, 0)
+        self.pack_start(card, True, True, 0)
+
+    def _show_all_events(self, *_):
+        self.show_all = True
+        self.refresh()
 
     def _toggle_filters(self, *_):
         opened = self.filter_panel.get_reveal_child()
@@ -1267,8 +1627,11 @@ class ActivityView(Gtk.Box):
     def refresh(self, *_):
         filters = {name: field.get_text().strip().casefold() for name, field in self.filters.items()
                    if field.get_text().strip()}
+        total = 0
         try:
-            rows = self.app.activity.rows()
+            limit = None if (filters or self.show_all) else 1000
+            rows = self.app.activity.rows(limit=limit)
+            total = self.app.activity.count() if hasattr(self.app.activity, "count") else len(rows)
         except ActivityError:
             rows = []
         records = self.app.grants.records if self.app.grants else {}
@@ -1297,6 +1660,10 @@ class ActivityView(Gtk.Box):
         fill_table(self.table, visible, self.ROW_KEY)
         self.empty_label.set_text("No activity matches these filters" if filters else "No activity recorded")
         self.empty.set_visible(not visible)
+        truncated = not filters and not self.show_all and total > 1000
+        if truncated:
+            self.truncation_label.set_text(f"Showing newest 1,000 of {total:,} events")
+        self.truncation_banner.set_visible(truncated)
 
     @staticmethod
     def _values(row, resource, key, *, action=None, children=()):
@@ -1304,6 +1671,8 @@ class ActivityView(Gtk.Box):
         stage = row["action"].partition(" · ")[0]
         if children and key[0] == "token":
             icon = "changes-allow-symbolic"
+        elif children and key[0] == "workflow":
+            icon = "system-run-symbolic"
         elif stage in EDIT_STAGES:
             icon = "document-edit-symbolic"
         else:
@@ -1339,6 +1708,7 @@ def entry_details(app, vault, entry):
         modified = table_time(entry.get("modified"))
         add_label(body, f"Created  {created}\nModified  {modified}")
         entry_actions = Gtk.Box(spacing=8)
+        button(entry_actions, "Copy Password", lambda *_: app._copy_password(vault, entry["id"]))
         button(entry_actions, "Copy Entry Reference", lambda *_: app.copy_reference(vault, "entry", entry["id"]))
         button(entry_actions, "Edit Entry…", lambda *_: dialog.response(EDIT_ENTRY_RESPONSE))
         styled(button(entry_actions, DELETE_LABEL, lambda *_: dialog.response(DELETE_ENTRY_RESPONSE)), "keeper-delete")
@@ -1392,9 +1762,11 @@ def edit_binding(app, vault, entry, previous):
     kind.set_active_id(previous.action.kind.value if previous else ActionType.BASIC.value)
     body.pack_start(kind, False, False, 0)
     fields = []
-    for title, default in (("Action ID", "health-check"), ("Name", "Health check")):
+    for widget_name, title, default in (("action-id", "Action ID", "health-check"),
+                                        ("action-name", "Name", "Health check")):
         add_label(body, title)
-        field = Gtk.Entry(text=default)
+        field = Gtk.Entry(placeholder_text=default)
+        field.set_name(widget_name)
         body.pack_start(field, False, False, 0)
         fields.append(field)
     target_label = _label("")

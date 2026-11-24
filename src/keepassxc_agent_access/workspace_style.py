@@ -330,14 +330,17 @@ button.keeper-delete {
     font-size: 1.45em;
     font-weight: 800;
 }
-#keeper-edit-review .keeper-review-label {
+#keeper-edit-review .keeper-review-label,
+#keeper-access-review .keeper-review-label {
     font-weight: 700;
 }
-#keeper-edit-review .keeper-review-muted {
+#keeper-edit-review .keeper-review-muted,
+#keeper-access-review .keeper-review-muted {
     color: @keeper_muted;
 }
 #keeper-edit-review .keeper-review-value,
-#keeper-edit-review .keeper-review-blocker {
+#keeper-edit-review .keeper-review-blocker,
+#keeper-access-review .keeper-review-blocker {
     border-radius: 8px;
     border: 1px solid @keeper_line;
     padding: 10px 12px;
@@ -349,11 +352,13 @@ button.keeper-delete {
     background-color: mix(@keeper_surface, @keeper_cobalt, 0.085);
     border-color: alpha(@keeper_cobalt, 0.24);
 }
-#keeper-edit-review .keeper-review-blocker {
+#keeper-edit-review .keeper-review-blocker,
+#keeper-access-review .keeper-review-blocker {
     background-color: mix(@keeper_surface, @keeper_warning, 0.12);
     border-color: alpha(@keeper_warning, 0.34);
 }
-#keeper-edit-review .keeper-review-blocker image {
+#keeper-edit-review .keeper-review-blocker image,
+#keeper-access-review .keeper-review-blocker image {
     color: @keeper_warning;
 }
 #keeper-access-review {
@@ -406,6 +411,22 @@ button.keeper-delete {
 #keeper-access-review .keeper-access-notice image,
 #keeper-access-review label.keeper-access-unresolved {
     color: @keeper_warning;
+}
+#keeper-access-review .keeper-diff-added {
+    color: @keeper_success;
+    font-weight: 700;
+}
+#keeper-access-review .keeper-diff-removed {
+    color: @keeper_failure;
+    font-weight: 700;
+}
+#keeper-access-review .keeper-diff-changed {
+    color: @keeper_warning;
+    font-weight: 700;
+}
+#keeper-access-review .keeper-diff-unchanged {
+    color: @keeper_muted;
+    font-weight: 700;
 }
 #keeper-access-review .keeper-access-footer {
     padding: 0 12px 12px;
