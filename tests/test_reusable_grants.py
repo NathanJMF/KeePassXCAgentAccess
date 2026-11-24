@@ -187,3 +187,40 @@ class ReusableGrantTests(TestCase):
             self.assertIn(caption, text)
         self.assertIn("Approved Destinations: https://service.example.test:443/", text)
         self.assertNotIn("Entry Metadata", text)
+
+    def test_denied_and_removed_profiles_can_re_enroll_and_preserve_unrelated_pins(self):
+        from keepassxc_agent_access.protocol import ListingError
+
+        self.assertEqual(self.enroll(self.request()), "pending")
+        denied_record = self.grants.authenticate(self.credential, 1500)
+        self.grants.decide(denied_record.id, None)
+        self.assertEqual(self.grants.authenticate(self.credential, 1500).status, "denied")
+        with self.assertRaises(ListingError):
+            self.enroll(self.request(), change_id=str(uuid4()))
+        self.assertEqual(self.enroll({"vault": self.vault, "entry": self.entry, "metadata": True},
+                                     identity="New Assistant"), "pending")
+        active = self.approve()
+        self.assertNotEqual(active.id, denied_record.id)
+        self.assertNotIn(denied_record.id, self.grants.records)
+
+        self.grants.transition(active.id, "removed")
+        self.assertEqual(self.enroll(self.request(uses=("https_results",)), identity="Re-enrolled Assistant"), "pending")
+        fresh = self.approve()
+        rev = self.workspace.registrations[self.vault].credential_revision(self.entry)
+        pin = "c" * 64
+        self.grants.trust_result_certificate(
+            fresh.id, fresh.generation, self.vault, self.entry, rev, "https://service.example.test:443/", pin, (None,))
+        second_entry = str(uuid4())
+        self.workspace.sessions[self.vault] = Unlocked(
+            SimpleNamespace(available=True), (), (self.row, {**self.row, "id": second_entry, "title": "Second"}),
+        )
+        change = str(uuid4())
+        self.grants.enroll(self.credential, 1500, {
+            "change_id": change,
+            "items": [self.request(uses=("https_results",)),
+                      {"vault": self.vault, "entry": second_entry, "metadata": True}],
+        }, Attribution())
+        pending = self.grants.authenticate(self.credential, 1500).pending_change
+        self.grants.decide(fresh.id, [self.grants.choices(item)[0] for item in pending.items], change_id=change)
+        updated = self.grants.authenticate(self.credential, 1500)
+        self.assertEqual(updated.scope[0].result_certificates, (("https://service.example.test:443/", pin),))

@@ -599,12 +599,12 @@ class ScopedBrokerTests(unittest.TestCase):
         self.assertTrue(self.invoke("list_entries")["entries"])
         self.grants.transition(pending.id, "removed")
         self.assert_code("ineligible", "list_entries")
-        with self.assertRaises(ListingError):
-            self.enroll([item])
+        self.assertEqual(Grants(self.workspace, self.activity).records[pending.id].status, "removed")
+        self.assert_code("ineligible", "request_access", request={"change_id": str(uuid4()), "items": [item]})
+        self.assertEqual(self.enroll([item]), {"status": "pending"})
         self.activity.rows(agent="fixture", outcome="succeeded")
         self.assertTrue(self.grants.records[other].last_used)
         self.assertNotIn(self.secrets[0].encode(), self.grants.path.read_bytes())
-        self.assertEqual(Grants(self.workspace, self.activity).records[pending.id].status, "removed")
 
     def test_credential_transports_have_independent_review_settings(self):
         vault = self.vaults[0]
@@ -887,3 +887,70 @@ class ScopedBrokerTests(unittest.TestCase):
         self.assertEqual(self.invoke("access_status"), {"status": "denied"})
         self.assertEqual(self.grants.rows(), [])
         self.assert_code("ineligible", "list_vaults")
+
+    def test_access_details_include_pause_lock_staleness_pins_and_denied_change_without_secrets(self):
+        vault = self.vaults[0]
+        cred_item = {"vault": vault, "entry": self.entry, "uses": ["https", "https_results"],
+                     "origins": ["https://api.example.test/"]}
+        identifier = self.approve([cred_item])
+        record = self.grants.records[identifier]
+        rev = self.workspace.registrations[vault].credential_revision(self.entry)
+        pin = "d" * 64
+        self.grants.trust_result_certificate(
+            identifier, record.generation, vault, self.entry, rev, "https://api.example.test:443/", pin, (None,))
+
+        change = {"change_id": str(uuid4()), "items": [{"vault": vault, "entry": self.entry, "metadata": True}]}
+        self.assertEqual(self.invoke("request_access", request=change), {"status": "pending"})
+        self.grants.decide(identifier, None, change_id=change["change_id"])
+
+        self.workspace.pause(True)
+        details = self.invoke("access_status", details=True)
+        self.assertTrue(details["paused"])
+        self.assertEqual(details["last_change"], {"id": change["change_id"], "status": "denied"})
+        scope_item = details["scope"][0]
+        self.assertFalse(scope_item["vault_locked"])
+        self.assertFalse(scope_item["stale"])
+        self.assertEqual(scope_item["pinned_origins"], ["https://api.example.test:443/"])
+        wire = json.dumps(details)
+        for forbidden in ("revision", "generation", "uid", "result_certificates", pin):
+            self.assertNotIn(forbidden, wire)
+
+        self.workspace.sessions.pop(vault)
+        reg = self.workspace.registrations[vault]
+        self.workspace._replace(replace(reg, credential_nonces=((self.entry, str(uuid4())),)))
+        locked_details = self.invoke("access_status", details=True)
+        self.assertTrue(locked_details["scope"][0]["vault_locked"])
+        self.assertTrue(locked_details["scope"][0]["stale"])
+
+    def test_automatic_provision_allows_public_ca_without_certificate_pin(self):
+        vault = self.vaults[0]
+        account_entry = str(uuid4())
+        session = self.workspace.session(vault)
+        account_row = {**session.entries[0], "id": account_entry, "title": "Account Entry"}
+        session.worker.rows.append(account_row)
+        self.workspace.sessions[vault] = Unlocked(session.worker, (), (*session.entries, account_row))
+        self.approve([
+            {"vault": vault, "entry": self.entry, "uses": ["https", "https_results"],
+             "origins": ["https://api.example.test/"]},
+            {"vault": vault, "entry": account_entry, "uses": ["https_results", "https_body"],
+             "origins": ["https://api.example.test/"]},
+        ])
+        self.workspace.set_review_usage(False)
+        self.workspace.set_review_action("read_results", False)
+        self.workspace.set_review_action("use_https", False)
+        self.workspace.set_scoped_auto_approval("provision_account", True)
+
+        usage = {
+            "type": "https_results",
+            "origin": "https://api.example.test/",
+            "approve_write_once": True,
+            "request": {"path": "/accounts", "method": "POST", "auth": "bearer", "json": {"role": "user"}},
+            "result": {"path": "/data", "columns": ["id"]},
+        }
+        provision = {"entry": account_entry, "body_type": "json", "fields": {"password": "initial_password"}}
+        with patch.object(self.engine.approvals, "wait", side_effect=AssertionError("Should auto-approve")):
+            with patch.object(session.worker, "use",
+                              return_value={"outcome": "succeeded", "http_status": 200, "data": [{"id": 1}]}):
+                result = self.invoke("use_password", vault=vault, entry=self.entry, receipt=str(uuid4()),
+                                     usage=usage, provision=provision)
+        self.assertEqual(result["outcome"], "succeeded")

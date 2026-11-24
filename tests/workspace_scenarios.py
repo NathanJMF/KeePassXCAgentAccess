@@ -1341,8 +1341,9 @@ def main(root):
                 assert denied == invoke("alpha", "entries", "list", "--vault", str(UUID(int=30)), expected=1)
                 assert invoke("beta", "entries", "list", "--vault", first, expected=1) == denied
                 assert use("alpha", second, expected=1) == denied
-                assert use("beta", second, expected=1) == denied
-                assert use("alpha", first, direct_entry, expected=1) == denied
+                entry_denied = use("beta", second, expected=1)
+                assert "unavailable for this token" in entry_denied
+                assert entry_denied == use("alpha", first, direct_entry, expected=1)
                 assert not calls
                 assert use("alpha", first) == {"outcome": "succeeded", "http_status": 200}
                 assert calls == [("/first", AUTHORIZATION)]
@@ -1390,7 +1391,7 @@ def main(root):
                 drive_dialog(lambda: open_entry(first_entry), edit_type)
                 rebound = app.workspace.registrations[first].binding(first_entry, "check")
                 assert rebound.action.kind is ActionType.BEARER and rebound.action.url == imported.url
-                assert use("alpha", first, expected=1) == denied
+                assert use("alpha", first, expected=1) == entry_denied
                 bearer = [{"vault": first, "entry": first_entry, "action": "check"}]
                 assert enroll("bearer", bearer) == {"status": "pending"}
                 approve("bearer")
@@ -1424,8 +1425,8 @@ def main(root):
                 app.workspace.remove_binding(first, first_entry, "health-check")
 
                 app.workspace.save_binding(first, replace(imported, url=url + "/changed"), "check")
-                assert use("alpha", first, expected=1) == denied
-                assert use("bearer", first, expected=1) == denied
+                assert use("alpha", first, expected=1) == entry_denied
+                assert use("bearer", first, expected=1) == entry_denied
                 assert all(path != "/changed" for path, _ in calls)
                 assert "unavailable for this token" in enroll("alpha", beta, expected=1)
 
@@ -1542,7 +1543,8 @@ def main(root):
                 select_tree(first)
                 token_context_menu("alpha", activate="Disable Token")
                 assert invoke("alpha", "access", "status") == {"status": "disabled"}
-                assert invoke("alpha", "entries", "list", expected=1) == denied
+                disabled_listing = invoke("alpha", "entries", "list", expected=1)
+                assert "unavailable for this token" in disabled_listing and "disabled" in disabled_listing
                 assert invoke("beta", "entries", "list")["entries"] == fixture[2:]
                 assert token_context_menu("alpha") == ["View Permissions…", "Re-enable Token", "Remove Token…"]
                 disabled = access_root("alpha")
@@ -1560,8 +1562,8 @@ def main(root):
                 assert alpha_record.last_used and alpha_record.last_used >= alpha_record.requested
                 drive_dialog(lambda: token_context_menu("alpha", activate="Remove Token…"),
                              lambda dialog: dialog.response(Gtk.ResponseType.OK))
-                assert enroll("alpha", alpha, expected=1) == denied
-                assert invoke("alpha", "entries", "list", expected=1) == denied
+                removed_listing = invoke("alpha", "entries", "list", expected=1)
+                assert "unavailable for this token" in removed_listing and "removed" in removed_listing
                 assert invoke("beta", "entries", "list")["entries"] == fixture[2:]
 
                 check_editors(first, second)

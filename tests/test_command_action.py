@@ -1,18 +1,27 @@
+from contextlib import contextmanager
 import hashlib
+import ipaddress
 import os
 from pathlib import Path
+import socket
+import subprocess
 from tempfile import TemporaryDirectory
 from threading import Event
+from types import SimpleNamespace
 from unittest import TestCase, skipUnless
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from pykeepass import create_database
 
-from keepassxc_agent_access.access_settings import Action, ActionType
-from keepassxc_agent_access.command_action import deliver_credential, executable_digest, prepare_command, verify_scope_limits
+from keepassxc_agent_access.access_settings import Action, ActionType, Destination
+from keepassxc_agent_access.command_action import (
+    _TASK_LIMIT, deliver_credential, executable_digest, prepare_command, sandbox_arguments, verify_scope_limits,
+)
+from keepassxc_agent_access.command_network import Relay, approved_address, approved_addresses
 from keepassxc_agent_access.command_prompt import askpass
-from keepassxc_agent_access.protocol import ListingError, UPLOAD_LIMIT, validate_command, validate_upload
-from keepassxc_agent_access.vault import VaultTarget, open_vault
+from keepassxc_agent_access.protocol import ListingError, UPLOAD_LIMIT, encode, validate_command, validate_upload
+from keepassxc_agent_access.vault import VaultSession, VaultTarget, open_vault
+from keepassxc_agent_access import vault_worker
 
 
 class LocalCommandTests(TestCase):
@@ -106,3 +115,133 @@ class LocalCommandTests(TestCase):
                         self.assertEqual(error.exception.code, "revoked")
                     expected = "failed" if number == len(checks) - 1 else "succeeded"
                     self.assertEqual(worker.use(action, approve), {"outcome": expected})
+
+    def test_sandbox_binds_system_ca_and_raises_task_limit(self):
+        self.assertEqual(_TASK_LIMIT, 64)
+        arguments = sandbox_arguments(("/usr/bin/true",), 7, "fixture.scope",
+                                      relay_path=Path("/tmp/relay"), prompt_variable="GIT_ASKPASS",
+                                      ca_file=Path("/tmp/custom-ca.pem"))
+        pairs = list(zip(arguments, arguments[1:], arguments[2:]))
+        self.assertIn(("--ro-bind", "/tmp/custom-ca.pem", "/keeper/trust.pem"), pairs)
+        self.assertIn(("--ro-bind", "/tmp/custom-ca.pem", "/etc/ssl/certs/ca-certificates.crt"), pairs)
+
+    def test_verify_scope_limits_includes_task_limit_detail(self):
+        files = {"cgroup": "0::/user.slice/fixture.scope\n", "memory.max": str(192 * 1024**2),
+                 "memory.swap.max": "0", "pids.max": "65", "cpu.max": "100000 100000"}
+        with patch.object(Path, "read_text", autospec=True, side_effect=lambda path: files[path.name]):
+            with self.assertRaisesRegex(OSError, "pids.max=65"):
+                verify_scope_limits(123, "fixture.scope")
+
+    def test_prepare_command_captures_pre_ready_stderr_and_allows_unix_socketpair(self):
+        class FakeProcess:
+            pid = 4242
+
+            def __init__(self, _args, *, stderr, **_kwargs):
+                self.stdin = Mock()
+                self.stdout = Mock()
+                self.stdout.fileno.return_value = 99
+                stderr.write(b"bwrap: setting up uid map failed\n")
+                stderr.flush()
+
+            def poll(self):
+                return 1
+
+            def wait(self):
+                return 1
+
+        with patch("keepassxc_agent_access.command_action.executable_digest", return_value="0" * 64), \
+             patch("keepassxc_agent_access.command_action.syscall_filter") as sc_filter, \
+             patch("keepassxc_agent_access.command_action.subprocess.Popen", side_effect=FakeProcess), \
+             patch("keepassxc_agent_access.command_action.select", return_value=([99], [], [])), \
+             patch("keepassxc_agent_access.command_action.os.read", return_value=b""), \
+             patch("keepassxc_agent_access.command_action.stop_scope"):
+            sc_filter.return_value.__enter__.return_value = 5
+            with self.assertRaisesRegex(OSError, "bwrap: setting up uid map failed"):
+                with prepare_command(("/usr/bin/true",), "0" * 64):
+                    self.fail("Should not yield after startup failure")
+            sc_filter.assert_called_once_with(unix_sockets=False, unix_socket_pairs=True)
+
+    def test_approved_addresses_and_relay_fall_back_across_resolved_ips(self):
+        getent_out = (
+            "2001:db8::1     STREAM api.example.test\n"
+            "2001:db8::1     DGRAM  \n"
+            "198.51.100.10   STREAM api.example.test\n"
+        )
+        completed = subprocess.CompletedProcess(["getent"], 0, stdout=getent_out)
+        with patch("keepassxc_agent_access.command_network.subprocess.run", return_value=completed):
+            resolved = approved_addresses("api.example.test")
+            self.assertEqual(resolved, (ipaddress.ip_address("2001:db8::1"), ipaddress.ip_address("198.51.100.10")))
+            self.assertEqual(approved_address("api.example.test"), resolved[0])
+
+        with patch("keepassxc_agent_access.command_network.approved_addresses", return_value=resolved):
+            relay = Relay(Destination.parse("https://api.example.test/"))
+        self.assertEqual(relay.addresses, resolved)
+        self.assertEqual(relay.address, resolved[0])
+
+        attempted = []
+        created = []
+
+        class FakeSocket:
+            def __init__(self, family, _kind):
+                self.family = family
+                self.closed = False
+                created.append(self)
+
+            def settimeout(self, _value):
+                pass
+
+            def connect(self, addr):
+                attempted.append(addr)
+                if addr[0] == "2001:db8::1":
+                    raise OSError("Network unreachable")
+
+            def close(self):
+                self.closed = True
+
+        client = Mock()
+        with patch("keepassxc_agent_access.command_network.connection_target", return_value=("api.example.test", 443)), \
+             patch("keepassxc_agent_access.command_network.socket.socket", side_effect=FakeSocket), \
+             patch.object(relay, "forward") as forward:
+            relay.connect(client)
+        self.assertEqual(attempted, [("2001:db8::1", 443), ("198.51.100.10", 443)])
+        self.assertTrue(created[0].closed)
+        forward.assert_called_once_with(client, created[1])
+
+    def test_opaque_command_pre_dispatch_failure_returns_unavailable_with_detail(self):
+        entry = SimpleNamespace(password="secret")
+        frames = []
+        with patch.object(vault_worker, "reply", side_effect=frames.append), \
+             patch.object(vault_worker, "prepare_command", side_effect=OSError("bwrap: missing userns\n\x00")), \
+             patch("keepassxc_agent_access.vault_worker.sys.stdin") as fake_stdin:
+            vault_worker.use_command(entry, ("/usr/bin/true",), "0" * 64, opaque=True)
+            fake_stdin.buffer.readline.assert_not_called()
+        self.assertEqual(frames, [encode({"error": "unavailable", "detail": "bwrap: missing userns"})])
+
+        session = VaultSession(Mock())
+        action = Action("agent-request", "Local Command", "229b7a79-bcb0-450c-a320-bfccdd672f75", "",
+                        kind=ActionType.STDIN, command=("/usr/bin/true",), executable_sha256="0" * 64, opaque=True)
+
+        @contextmanager
+        def exchange(_request, _timeout):
+            yield lambda: frames[0]
+
+        with patch.object(session, "_exchange", side_effect=exchange):
+            with self.assertRaises(ListingError) as error:
+                session.use(action, lambda _: True)
+        self.assertEqual(error.exception.code, "unavailable")
+        self.assertEqual(error.exception.detail, "bwrap: missing userns")
+
+        # Post-dispatch failures still hide details and return dispatched for opaque commands.
+        frames.clear()
+
+        @contextmanager
+        def post_dispatch_prepare(*_args, **_kwargs):
+            yield Mock()
+
+        with patch.object(vault_worker, "reply", side_effect=frames.append), \
+             patch.object(vault_worker, "prepare_command", side_effect=post_dispatch_prepare), \
+             patch.object(vault_worker, "deliver_credential", side_effect=OSError("secret stderr")), \
+             patch("keepassxc_agent_access.vault_worker.sys.stdin") as fake_stdin:
+            fake_stdin.buffer.readline.return_value = b"dispatch\n"
+            vault_worker.use_command(entry, ("/usr/bin/true",), "0" * 64, opaque=True)
+        self.assertEqual(frames, [encode({"ready": True}), encode({"outcome": "failed"})])

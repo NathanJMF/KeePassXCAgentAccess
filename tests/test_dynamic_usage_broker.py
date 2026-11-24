@@ -155,7 +155,10 @@ class DynamicUsageBrokerTests(unittest.TestCase):
         self.approve([{"vault": self.vaults[0], "entry": self.entry, "metadata": True}])
         status = self.invoke("access_status", details=True)
         self.assertEqual(set(status["scope"][0]),
-                         {"vault", "entry", "group", "metadata", "username", "url", "action", "edits"})
+                         {"vault", "entry", "group", "metadata", "username", "url", "action", "edits",
+                          "vault_locked", "stale"})
+        self.assertFalse(status["scope"][0]["vault_locked"])
+        self.assertFalse(status["scope"][0]["stale"])
         identifier = self.approve([self.reusable()], index=1)
         grant = self.grants.records[identifier]
         self.grants.records[identifier] = replace(grant, scope=tuple(replace(s, use_revision=None) for s in grant.scope))
