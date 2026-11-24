@@ -168,14 +168,25 @@ def main(root):
     assert saved_item is not None
     assert launcher.launch([], None)
     wait_for(app_pid)
-    subprocess.run([str(managed / "uninstall")], check=True, capture_output=True)
-    assert not managed.exists()
+    subprocess.run([str(managed / "uninstall"), "--keep-data"], check=True, capture_output=True)
+    assert not managed.parent.exists()
     assert not (Path(os.environ["XDG_DATA_HOME"]) / "applications" / DESKTOP_ID).exists()
     assert installed.read_bytes() == edited
     assert target.database.read_bytes() == vault_before
     assert access.path.read_bytes() == settings_before
     assert SystemKeyring().retrieve(saved_item) == PASSWORD
+    subprocess.run(["./install", "--app-only", "--no-launch"], check=True, capture_output=True)
+    assert (managed / "run-tray").exists()
     subprocess.run(["./uninstall"], check=True, capture_output=True)
+    assert not managed.parent.exists()
+    assert not access.path.parent.exists()
+    assert target.database.read_bytes() == vault_before
+    try:
+        SystemKeyring().retrieve(saved_item)
+    except Exception:
+        pass
+    else:
+        raise AssertionError("Keeper keyring item remained after full uninstall.")
     subprocess.run(["./install", "--app-only", "--no-launch"], check=True, capture_output=True)
     assert (managed / "run-tray").exists()
     print("Launcher scenario passed: managed install, GNOME launch, single instance, open-only tray, removal, reinstall and preserved data",

@@ -44,8 +44,19 @@ class InstallationTests(unittest.TestCase):
         self.skill = self.root / "Documents/Skills/Keeper/SKILL.md"
         self.legacy_skill = self.root / "Documents/Skills/keepassxc-agent-access/SKILL.md"
         with patch("keepassxc_agent_access.installation.GLib.get_user_data_dir", return_value=str(self.root / "data")), \
-             patch("keepassxc_agent_access.installation.GLib.get_user_config_dir", return_value=str(self.root / "config")):
+             patch("keepassxc_agent_access.installation.GLib.get_user_config_dir", return_value=str(self.root / "config")), \
+             patch("keepassxc_agent_access.installation.GLib.get_user_cache_dir", return_value=str(self.root / "cache")):
             self.installation = Installation()
+        env_patch = patch.dict(os.environ, {
+            "XDG_DATA_HOME": str(self.root / "data"),
+            "XDG_CONFIG_HOME": str(self.root / "config"),
+            "XDG_STATE_HOME": str(self.root / "state"),
+            "XDG_CACHE_HOME": str(self.root / "cache"),
+            "XDG_RUNTIME_DIR": str(self.root / "runtime"),
+        })
+        env_patch.start()
+        self.addCleanup(env_patch.stop)
+        (self.root / "runtime").mkdir(mode=0o700, parents=True, exist_ok=True)
         for target, options in (
             ("skill_destination", {"return_value": self.skill}),
             ("antigravity_skill_destination", {"return_value": None}),
@@ -55,6 +66,10 @@ class InstallationTests(unittest.TestCase):
             patcher = patch(f"keepassxc_agent_access.installation.{target}", **options)
             patcher.start()
             self.addCleanup(patcher.stop)
+        cache_patcher = patch("keepassxc_agent_access.installation.GLib.get_user_cache_dir",
+                              return_value=str(self.root / "cache"))
+        cache_patcher.start()
+        self.addCleanup(cache_patcher.stop)
 
     def test_managed_install_update_and_uninstall(self):
         installation = self.installation
@@ -375,6 +390,114 @@ class InstallationTests(unittest.TestCase):
             install_main()
         admin.assert_not_called()
         self.assertFalse(self.installation.app.exists())
+
+    def test_agent_setup_remove_cleans_dirs_socket_and_managed_account(self):
+        owner = 1000
+        account_name = f"keeper-agent-{owner}"
+        runtime = self.root / f"usr/local/lib/keeper-connect-{owner}"
+        listener = self.root / f"etc/systemd/system/keeper-connect-{owner}.socket"
+        runner = self.root / f"etc/systemd/system/keeper-connect-{owner}@.service"
+        tmpfiles = self.root / f"etc/tmpfiles.d/keeper-connect-{owner}.conf"
+        state_dir = self.root / f"var/lib/keeper-connect-{owner}"
+        socket_path = self.root / f"run/keeper-connect-{owner}.sock"
+        broker_dir = self.root / f"run/keeper-broker-{owner}"
+        record = self.root / f"etc/keeper/connection-{owner}.json"
+        import hashlib
+        hashes = {}
+        for rel in RUNTIME:
+            p = runtime / rel
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_bytes(b"bin")
+            hashes[str(p)] = hashlib.sha256(b"bin").hexdigest()
+        (runtime / "__pycache__").mkdir(exist_ok=True)
+        (runtime / "__pycache__/mod.pyc").write_bytes(b"pyc")
+        for p in (listener, runner, tmpfiles):
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_bytes(b"unit")
+            hashes[str(p)] = hashlib.sha256(b"unit").hexdigest()
+        state_dir.mkdir(parents=True)
+        (state_dir / "profile-hash").mkdir()
+        broker_dir.mkdir(parents=True)
+        (broker_dir / "broker.sock").write_bytes(b"")
+        socket_path.write_bytes(b"")
+        record.parent.mkdir(parents=True, exist_ok=True)
+        record.write_text(json.dumps({
+            "version": 1, "owner": owner, "endpoint": f"/run/keeper-broker-{owner}/broker.sock",
+            "uid": 999, "managed_account": account_name, "files": hashes,
+        }))
+
+        from pwd import struct_passwd
+        pw = struct_passwd((account_name, "x", 999, 999, "", "/nonexistent", "/usr/sbin/nologin"))
+
+        def fake_path(*args):
+            text = str(args[0])
+            for prefix in ("/usr/local/lib", "/etc/systemd", "/etc/tmpfiles", "/var/lib", "/run/keeper"):
+                if text.startswith(prefix):
+                    return self.root / Path(*args).relative_to("/")
+            return Path(*args)
+
+        with patch("keepassxc_agent_access.agent_setup.connection_record", return_value=record), \
+             patch("keepassxc_agent_access.agent_setup.Path", side_effect=fake_path), \
+             patch("keepassxc_agent_access.agent_setup.trusted_file",
+                   side_effect=lambda p: p.read_bytes() if p.exists() else None), \
+             patch("keepassxc_agent_access.agent_setup.pwd.getpwnam", return_value=pw), \
+             patch("keepassxc_agent_access.agent_setup.grp.getgrnam", return_value=object()), \
+             patch("keepassxc_agent_access.agent_setup.subprocess.run") as subrun:
+            admin_setup(owner, None, None, None, remove=True)
+
+        self.assertFalse(runtime.exists())
+        self.assertFalse(state_dir.exists())
+        self.assertFalse(broker_dir.exists())
+        self.assertFalse(socket_path.exists())
+        self.assertFalse(record.parent.exists())
+        commands = [call.args[0] for call in subrun.call_args_list]
+        self.assertIn(["/usr/sbin/userdel", account_name], commands)
+        self.assertIn(["/usr/sbin/groupdel", account_name], commands)
+
+    def test_clean_uninstall_removes_lock_base_state_config_and_keyring(self):
+        installation = self.installation
+        mcp_config = self.root / ".gemini/config/mcp_config.json"
+        with patch("keepassxc_agent_access.installation.antigravity_mcp_config_destination", return_value=mcp_config), \
+             patch("keepassxc_agent_access.installation.external_broker_managed", return_value=True):
+            installation.install(False, stop_existing=True, connect_agent=True)
+        self.assertTrue(mcp_config.exists())
+        config_dir = self.root / "config/keepassxc-agent-access"
+        config_dir.mkdir(parents=True)
+        (config_dir / "settings.json").write_text(json.dumps({
+            "database": None, "key_file": None, "active_item": None, "pending_items": ["item-1"],
+        }))
+        cache_dir = self.root / "cache/keepassxc-agent-access"
+        cache_dir.mkdir(parents=True)
+        sessions_dir = self.root / "state/keeper-agent-sessions"
+        sessions_dir.mkdir(parents=True)
+        runner_dir = self.root / "runtime/keeper-scoped-runner"
+        runner_dir.mkdir(parents=True)
+
+        with patch("sys.argv", ["installation", "uninstall", "--keep-data"]), \
+             patch("keepassxc_agent_access.installation.os.geteuid", return_value=1000), \
+             patch("keepassxc_agent_access.installation.Installation", return_value=installation), \
+             patch("keepassxc_agent_access.installation.installed_connection", return_value=None), \
+             patch("keepassxc_agent_access.installation.SystemKeyring") as keyring_cls:
+            install_main()
+        keyring_cls.assert_not_called()
+        self.assertFalse(installation.base.exists())
+        self.assertFalse(mcp_config.exists())
+        self.assertFalse(self.skill.parent.parent.exists())
+        self.assertFalse(sessions_dir.exists())
+        self.assertFalse(runner_dir.exists())
+        self.assertTrue(config_dir.exists())
+        self.assertTrue(cache_dir.exists())
+
+        with patch("sys.argv", ["installation", "uninstall"]), \
+             patch("keepassxc_agent_access.installation.os.geteuid", return_value=1000), \
+             patch("keepassxc_agent_access.installation.Installation", return_value=installation), \
+             patch("keepassxc_agent_access.installation.installed_connection", return_value=None), \
+             patch("keepassxc_agent_access.installation.SystemKeyring") as keyring_cls:
+            install_main()
+        keyring_cls.return_value.remove.assert_called_once_with("item-1")
+        keyring_cls.return_value.remove_all.assert_not_called()
+        self.assertFalse(config_dir.exists())
+        self.assertFalse(cache_dir.exists())
 
     def test_connection_update_needed_compares_runtime_against_source(self):
         runtime = self.root / "usr/local/lib/keeper-connect-1000"
