@@ -31,6 +31,8 @@ CREDENTIAL_REVIEW_ACTIONS = {
 TOKEN_AUTO_APPROVAL_OPTIONS = {
     "auto_approve_tokens": "Access Tokens - Create",
     "auto_approve_token_changes": "Access Tokens - Update Permissions",
+    "auto_approve_token_credential_uses": "Access Tokens - Credential Uses",
+    "auto_approve_token_rotations": "Access Tokens - Re-Approve Rotated Passwords",
 }
 
 GUEST_AUTO_APPROVAL_OPTIONS = {
@@ -40,6 +42,7 @@ GUEST_AUTO_APPROVAL_OPTIONS = {
 
 SCOPED_AUTO_APPROVAL_OPTIONS = {
     "tls_first_pin": ("TLS Certificates - First Use", "Accept the agent’s first fingerprint for an approved destination when the server presents it."),
+    "tls_cert_repin": ("TLS Certificates - Accept Changed Fingerprint", "Replace a previously trusted fingerprint when an approved destination presents a new certificate."),
     "https_write_once": ("HTTPS - One-Time Writes", "Allow writes already covered by the token’s HTTPS permission."),
     "workflow": ("Workflows - Run", "Allow exact workflows whose steps and pinned destination are already covered."),
     "guest_first_use": ("Guest Connections - First Use", "Start a scoped guest command or console at a trusted endpoint when its switch is on."),
@@ -505,6 +508,10 @@ class AccessSettings:
     auto_approve_guest_actions: frozenset[str] = frozenset()
     auto_approve_scoped_actions: frozenset[str] = frozenset()
     agent_paused: bool = True
+    auto_approve_token_credential_uses: bool = False
+    auto_approve_token_rotations: bool = False
+    unlock_on_desktop_unlock: bool = False
+    resume_on_desktop_unlock: bool = False
 
     def for_vault(self, identity):
         return dict(self.vaults).get(identity, VaultPolicy())
@@ -540,10 +547,16 @@ class AccessStore:
             guest_actions = data.get("auto_approve_guest_actions", [])
             scoped_actions = data.get("auto_approve_scoped_actions", [])
             agent_paused = data.get("agent_paused", True)
+            auto_approve_token_credential_uses = data.get("auto_approve_token_credential_uses", False)
+            auto_approve_token_rotations = data.get("auto_approve_token_rotations", False)
+            unlock_on_desktop_unlock = data.get("unlock_on_desktop_unlock", False)
+            resume_on_desktop_unlock = data.get("resume_on_desktop_unlock", False)
             if (type(retention) is not int or not 1 <= retention <= 365 or type(review_usage) is not bool or type(review_results) is not bool
                     or type(start_unlocked) is not bool or type(auto_approve_tokens) is not bool
                     or type(auto_approve_token_changes) is not bool or type(token_auto_approval_acknowledged) is not bool
                     or type(agent_paused) is not bool
+                    or type(auto_approve_token_credential_uses) is not bool or type(auto_approve_token_rotations) is not bool
+                    or type(unlock_on_desktop_unlock) is not bool or type(resume_on_desktop_unlock) is not bool
                     or not isinstance(review_actions, list)
                     or any(not isinstance(action, str) for action in review_actions)
                     or not isinstance(guest_actions, list)
@@ -563,7 +576,8 @@ class AccessStore:
                                   normalize_review_actions(review_actions), start_unlocked,
                                   auto_approve_tokens, auto_approve_token_changes, token_auto_approval_acknowledged,
                                   review_results, frozenset(guest_actions), frozenset(scoped_actions),
-                                  agent_paused)
+                                  agent_paused, auto_approve_token_credential_uses, auto_approve_token_rotations,
+                                  unlock_on_desktop_unlock, resume_on_desktop_unlock)
         except FileNotFoundError:
             return AccessSettings()
         except (OSError, AttributeError, ValueError, TypeError, KeyError):
@@ -595,7 +609,11 @@ class AccessStore:
             "agent_paused": settings.agent_paused,
             "auto_approve_tokens": settings.auto_approve_tokens,
             "auto_approve_token_changes": settings.auto_approve_token_changes,
+            "auto_approve_token_credential_uses": settings.auto_approve_token_credential_uses,
+            "auto_approve_token_rotations": settings.auto_approve_token_rotations,
             "token_auto_approval_acknowledged": settings.token_auto_approval_acknowledged,
+            "unlock_on_desktop_unlock": settings.unlock_on_desktop_unlock,
+            "resume_on_desktop_unlock": settings.resume_on_desktop_unlock,
             "endpoint": settings.endpoint,
             "uid": settings.uid,
             "retention_days": settings.retention_days,

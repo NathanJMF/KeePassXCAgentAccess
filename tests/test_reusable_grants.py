@@ -122,7 +122,10 @@ class ReusableGrantTests(TestCase):
         self.assertEqual(grant.items[0].uses, ())
 
     def test_legacy_token_auto_approval_cannot_approve_new_uses_or_destinations(self):
-        with patch.object(self.workspace, "token_auto_approval_enabled", return_value=True):
+        def legacy_only(setting):
+            return setting in ("auto_approve_tokens", "auto_approve_token_changes")
+
+        with patch.object(self.workspace, "token_auto_approval_enabled", side_effect=legacy_only):
             self.assertEqual(self.enroll(self.request()), "pending")
             reusable = self.grants.authenticate(self.credential, 1500)
             self.assertEqual(reusable.scope, ())
@@ -133,7 +136,11 @@ class ReusableGrantTests(TestCase):
         self.enroll(self.request())
         original = self.approve()
         change = str(uuid4())
-        with patch.object(self.workspace, "token_auto_approval_enabled", return_value=True):
+
+        def legacy_only(setting):
+            return setting in ("auto_approve_tokens", "auto_approve_token_changes")
+
+        with patch.object(self.workspace, "token_auto_approval_enabled", side_effect=legacy_only):
             self.assertEqual(self.enroll(self.request(uses=("https", "browser"),
                                                      origins=("https://second.example.test/",)), change_id=change), "pending")
         grant = self.grants.authenticate(self.credential, 1500)

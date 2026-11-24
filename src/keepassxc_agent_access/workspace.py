@@ -110,6 +110,10 @@ class Workspace:
         self.auto_approve_guest_actions = preferences.auto_approve_guest_actions
         self.auto_approve_scoped_actions = preferences.auto_approve_scoped_actions
         self.auto_approve_token_changes = preferences.auto_approve_token_changes
+        self.auto_approve_token_credential_uses = preferences.auto_approve_token_credential_uses
+        self.auto_approve_token_rotations = preferences.auto_approve_token_rotations
+        self.unlock_on_desktop_unlock = preferences.unlock_on_desktop_unlock
+        self.resume_on_desktop_unlock = preferences.resume_on_desktop_unlock
         self.token_auto_approval_acknowledged = preferences.token_auto_approval_acknowledged
         self.generation = 0
         self._load()
@@ -422,7 +426,8 @@ class Workspace:
             if self.review_usage != reviewed:
                 self.legacy_access.write(replace(self.legacy_access.read(), review_usage=reviewed))
                 self.review_usage = reviewed
-                self.generation += 1
+                if reviewed:
+                    self.generation += 1
 
     def set_review_action(self, operation, reviewed):
         with self.mutex:
@@ -431,7 +436,8 @@ class Workspace:
                 self.legacy_access.write(replace(self.legacy_access.read(), review_actions=actions - {"read_results"},
                                                 review_results="read_results" in actions))
                 self.review_actions = actions
-                self.generation += 1
+                if reviewed:
+                    self.generation += 1
 
     def token_auto_approval_enabled(self, setting):
         return not self.review_usage and self.token_auto_approval_acknowledged and getattr(self, setting)
@@ -452,7 +458,8 @@ class Workspace:
             if actions != previous:
                 self.legacy_access.write(replace(self.legacy_access.read(), auto_approve_scoped_actions=actions))
                 self.auto_approve_scoped_actions = actions
-                self.generation += 1
+                if not enabled:
+                    self.generation += 1
 
     def set_guest_auto_approval(self, operation, enabled):
         if operation not in GUEST_AUTO_APPROVAL_OPTIONS:
@@ -463,7 +470,8 @@ class Workspace:
             if previous != actions:
                 self.legacy_access.write(replace(self.legacy_access.read(), auto_approve_guest_actions=actions))
                 self.auto_approve_guest_actions = actions
-                self.generation += 1
+                if not enabled:
+                    self.generation += 1
 
     def acknowledge_token_auto_approval(self, acknowledged):
         with self.mutex:
@@ -471,11 +479,20 @@ class Workspace:
                 return
             settings = self.legacy_access.read()
             # A fresh opt-in must not silently enable a legacy or previously disabled policy.
-            self.legacy_access.write(replace(settings, token_auto_approval_acknowledged=acknowledged,
-                                             auto_approve_tokens=False, auto_approve_token_changes=False))
+            reset = {key: False for key in TOKEN_AUTO_APPROVAL_OPTIONS}
+            self.legacy_access.write(replace(settings, token_auto_approval_acknowledged=acknowledged, **reset))
             self.token_auto_approval_acknowledged = acknowledged
-            self.auto_approve_tokens = False
-            self.auto_approve_token_changes = False
+            for key in TOKEN_AUTO_APPROVAL_OPTIONS:
+                setattr(self, key, False)
+
+    def set_desktop_unlock_policy(self, setting, enabled):
+        if setting not in ("unlock_on_desktop_unlock", "resume_on_desktop_unlock"):
+            raise ValueError("Choose a desktop unlock setting.")
+        if type(enabled) is not bool:
+            raise ValueError("Choose whether to enable this desktop unlock behavior.")
+        with self.mutex:
+            self.legacy_access.write(replace(self.legacy_access.read(), **{setting: enabled}))
+            setattr(self, setting, enabled)
 
     def set_token_auto_approval(self, setting, enabled):
         with self.mutex:

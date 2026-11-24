@@ -24,6 +24,10 @@ class AccessStorageTests(TestCase):
         self.assertEqual(default.mode, AccessMode.REVIEW)
         self.assertTrue(default.start_unlocked)
         self.assertTrue(default.agent_paused)
+        self.assertFalse(default.auto_approve_token_credential_uses)
+        self.assertFalse(default.auto_approve_token_rotations)
+        self.assertFalse(default.unlock_on_desktop_unlock)
+        self.assertFalse(default.resume_on_desktop_unlock)
         self.assertFalse(default.review_usage)
         self.assertFalse(default.review_actions)
         fallback = BrokerConfig(self.root / "existing.sock", os.geteuid() + 1)
@@ -34,7 +38,10 @@ class AccessStorageTests(TestCase):
         ))
         saved = replace(default, mode=AccessMode.SMART, endpoint=str(self.root / "broker.sock"),
                         uid=os.geteuid() + 1, vaults=((vault, policy),), start_unlocked=False,
-                        agent_paused=False,
+                        agent_paused=False, auto_approve_token_credential_uses=True,
+                        auto_approve_token_rotations=True, unlock_on_desktop_unlock=True,
+                        resume_on_desktop_unlock=True,
+                        auto_approve_scoped_actions=frozenset({"tls_first_pin", "tls_cert_repin"}),
                         review_actions=frozenset({"list_entries", "update_entry"}))
         store.write(saved)
         reopened = AccessStore(store.path).read()

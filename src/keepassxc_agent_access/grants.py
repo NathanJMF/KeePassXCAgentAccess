@@ -1,5 +1,6 @@
 """Persistent owner-approved grants, keyed by a runner credential verifier."""
 
+from collections import Counter
 from dataclasses import asdict, dataclass, replace
 from hashlib import sha256
 import json
@@ -318,6 +319,63 @@ class Grants:
                      if (scope.vault, scope.entry, scope.use_revision) == (vault, entry, revision)
                      and "https_results" in scope.uses and origin in scope.origins)
 
+    def result_certificate_status(self, record, vault, entry, revision, origin, fingerprint):
+        pins = self.result_certificate_pins(record, vault, entry, revision, origin)
+        trusted = bool(pins) and all(pin == fingerprint for pin in pins)
+        first_pin = bool(pins) and not any(pins)
+        changed_pin = bool(pins) and any(pins) and not trusted
+        return pins, trusted, first_pin, changed_pin
+
+    def result_certificate_auto_pin(self, record, vault, entry, revision, origin, fingerprint):
+        pins, trusted, first_pin, changed_pin = self.result_certificate_status(
+            record, vault, entry, revision, origin, fingerprint)
+        auto_pin = (
+            (first_pin and self.workspace.scoped_auto_approval_enabled("tls_first_pin"))
+            or (changed_pin and self.workspace.scoped_auto_approval_enabled("tls_cert_repin"))
+        )
+        return pins, trusted, auto_pin
+
+    @staticmethod
+    def _scope_without_revision(scope):
+        return (scope.vault, scope.entry, scope.metadata, scope.action, scope.group,
+                scope.username, scope.url, scope.edits, scope.uses, scope.origins)
+
+    @staticmethod
+    def _preserve_result_certificates(previous_scope, new_scopes):
+        known = {(item.vault, item.entry, origin): pin
+                 for item in previous_scope for origin, pin in item.result_certificates}
+        if not known:
+            return new_scopes
+        preserved = []
+        for scope in new_scopes:
+            if "https_results" in scope.uses and scope.use_revision is not None and not scope.result_certificates:
+                certs = tuple((origin, known[(scope.vault, scope.entry, origin)])
+                              for origin in scope.origins if (scope.vault, scope.entry, origin) in known)
+                if certs:
+                    scope = replace(scope, result_certificates=certs)
+            preserved.append(scope)
+        return tuple(preserved)
+
+    def refresh_rotated_credential(self, token_id, vault, entry, revision):
+        if revision is None or self.workspace.paused or not self.workspace.token_auto_approval_enabled("auto_approve_token_rotations"):
+            return None
+        with self.workspace.mutex:
+            record = self.records.get(token_id)
+            if (record is None or record.status != "active" or record.workflow is not None
+                    or (vault, entry) in record.released_entries):
+                return None
+            if not any((s.vault, s.entry) == (vault, entry) and s.uses
+                       and s.use_revision is not None and s.use_revision != revision for s in record.scope):
+                return None
+            updated_scope = tuple(
+                replace(s, use_revision=revision) if (s.vault, s.entry) == (vault, entry) and s.uses else s
+                for s in record.scope
+            )
+            updated = replace(record, scope=updated_scope)
+            self._change(updated, "Approve token permissions", "Approved",
+                         decision="Auto approved rotated password")
+            return updated
+
     def result_certificate_trusted(self, record, vault, entry, revision, origin, fingerprint):
         pins = self.result_certificate_pins(record, vault, entry, revision, origin)
         return bool(pins) and all(pin == fingerprint for pin in pins)
@@ -397,7 +455,8 @@ class Grants:
             self._change(record, "Request token", "Pending approval")
             choices = None
             if self.workspace.token_auto_approval_enabled("auto_approve_tokens"):
-                choices = self._automatic_choices(items)
+                allow_uses = self.workspace.token_auto_approval_enabled("auto_approve_token_credential_uses")
+                choices = self._automatic_choices(items, allow_uses=allow_uses)
             if choices:
                 self._decide(record, choices, automatic=True)
                 return "active"
@@ -421,9 +480,15 @@ class Grants:
         row = replace(record, change=change, superseded_changes=superseded)
         choices = None
         if self.workspace.token_auto_approval_enabled("auto_approve_token_changes"):
-            choices = self._automatic_choices(items)
-            if choices and self._restores_released_entry(record, (choice.scope for choice in choices)):
-                choices = None
+            allow_uses = self.workspace.token_auto_approval_enabled("auto_approve_token_credential_uses")
+            choices = self._automatic_choices(items, allow_uses=allow_uses)
+        if choices is None and self.workspace.token_auto_approval_enabled("auto_approve_token_rotations"):
+            candidate = self._automatic_choices(items, allow_uses=True)
+            if candidate and (Counter(self._scope_without_revision(s) for s in record.scope)
+                              == Counter(self._scope_without_revision(c.scope) for c in candidate)):
+                choices = candidate
+        if choices and self._restores_released_entry(record, (choice.scope for choice in choices)):
+            choices = None
         self._change(row, "Request token permissions", "Pending approval", context=attribution,
                      target_scope=tuple(choice.scope for choice in choices) if choices else ())
         if choices:
@@ -437,11 +502,8 @@ class Grants:
         if pending >= MAX_PENDING:
             raise ListingError("busy")
 
-    def _automatic_choices(self, items):
-        # New reusable credential capabilities and recipients need the owner's
-        # explicit review, including when token auto-approval was enabled before
-        # these permissions existed. Per-use auto approval applies after this grant.
-        if any(item.uses for item in items):
+    def _automatic_choices(self, items, *, allow_uses=False):
+        if any(item.uses for item in items) and not allow_uses:
             return None
         # A locked vault can hide another match for an unqualified label.
         for item in items:
@@ -524,6 +586,8 @@ class Grants:
         granted = {(item.vault, item.entry) for item in scope}
         released = tuple(entry for entry in record.released_entries if entry not in granted)
         action = "Approve token permissions" if change_id else "Approve token"
+        if change_id:
+            scope = self._preserve_result_certificates(record.scope, scope)
         row = replace(record, status="active", scope=scope, released_entries=released)
         if change_id:
             row = replace(row, change=replace(change, status="active"), generation=record.generation + 1)
