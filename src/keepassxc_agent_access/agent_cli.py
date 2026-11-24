@@ -18,7 +18,7 @@ from .protocol import (
     CLIENT_TIMEOUT, CONSOLE_OPERATIONS, CONSOLE_SECONDS, ERRORS, GUEST_OPERATIONS, LIST_REQUEST, ListingError,
     MAX_CONSOLE_REUSE_MINUTES, MAX_GUEST_REUSE_MINUTES, MAX_GUEST_TEXT, MAX_WAIT_SECONDS,
     REQUEST_LIMIT, REQUEST_TIMEOUT, RESPONSE_LIMIT, UPLOAD_LIMIT, WORKFLOW_OPERATIONS,
-    decode, encode, receive, remaining, validate_command,
+    decode, encode, receive, remaining, sanitize_error_detail, validate_command,
 )
 
 
@@ -185,8 +185,9 @@ def result_usage_request(data):
         raise ValueError
     if "headers" in request:
         _result_map(request["headers"], 16)
-        if request["headers"] and request["auth"] not in ("session", "template"):
-            raise ValueError
+        if request["auth"] in ("basic", "bearer") and any(
+                key.casefold() == "authorization" for key in request["headers"]):
+            raise ValueError("Do not supply an Authorization header with basic or bearer auth.")
     if "query" in request:
         _result_map(request["query"], 32)
     for key in ("form", "json"):
@@ -201,7 +202,7 @@ def result_usage_request(data):
                 raise ValueError
     result = data["result"]
     if (not isinstance(result, dict) or set(result) - {"path", "columns", "scalar"}
-            or ("columns" in result) == ("scalar" in result) or "scalar" in result and not write):
+            or ("columns" in result) == ("scalar" in result)):
         raise ValueError
     result_pointer(result.get("path", ""))
     result_columns([result["scalar"]] if "scalar" in result else result["columns"])
@@ -270,10 +271,17 @@ def usage_request(data):
 
 def _validate_access_details(reply):
     required = {"status", "identity", "project", "model", "chat", "chat_id", "scope", "requested_items", "pending_change"}
-    if not required <= reply.keys() <= required | {"workflow"}:
+    if not required <= reply.keys() <= required | {"workflow", "paused", "last_change"}:
         raise ValueError
     if "workflow" in reply and edit_uuid(reply["workflow"]) != reply["workflow"]:
         raise ValueError
+    if "paused" in reply and type(reply["paused"]) is not bool:
+        raise ValueError
+    if "last_change" in reply and reply["last_change"] is not None:
+        last_change = reply["last_change"]
+        if (not isinstance(last_change, dict) or set(last_change) != {"id", "status"}
+                or edit_uuid(last_change["id"]) != last_change["id"] or last_change["status"] != "denied"):
+            raise ValueError
     for key in ("identity", "project", "model", "chat", "chat_id"):
         value = reply[key]
         if value is not None and (not isinstance(value, str) or not value or len(value) > 160 or not value.isprintable()):
@@ -285,12 +293,23 @@ def _validate_access_details(reply):
         fields = {"vault", "entry", "group", "metadata", "username", "url", "action", "edits"}
         if requested:
             fields.add("label")
+        scope_optional = set() if requested else {"vault_locked", "stale", "pinned_origins"}
         if not isinstance(values, list) or len(values) > 16:
             raise ValueError
         for value in values:
-            if (not isinstance(value, dict) or not fields <= value.keys() <= fields | {"uses", "origins"}
+            if (not isinstance(value, dict) or not fields <= value.keys() <= fields | {"uses", "origins"} | scope_optional
                     or bool({"uses", "origins"} & value.keys()) and not {"uses", "origins"} <= value.keys()):
                 raise ValueError
+            if not requested:
+                for flag in ("vault_locked", "stale"):
+                    if flag in value and type(value[flag]) is not bool:
+                        raise ValueError
+                if "pinned_origins" in value:
+                    pinned = value["pinned_origins"]
+                    if (not isinstance(pinned, list) or not 1 <= len(pinned) <= 8
+                            or any(https_target(origin, origin=True) != origin for origin in pinned)
+                            or len(set(pinned)) != len(pinned)):
+                        raise ValueError
             uses, origins = value.get("uses", []), value.get("origins", [])
             if (not isinstance(uses, list) or any(not isinstance(use, str) or use not in CREDENTIAL_USE_TYPES for use in uses)
                     or len(set(uses)) != len(uses) or "https_body" in uses and not {"https", "https_results"} & set(uses)
@@ -349,10 +368,12 @@ def _validate(reply, payload):
     operation = payload["operation"]
     if not isinstance(reply, dict):
         raise ListingError("invalid_response")
-    if set(reply) == {"error"}:
+    if set(reply) in ({"error"}, {"error", "detail"}):
         error = reply["error"]
-        if isinstance(error, str) and error in ERRORS:
-            raise ListingError(error)
+        detail = reply.get("detail")
+        if (isinstance(error, str) and error in ERRORS
+                and (detail is None or isinstance(detail, str) and detail.isprintable())):
+            raise ListingError(error, detail=sanitize_error_detail(detail))
     if operation in ("request_access", "access_status"):
         if reply.get("status") not in ("pending", "active", "disabled", "denied", "removed"):
             raise ListingError("invalid_response")
@@ -881,17 +902,18 @@ def main(argv=None):
             try:
                 raw = sys.stdin.buffer.read(REQUEST_LIMIT)
                 if len(raw) >= REQUEST_LIMIT:
-                    raise ValueError
+                    raise ValueError("Descriptor exceeds the request size limit.")
                 descriptor = decode(raw)
                 if getattr(options, "provision_account", False):
                     if not isinstance(descriptor, dict) or set(descriptor) != {"workflow", "body_type", "fields"}:
-                        raise ValueError
+                        raise ValueError("Provide workflow, body_type, and fields for account provisioning.")
                     payload["provision"] = {"entry": options.account, "body_type": descriptor["body_type"],
                                             "fields": descriptor["fields"]}
                     descriptor = descriptor["workflow"]
                 payload["usage"] = usage_request(descriptor)
-            except (ValueError, TypeError, RecursionError):
-                raise ListingError("invalid_request") from None
+            except (ValueError, TypeError, RecursionError) as error:
+                detail = sanitize_error_detail(str(error)) or "Supply a valid JSON credential-use descriptor on stdin."
+                raise ListingError("invalid_request", detail=detail) from None
         token_file = os.environ.get("KEEPASSXC_AGENT_TOKEN_FILE")
         if options.operation in ("console_open", "console_input"):
             try:
@@ -900,7 +922,9 @@ def main(argv=None):
                     raise ValueError
                 payload["request" if options.operation == "console_open" else "events"] = decode(raw)
             except (ValueError, RecursionError):
-                raise ListingError("invalid_request") from None
+                detail = ("Supply a valid JSON console descriptor on stdin."
+                          if options.operation == "console_open" else "Supply a valid JSON list of console input events on stdin.")
+                raise ListingError("invalid_request", detail=detail) from None
         if options.operation == "guest_run":
             try:
                 raw = sys.stdin.buffer.read(REQUEST_LIMIT)
@@ -911,7 +935,7 @@ def main(argv=None):
                     raise ValueError
                 payload.update(guest)
             except (ValueError, RecursionError):
-                raise ListingError("invalid_request") from None
+                raise ListingError("invalid_request", detail="Supply a JSON object with workflow and command on stdin.") from None
         if options.operation in ("request_access", "request_edit", "workflow_request"):
             try:
                 raw = sys.stdin.buffer.read(REQUEST_LIMIT)
@@ -947,7 +971,12 @@ def main(argv=None):
                         raise ValueError
                 payload["request"] = edit_request(submitted) if options.operation == "request_edit" else submitted
             except (ValueError, RecursionError):
-                raise ListingError("invalid_request") from None
+                detail = {
+                    "request_access": "Supply a valid access request JSON object matching the registered identity and project.",
+                    "request_edit": "Supply a valid vault edit request JSON object on stdin.",
+                    "workflow_request": "Supply a valid workflow manifest JSON object on stdin.",
+                }[options.operation]
+                raise ListingError("invalid_request", detail=detail) from None
         if options.operation != "discover" and (token_file or options.operation in GUEST_OPERATIONS | WORKFLOW_OPERATIONS
                 or options.operation in (
             "request_access", "access_status", "release_entry", "list_vaults", "request_edit", "edit_status", "write_status",
@@ -978,7 +1007,7 @@ def main(argv=None):
     except ListingError as error:
         print(error, file=sys.stderr)
         return 1
-    return int(result.get("outcome") in ("failed", "uncertain", "acknowledged"))
+    return int(result.get("outcome") in ("failed", "uncertain"))
 
 
 if __name__ == "__main__":

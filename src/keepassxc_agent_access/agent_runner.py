@@ -15,7 +15,8 @@ from uuid import UUID
 
 from .agent_cli import EDIT_OPERATIONS, ENTRY_FIELDS, CREDENTIAL_USE_TYPES, USE_TYPES, edit_request, edit_uuid, usage_request
 from .protocol import (CLIENT_TIMEOUT, ERRORS, ListingError, MAX_CONSOLE_REUSE_MINUTES, MAX_GUEST_REUSE_MINUTES,
-                       MAX_GUEST_TEXT, MAX_WAIT_SECONDS, REQUEST_LIMIT, UPLOAD_LIMIT, decode, encode, validate_command)
+                       MAX_GUEST_TEXT, MAX_WAIT_SECONDS, REQUEST_LIMIT, UPLOAD_LIMIT, decode, encode,
+                       sanitize_error_detail, validate_command)
 from .runner_token import UninitializedProfile, open_profile
 
 
@@ -110,26 +111,116 @@ EDIT_REQUEST = {
 }
 USAGE = {
     "type": "object",
-    "properties": {
-        "type": {"enum": sorted(USE_TYPES)},
-        "command": {"type": "array", "items": {"type": "string"}, "minItems": 1, "maxItems": 33},
-        "origin": {"type": "string"}, "prompt_variable": {"type": "string"},
-        "prompt_contains": {"type": "string", "minLength": 1, "maxLength": 80},
-        "environment": {"type": "object", "additionalProperties": {"type": "string"}, "maxProperties": 16},
-        "certificate_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
-        "login": {"type": "object", "description": "Private POST authentication and named JSON-pointer captures."},
-        "request": {"type": "object", "description": "Same-origin protected resource request; session placeholders remain private."},
-        "approve_write_once": {"type": "boolean", "description": "Ask the owner to approve this exact protected HTTPS write once."},
-        "result": {"type": "object", "description": "JSON pointer and named result columns, or a scalar alias for a write result."},
-        "url": {"type": "string"}, "auth": {"enum": ["basic", "bearer", "template"]},
-        "method": {"enum": ["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"]},
-        "json": {"type": ["object", "string"]},
-        "headers": {"type": "object", "additionalProperties": {"type": "string"}},
-        "query": {"type": "object", "additionalProperties": {"type": "string"}},
-        **{key: {"type": "string"} for key in
-           ("submit_url", "form_id", "username_field", "password_field", "success_id", "success_url")},
-    },
-    "required": ["type"], "additionalProperties": False,
+    "properties": {"type": {"enum": sorted(USE_TYPES)}},
+    "required": ["type"],
+    "oneOf": [
+        {
+            "type": "object",
+            "properties": {
+                "type": {"enum": ["local_command"]},
+                "command": {"type": "array", "items": {"type": "string"}, "minItems": 1, "maxItems": 33,
+                            "description": "Executable in /usr/bin and literal arguments."},
+            },
+            "required": ["type", "command"],
+            "additionalProperties": False,
+        },
+        {
+            "type": "object",
+            "properties": {
+                "type": {"enum": ["networked_command"]},
+                "command": {"type": "array", "items": {"type": "string"}, "minItems": 1, "maxItems": 33,
+                            "description": "Executable in /usr/bin and literal arguments."},
+                "origin": {"type": "string", "description": "Approved HTTPS origin (for example https://host/)."},
+                "prompt_variable": {"type": "string", "description": "Prompt variable name ending in _ASKPASS."},
+                "prompt_contains": {"type": "string", "minLength": 1, "maxLength": 80,
+                                    "description": "Literal substring identifying the prompt; defaults to password."},
+                "environment": {"type": "object", "additionalProperties": {"type": "string"}, "maxProperties": 16,
+                                "description": "Optional nonsecret environment variables."},
+            },
+            "required": ["type", "command", "origin", "prompt_variable"],
+            "additionalProperties": False,
+        },
+        {
+            "type": "object",
+            "properties": {
+                "type": {"enum": ["https"]},
+                "url": {"type": "string", "description": "Approved HTTPS target URL without query or fragment."},
+                "auth": {"enum": ["basic", "bearer", "template"]},
+                "method": {"enum": ["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"]},
+                "json": {"type": ["object", "string"]},
+                "headers": {"type": "object", "additionalProperties": {"type": "string"}},
+                "query": {"type": "object", "additionalProperties": {"type": "string"}},
+            },
+            "required": ["type", "url", "auth"],
+            "additionalProperties": False,
+        },
+        {
+            "type": "object",
+            "properties": {
+                "type": {"enum": ["https_results"]},
+                "origin": {"type": "string", "description": "Approved HTTPS origin."},
+                "certificate_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$",
+                                       "description": "Optional lowercase hex SHA-256 certificate pin for private-CA or self-signed endpoints."},
+                "login": {
+                    "type": "object",
+                    "description": "Optional private POST authentication and named JSON-pointer captures.",
+                    "properties": {
+                        "path": {"type": "string"},
+                        "method": {"enum": ["POST"]},
+                        "form": {"type": "object", "additionalProperties": {"type": "string"}},
+                        "json": {"type": ["object", "string"]},
+                        "capture": {"type": "object", "additionalProperties": {"type": "string"},
+                                    "minProperties": 1, "maxProperties": 4},
+                    },
+                    "required": ["path", "capture"],
+                    "additionalProperties": False,
+                },
+                "request": {
+                    "type": "object",
+                    "description": "Same-origin protected resource request; session placeholders remain private. Custom headers are allowed on basic/bearer (except Authorization).",
+                    "properties": {
+                        "path": {"type": "string"},
+                        "auth": {"enum": ["basic", "bearer", "template", "session"]},
+                        "method": {"enum": ["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"]},
+                        "headers": {"type": "object", "additionalProperties": {"type": "string"}},
+                        "query": {"type": "object", "additionalProperties": {"type": "string"}},
+                        "json": {"type": ["object", "string"]},
+                        "form": {"type": "object", "additionalProperties": {"type": "string"}},
+                    },
+                    "required": ["path", "auth"],
+                    "additionalProperties": False,
+                },
+                "approve_write_once": {"type": "boolean", "description": "Ask the owner to approve this exact protected HTTPS write once."},
+                "result": {
+                    "type": "object",
+                    "description": "JSON pointer and either named result columns or a scalar alias (allowed on both GET reads and writes).",
+                    "properties": {
+                        "path": {"type": "string"},
+                        "columns": {"type": "array", "items": {"type": "string"}, "minItems": 1, "maxItems": 16},
+                        "scalar": {"type": "string"},
+                    },
+                    "additionalProperties": False,
+                },
+            },
+            "required": ["type", "origin", "request", "result"],
+            "additionalProperties": False,
+        },
+        {
+            "type": "object",
+            "properties": {
+                "type": {"enum": ["browser"]},
+                "url": {"type": "string"},
+                "submit_url": {"type": "string"},
+                "form_id": {"type": "string"},
+                "username_field": {"type": "string"},
+                "password_field": {"type": "string"},
+                "success_id": {"type": "string"},
+                "success_url": {"type": "string"},
+            },
+            "required": ["type", "url", "submit_url", "form_id", "username_field", "password_field", "success_id"],
+            "additionalProperties": False,
+        },
+    ],
     "description": "Agent-supplied credential operation. No configured action ID needed. Commands return a dispatch receipt only.",
 }
 OPERATIONS = {
@@ -162,7 +253,27 @@ OPERATIONS = {
     "guest_run": (("guest", "run"), tool(
         "guest_run", "Submit a command to an owner-approved guest endpoint and retain its write receipt.",
         {"vault": REFERENCE, "entry": REFERENCE, "receipt": REFERENCE,
-         "workflow": {"type": "object", "description": "Pinned command and status request template from the Keeper skill."},
+         "workflow": {
+             "type": "object",
+             "description": "Pinned command and status request template from the Keeper skill.",
+             "properties": {
+                 "origin": {"type": "string", "description": "Approved HTTPS origin."},
+                 "certificate_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$",
+                                        "description": "Optional lowercase hex SHA-256 certificate pin."},
+                 "login": {"type": "object", "description": "Optional private POST login and captures."},
+                 "body_type": {"enum": ["form", "json"]},
+                 "command_field": {"type": "string", "description": "Unassigned submit body field name for the command."},
+                 "job_query": {"type": "string", "description": "Unassigned poll query parameter name for the job ID."},
+                 "argument_prefix": {"type": "array", "items": {"type": "string"}, "minItems": 1, "maxItems": 8,
+                                     "description": "Optional fixed JSON argument prefix before the command."},
+                 "submit": {"type": "object", "properties": {"request": {"type": "object"}, "job_path": {"type": "string"}},
+                            "required": ["request", "job_path"], "additionalProperties": False},
+                 "poll": {"type": "object", "properties": {"request": {"type": "object"}, "result": {"type": "object"}},
+                          "required": ["request", "result"], "additionalProperties": False},
+             },
+             "required": ["origin", "submit", "poll", "body_type", "command_field", "job_query"],
+             "additionalProperties": False,
+         },
          "guest_command": {"type": "string", "minLength": 1, "maxLength": MAX_GUEST_TEXT},
          "reuse_minutes": {"type": "integer", "minimum": 1, "maximum": MAX_GUEST_REUSE_MINUTES}},
         required=("vault", "entry", "receipt", "workflow", "guest_command"), read_only=False,
@@ -183,7 +294,21 @@ OPERATIONS = {
     )),
     "console_open": (("console", "open"), tool(
         "console_open", "Open an approved guest console using the pinned connection descriptor.",
-        {"vault": REFERENCE, "entry": REFERENCE, "request": {"type": "object"},
+        {"vault": REFERENCE, "entry": REFERENCE,
+         "request": {
+             "type": "object",
+             "description": "Pinned console connection descriptor.",
+             "properties": {
+                 "origin": {"type": "string", "description": "Approved HTTPS origin."},
+                 "certificate_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$",
+                                        "description": "Optional lowercase hex SHA-256 certificate pin."},
+                 "login": {"type": "object", "description": "Private POST authentication and captures."},
+                 "connect": {"type": "object", "description": "POST request to create the console session and capture ticket/port/password."},
+                 "socket": {"type": "object", "description": "WebSocket path, headers, query, and optional RFB password placeholder."},
+             },
+             "required": ["origin", "login", "connect", "socket"],
+             "additionalProperties": False,
+         },
          "reuse_minutes": {"type": "integer", "minimum": 1, "maximum": MAX_CONSOLE_REUSE_MINUTES}},
         required=("vault", "entry", "request"), read_only=False,
     )),
@@ -198,7 +323,20 @@ OPERATIONS = {
     )),
     "console_input": (("console", "input"), tool(
         "console_input", "Send an ordered list of key, text or pointer events to an approved guest console.",
-        {"console": REFERENCE, "events": {"type": "array", "items": {"type": "object"}}},
+        {"console": REFERENCE,
+         "events": {
+             "type": "array", "minItems": 1, "maxItems": 16,
+             "description": "Ordered list of 1 to 16 key, text, or left-click events.",
+             "items": {
+                 "type": "object",
+                 "properties": {
+                     "key": {"type": "string", "description": "Named key (Enter, Tab, Escape, arrows, F1-F12), printable ASCII key, or modifier combo (Ctrl+C, Ctrl+D, Ctrl+Alt+Del)."},
+                     "text": {"type": "string", "minLength": 1, "maxLength": 160, "description": "Printable ASCII text to type."},
+                     "x": {"type": "integer", "minimum": 0, "maximum": 2047, "description": "Framebuffer X coordinate for left click."},
+                     "y": {"type": "integer", "minimum": 0, "maximum": 2047, "description": "Framebuffer Y coordinate for left click."},
+                 },
+             },
+         }},
         required=("console", "events"), read_only=False,
     )),
     "console_close": (("console", "close"), tool(
@@ -207,7 +345,41 @@ OPERATIONS = {
     )),
     "workflow_request": (("workflows", "request"), tool(
         "workflow_request", "Ask the owner to review a bounded set of fixed HTTPS writes, guest commands and console opens.",
-        {"request": {"type": "object", "description": "Pinned HTTPS workflow manifest from the Keeper skill."},
+        {"request": {
+             "type": "object",
+             "description": "Pinned HTTPS workflow manifest from the Keeper skill.",
+             "properties": {
+                 "id": REFERENCE,
+                 "vault": REFERENCE,
+                 "entry": REFERENCE,
+                 "origin": {"type": "string", "description": "Approved HTTPS origin."},
+                 "certificate_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$",
+                                        "description": "Optional lowercase hex SHA-256 certificate pin."},
+                 "login": {"type": "object", "description": "Optional shared private POST authentication and captures."},
+                 "minutes": {"type": "integer", "minimum": 1, "maximum": 60,
+                             "description": "Authorization window in minutes (1-60)."},
+                 "steps": {
+                     "type": "array", "minItems": 1, "maxItems": 8,
+                     "items": {
+                         "type": "object",
+                         "properties": {
+                             "name": {"type": "string", "pattern": "^[a-z][a-z0-9_-]{0,31}$"},
+                             "kind": {"enum": ["write", "console", "guest"]},
+                             "request": {"type": "object"},
+                             "result": {"type": "object"},
+                             "capture_id": {"type": "boolean"},
+                             "expected_id": {"type": ["integer", "string"],
+                                             "description": "Optional expected positive integer or string ID when capturing."},
+                             "command": {"type": "string", "description": "Command string for a guest step."},
+                         },
+                         "required": ["name", "request"],
+                         "additionalProperties": False,
+                     },
+                 },
+             },
+             "required": ["id", "vault", "entry", "origin", "steps"],
+             "additionalProperties": False,
+         },
          "registration": {"type": "object", "properties": {"identity": {"type": "string"}, "project": {"type": "string"}},
                           "required": ["identity", "project"], "additionalProperties": False}},
         required=("request",), read_only=False,
@@ -224,8 +396,18 @@ OPERATIONS = {
     "provision_account": (("accounts", "provision"), tool(
         "provision_account", "Ask the owner to apply a separate stored account password in one approved HTTPS write.",
         {"vault": REFERENCE, "entry": REFERENCE, "account": REFERENCE, "receipt": REFERENCE,
-         "workflow": {"type": "object", "description": "Exact pinned HTTPS results write with approve_write_once."},
-         "body_type": {"enum": ["form", "json"]}, "fields": {"type": "object"}},
+         "workflow": {"type": "object", "description": "Exact pinned https_results write with approve_write_once: true."},
+         "body_type": {"enum": ["form", "json"]},
+         "fields": {
+             "type": "object",
+             "description": "Destination body field names for the account password (required) and optional username.",
+             "properties": {
+                 "password": {"type": "string", "pattern": "^[A-Za-z][A-Za-z0-9_-]{0,63}$"},
+                 "username": {"type": "string", "pattern": "^[A-Za-z][A-Za-z0-9_-]{0,63}$"},
+             },
+             "required": ["password"],
+             "additionalProperties": False,
+         }},
         required=("vault", "entry", "account", "receipt", "workflow", "body_type", "fields"), read_only=False,
     )),
     "list_vaults": (("vaults", "list"), tool("list_vaults", "List vaults available to the active token.")),
@@ -239,129 +421,152 @@ OPERATIONS = {
          "receipt": {**REFERENCE, "description": "Track one protected HTTPS write under this UUID."},
          "command": {"type": "array", "items": {"type": "string"}, "minItems": 1, "maxItems": 33,
                      "description": "The exact approved executable and arguments for an isolated command."},
+         "input_path": {"type": "string", "description": "Optional local file path read and base64-encoded by keeper-connect for a networked command (mutually exclusive with input_base64)."},
          "input_base64": {"type": "string", "description": "Optional base64 input file for a command that permits it."}},
         required=("entry",), read_only=False,
     )),
 }
 
 
+def _require_uuid(value, field):
+    try:
+        return edit_uuid(value)
+    except ValueError:
+        raise ValueError(f"Expected a valid UUID for {field}.") from None
+
+
 def invocation(name, arguments):
     """Build a fixed CLI argument vector and optional request JSON."""
-    if not isinstance(name, str) or name not in OPERATIONS or not isinstance(arguments, dict):
-        raise ValueError
+    if not isinstance(name, str) or name not in OPERATIONS:
+        raise ValueError("Unknown Keeper tool.")
+    if not isinstance(arguments, dict):
+        raise ValueError("Tool arguments must be a JSON object.")
     tokens, definition = OPERATIONS[name]
     schema = definition["inputSchema"]
-    if not set(schema["required"]) <= arguments.keys() <= schema["properties"].keys():
-        raise ValueError
+    missing = set(schema["required"]) - arguments.keys()
+    if missing:
+        raise ValueError("Missing required arguments: " + ", ".join(sorted(missing)) + ".")
+    extra = arguments.keys() - schema["properties"].keys()
+    if extra:
+        raise ValueError("Unexpected tool arguments.")
+    if name == "use_password" and "input_path" in arguments:
+        raise ValueError("input_path requires connecting through keeper-connect; pass input_base64 when calling keeper-agent-runner directly.")
     if "note" in arguments:
         note = arguments["note"]
         if not isinstance(note, str) or not note.strip() or len(note) > 180 or not note.isprintable():
-            raise ValueError
+            raise ValueError("note must be a printable string of 1 to 180 characters.")
     if "profile" in arguments:
         profile = arguments["profile"]
         if not isinstance(profile, str) or not re.fullmatch(PROFILE_NAME, profile):
-            raise ValueError
+            raise ValueError("profile must be 1 to 64 letters, numbers, underscores, or hyphens.")
     usage = None
     if name == "use_password":
         if ("action" in arguments) == ("usage" in arguments):
-            raise ValueError
+            raise ValueError("Provide either usage or action, not both.")
         if "usage" in arguments:
             if "command" in arguments:
-                raise ValueError
-            usage = usage_request(arguments["usage"])
+                raise ValueError("Pass command inside usage instead of as a top-level argument.")
+            try:
+                usage = usage_request(arguments["usage"])
+            except ValueError as error:
+                raise ValueError(str(error) or "Invalid usage descriptor.") from None
             if "input_base64" in arguments and usage["type"] != "networked_command":
-                raise ValueError
+                raise ValueError("input_base64 is only valid with a networked_command usage.")
     local_command = validate_command(arguments["command"]) if "command" in arguments else None
     if usage is not None and "input_base64" in arguments:
         local_command = validate_command(usage["command"])
     command = [CLI, "run" if local_command is not None else tokens[0], *tokens[1:], "--json"]
     for key in ("vault", "entry", "console", "account"):
         if key in arguments:
-            value = arguments[key]
-            if not isinstance(value, str) or len(value) > 36:
-                raise ValueError
-            command.append(f"--{key}={UUID(value)}")
+            command.append(f"--{key}={_require_uuid(arguments[key], key)}")
     if "timeout" in arguments:
         timeout = arguments["timeout"]
         if type(timeout) is not int or not 1 <= timeout <= MAX_WAIT_SECONDS:
-            raise ValueError
+            raise ValueError(f"timeout must be an integer between 1 and {MAX_WAIT_SECONDS}.")
         command.append(f"--timeout={timeout}")
     if name == "guest_wait":
         until, expected = arguments["until"], arguments["equals"]
         if not isinstance(until, str) or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_.-]{0,79}", until):
-            raise ValueError
+            raise ValueError("until must be a valid status field name.")
         if expected is not None and type(expected) not in (str, bool, int, float):
-            raise ValueError
+            raise ValueError("equals must be a JSON scalar or null.")
         command.extend((f"--until={until}", "--equals-json=" + encode(expected).decode("ascii").rstrip()))
     if name == "console_view":
         image = arguments.get("image", False)
         if type(image) is not bool:
-            raise ValueError
+            raise ValueError("image must be a boolean.")
         if not image:
             command[command.index("--json")] = "--status"
     if "reuse_minutes" in arguments:
         minutes = arguments["reuse_minutes"]
         maximum = MAX_CONSOLE_REUSE_MINUTES if name == "console_open" else MAX_GUEST_REUSE_MINUTES
         if type(minutes) is not int or not 1 <= minutes <= maximum:
-            raise ValueError
+            raise ValueError(f"reuse_minutes must be an integer between 1 and {maximum}.")
         command.append(f"--reuse-for={minutes}")
     for flag in ("summary", "details"):
         if flag in arguments:
             if type(arguments[flag]) is not bool:
-                raise ValueError
+                raise ValueError(f"{flag} must be a boolean.")
             if arguments[flag]:
                 command.append(f"--{flag}")
     if name == "edit_status":
-        command.append(f"--request={edit_uuid(arguments['id'])}")
+        command.append(f"--request={_require_uuid(arguments['id'], 'id')}")
     if "receipt" in arguments:
         if name == "use_password" and (usage is None or usage["type"] != "https_results"
                 or usage["request"].get("method") not in ("POST", "PUT", "PATCH", "DELETE")):
-            raise ValueError
-        command.append(f"--receipt={edit_uuid(arguments['receipt'])}")
+            raise ValueError("receipt requires an https_results write (POST, PUT, PATCH, or DELETE).")
+        command.append(f"--receipt={_require_uuid(arguments['receipt'], 'receipt')}")
     if name in ("workflow_run", "workflow_status"):
-        command.append(f"--workflow={edit_uuid(arguments['workflow'])}")
+        command.append(f"--workflow={_require_uuid(arguments['workflow'], 'workflow')}")
     if name == "workflow_run":
         step = arguments["step"]
         if not isinstance(step, str) or not re.fullmatch(r"[a-z][a-z0-9_-]{0,31}", step):
-            raise ValueError
+            raise ValueError("Invalid workflow step name.")
         command.append(f"--step={step}")
     if "action" in arguments:
         action = arguments["action"]
         if not isinstance(action, str) or not action or len(action) > 160 or not action.isprintable():
-            raise ValueError
+            raise ValueError("action must be a non-empty printable string of at most 160 characters.")
         command.append(f"--action={action}")
     if name == "list_entries" and "fields" in arguments:
         fields = arguments["fields"]
         if (not isinstance(fields, list) or len(fields) > len(ENTRY_FIELDS)
                 or any(field not in ENTRY_FIELDS for field in fields)):
-            raise ValueError
+            raise ValueError("fields must be a list of allowed entry metadata fields (username, url).")
         command.extend(f"--field={field}" for field in dict.fromkeys(fields))
     request = arguments.get("request")
     if "request" in arguments and not isinstance(request, dict):
-        raise ValueError
+        raise ValueError("request must be a JSON object.")
     if name == "request_access" and "change_id" not in request and (
             not isinstance(request.get("identity"), str) or not isinstance(request.get("project"), str)):
-        raise ValueError
+        raise ValueError("request must include identity and project strings when creating a new token.")
     if name == "request_edit":
-        request = edit_request(request)
+        try:
+            request = edit_request(request)
+        except ValueError as error:
+            raise ValueError(str(error) or "Invalid vault edit request.") from None
     if name == "workflow_request" and "registration" in arguments:
         registration = arguments["registration"]
         if not isinstance(registration, dict) or set(registration) != {"identity", "project"} or "registration" in request:
-            raise ValueError
+            raise ValueError("registration must contain only identity and project, and not duplicate request.registration.")
         request = {**request, "registration": registration}
         command.append("--register")
     if name == "guest_run":
         if not isinstance(arguments["workflow"], dict) or not isinstance(arguments["guest_command"], str):
-            raise ValueError
+            raise ValueError("guest_run requires a workflow object and guest_command string.")
         request = {"workflow": arguments["workflow"], "command": arguments["guest_command"]}
     if name == "provision_account":
         if not isinstance(arguments["fields"], dict) or arguments["body_type"] not in ("json", "form"):
-            raise ValueError
-        request = {"workflow": usage_request(arguments["workflow"]), "body_type": arguments["body_type"],
+            raise ValueError("provision_account requires body_type ('json' or 'form'), fields object, and workflow object.")
+        try:
+            workflow_usage = usage_request(arguments["workflow"])
+        except ValueError as error:
+            raise ValueError(str(error) or "Invalid workflow usage descriptor.") from None
+        request = {"workflow": workflow_usage, "body_type": arguments["body_type"],
                    "fields": arguments["fields"]}
     if name == "console_input":
         if not isinstance(arguments["events"], list):
-            raise ValueError
+            raise ValueError("events must be a list of console input events.")
         request = arguments["events"]
     data = encode(request) if request is not None else encode(usage) if usage is not None else b""
     if usage is not None and "input_base64" in arguments:
@@ -372,13 +577,16 @@ def invocation(name, arguments):
             command.append("--environment-json=" + json.dumps(usage["environment"], separators=(",", ":")))
     if "input_base64" in arguments:
         if local_command is None or not isinstance(arguments["input_base64"], str):
-            raise ValueError
-        data = b64decode(arguments["input_base64"], validate=True)
+            raise ValueError("input_base64 must be a base64 string for a networked command.")
+        try:
+            data = b64decode(arguments["input_base64"], validate=True)
+        except ValueError:
+            raise ValueError("input_base64 must be valid base64.") from None
         if not 0 < len(data) <= UPLOAD_LIMIT:
-            raise ValueError
+            raise ValueError("Decoded input_base64 must be between 1 byte and 8 MiB.")
         command.append("--input")
     elif len(data) >= REQUEST_LIMIT:
-        raise ValueError
+        raise ValueError("Request payload exceeds maximum size limit.")
     if local_command is not None:
         command.extend(("--", *local_command))
     return command, data
@@ -428,7 +636,10 @@ class AgentRunner:
         try:
             arguments = params.get("arguments", {})
             command, data = invocation(params.get("name"), arguments)
-        except (TypeError, ValueError, RecursionError):
+        except (TypeError, ValueError, RecursionError) as error:
+            msg = str(error)
+            if msg and len(msg) <= 240 and msg.isascii() and msg.isprintable():
+                return tool_result(f"Invalid Keeper tool or arguments. {msg}", True)
             return tool_result("Invalid Keeper tool or arguments.", True)
         try:
             environment = self.environment
@@ -455,14 +666,34 @@ class AgentRunner:
             diagnostic = result.stderr.decode("utf-8").strip()
         except ValueError:
             diagnostic = ""
-        if diagnostic not in (*ERRORS.values(), str(UninitializedProfile())):
-            diagnostic = "Keeper could not complete the request."
-        return tool_result(diagnostic, True)
+        matched = None
+        for prefix in (*ERRORS.values(), str(UninitializedProfile())):
+            if diagnostic == prefix:
+                matched = prefix
+                break
+            if diagnostic.startswith(f"{prefix} "):
+                detail = sanitize_error_detail(diagnostic[len(prefix) + 1:])
+                matched = f"{prefix} {detail}"[:400] if detail else prefix
+                break
+        if matched is None:
+            matched = "Keeper could not complete the request."
+        return tool_result(matched, True)
 
     def serve(self, source, sink):
         while frame := source.readline(MAX_MESSAGE + 1):
             if len(frame) > MAX_MESSAGE:
-                break
+                while not frame.endswith(b"\n"):
+                    chunk = source.readline(65536)
+                    if not chunk:
+                        break
+                    frame = chunk
+                sink.write(encode({
+                    "jsonrpc": "2.0",
+                    "error": {"code": -32600, "message": "Message exceeds maximum size limit."},
+                    "id": None,
+                }))
+                sink.flush()
+                continue
             try:
                 message = decode(frame)
             except (ValueError, RecursionError):
@@ -537,6 +768,7 @@ class ProjectRunner(AgentRunner):
         if requested_profile is not None and (
                 not isinstance(requested_profile, str) or not re.fullmatch(PROFILE_NAME, requested_profile)):
             return tool_result("Invalid Keeper tool or arguments.", True)
+        ephemeral = False
         if chat_id is not None:
             if not isinstance(chat_id, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,127}", chat_id):
                 return tool_result("Keeper needs a valid client thread or conversation ID on this project connection.", True)
@@ -545,11 +777,23 @@ class ProjectRunner(AgentRunner):
             profile = self.profiles / sha256(("task:" + requested_profile).encode("ascii")).hexdigest()
             chat_id = requested_profile
         elif self.connection_profile is not None:
-            profile = self.named_profile or self.connection_profile
+            if self.named_profile is not None:
+                profile = self.named_profile
+            else:
+                profile = self.connection_profile
+                ephemeral = True
         else:
             return tool_result("Keeper needs the client thread or conversation ID on this project connection.", True)
         if not isinstance(params.get("name"), str) or params["name"] not in OPERATIONS:
             return tool_result("Invalid Keeper tool or arguments.", True)
+        if ephemeral and (
+            params["name"] == "request_access"
+            or (params["name"] == "workflow_request" and isinstance(arguments, dict) and "registration" in arguments)
+        ):
+            return tool_result(
+                "Pass a persistent profile parameter (or connect with keeper-connect --profile NAME) before requesting access on a shared MCP connection.",
+                True,
+            )
         try:
             profile.mkdir(mode=0o700, exist_ok=True)
             os.close(open_profile(profile))
