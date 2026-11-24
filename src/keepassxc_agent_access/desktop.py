@@ -6,9 +6,10 @@ from gi.repository import Gio, GLib
 
 
 class DesktopSession:
-    def __init__(self, on_lock, on_exit):
+    def __init__(self, on_lock, on_exit, on_unlock=None):
         self.on_lock = on_lock
         self.on_exit = on_exit
+        self.on_unlock = on_unlock
         self.locked = True
         self.states = {"gnome": None, "logind": None}
         self.subscriptions = []
@@ -39,8 +40,11 @@ class DesktopSession:
         previous = self.locked
         self.states[source] = value
         self.locked = not self.available or any(value is True for value in self.states.values())
+        on_unlock = getattr(self, "on_unlock", None)
         if self.locked and not previous and not self.initializing:
             self.on_lock()
+        elif not self.locked and previous and not self.initializing and on_unlock:
+            on_unlock()
 
     def _subscribe(self, bus, name, interface, member, path, callback):
         subscription = bus.signal_subscribe(

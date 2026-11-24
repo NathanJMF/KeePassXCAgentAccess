@@ -77,6 +77,16 @@ class DesktopSessionTests(TestCase):
         session._gnome_signal(None, None, None, None, None, GLib.Variant("(b)", (True,)))
         self.assertTrue(session.locked)
 
+    def test_on_unlock_fires_when_session_transitions_from_locked_to_unlocked(self):
+        session = self.session(gnome=True, logind=False)
+        session.on_unlock = Mock()
+        self.assertTrue(session.locked)
+        session._gnome_signal(None, None, None, None, None, GLib.Variant("(b)", (False,)))
+        self.assertFalse(session.locked)
+        session.on_unlock.assert_called_once_with()
+        session._gnome_signal(None, None, None, None, None, GLib.Variant("(b)", (False,)))
+        session.on_unlock.assert_called_once_with()
+
     def test_missing_bus_recovers_and_installs_monitor_subscriptions(self):
         session = self.session()
         bus = Mock()

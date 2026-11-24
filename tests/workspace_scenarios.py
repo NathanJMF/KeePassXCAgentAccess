@@ -20,7 +20,10 @@ from pykeepass import PyKeePass, create_database
 from broker_scenarios import NAMESPACE, PASSWORD as UNLOCK, REPO, isolated_uid, prepare, verify_isolation
 from desktop_scenarios import set_screen_active, wait_for
 from password_scenarios import button, descendants
-from keepassxc_agent_access.access_settings import REVIEW_ACTIONS, AccessMode, AccessStore, Action, ActionType, VaultPolicy
+from keepassxc_agent_access.access_settings import (
+    GUEST_AUTO_APPROVAL_OPTIONS, REVIEW_ACTIONS, SCOPED_AUTO_APPROVAL_OPTIONS, TOKEN_AUTO_APPROVAL_OPTIONS,
+    AccessMode, AccessStore, Action, ActionType, VaultPolicy,
+)
 from keepassxc_agent_access.activity import ActivityStore
 from keepassxc_agent_access.controller import VaultController
 from keepassxc_agent_access.launcher import install as install_launcher
@@ -151,7 +154,7 @@ def main(root):
                 assert divider.get_allocated_height() == area.get_allocated_height()
                 pages = next(widget for widget in descendants(dialog) if widget.get_name() == "keeper-settings-pages")
                 assert [pages.child_get_property(child, "title") for child in pages.get_children()] == [
-                    "Auto Approve", "Vaults", "Updates", "Broker Settings",
+                    "Auto Approve", "Vaults", "Updates", "Connect an Agent", "Broker Settings",
                 ]
                 assert pages.get_visible_child_name() == "auto-approve"
                 assert dialog.get_widget_for_response(Gtk.ResponseType.CLOSE) is None
@@ -159,18 +162,19 @@ def main(root):
                 toggles = [widget for widget in descendants(pages.get_visible_child()) if isinstance(widget, Gtk.Switch)]
                 if page == "auto-approve":
                     assert [widget.get_name() for widget in toggles] == [
-                        "request-popups", "auto-approve-usage", *REVIEW_ACTIONS, "token-auto-approval-acknowledged",
-                        "auto_approve_tokens", "auto_approve_token_changes",
+                        "request-popups", "auto-approve-usage", *REVIEW_ACTIONS,
+                        *GUEST_AUTO_APPROVAL_OPTIONS, *SCOPED_AUTO_APPROVAL_OPTIONS,
+                        "token-auto-approval-acknowledged", *TOKEN_AUTO_APPROVAL_OPTIONS,
                     ]
-                    acknowledgement = toggles[-3]
+                    acknowledgement = next(widget for widget in toggles
+                                           if widget.get_name() == "token-auto-approval-acknowledged")
                     reveal = next(widget for widget in descendants(pages.get_visible_child())
                                   if widget.get_name() == "token-auto-approval-options")
                     assert reveal.get_reveal_child() == acknowledgement.get_active()
                     danger = [widget.get_text() for widget in descendants(pages.get_visible_child())
                               if isinstance(widget, Gtk.Label)
                               and widget.get_style_context().has_class("keeper-settings-danger")]
-                    assert danger == ["I Understand", "Danger", "Access Tokens - Create",
-                                      "Access Tokens - Update Permissions"]
+                    assert danger == ["I Understand", "Danger", *TOKEN_AUTO_APPROVAL_OPTIONS.values()]
                 toggle = next(widget for widget in toggles if widget.get_name() == name)
                 if label is not None:
                     assert toggle.get_accessible().get_name() == label

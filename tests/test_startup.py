@@ -113,6 +113,40 @@ raise SystemExit(app.run([]))
                 self.assertTrue(app.workspace.paused)
                 self.assertFalse(store.read().agent_paused)
 
+    def test_desktop_unlock_respects_unlock_and_resume_settings(self):
+        from gi.repository import GLib
+
+        with TemporaryDirectory() as directory:
+            store = AccessStore(Path(directory) / "access.json")
+            store.write(AccessSettings(agent_paused=False, unlock_on_desktop_unlock=True,
+                                       resume_on_desktop_unlock=True))
+            broker = Mock(config=None, enabled=True)
+            desktop = Mock(locked=True)
+            with patch("keepassxc_agent_access.workspace_app.Gtk.Application.do_startup"), \
+                 patch("keepassxc_agent_access.workspace_app.Gdk.Display.get_default", return_value=Mock()), \
+                 patch("keepassxc_agent_access.workspace_app.installed_connection", return_value=None), \
+                 patch("keepassxc_agent_access.workspace_app.ListingBroker", return_value=broker), \
+                 patch.object(GLib, "timeout_add", return_value=1), \
+                 patch.object(GLib, "timeout_add_seconds", return_value=2), \
+                 patch.object(GLib, "unix_signal_add", return_value=3):
+                app = WorkspaceApplication(directory=Path(directory), keyring=Mock(),
+                                           desktop_factory=lambda *_: desktop)
+                app.hold = Mock()
+                app.do_startup()
+                app._unlock_all = Mock()
+                self.assertTrue(app.workspace.paused)
+                desktop.locked = False
+                desktop.on_unlock()
+                app._unlock_all.assert_called_once_with(cleanup=True)
+                self.assertFalse(app.workspace.paused)
+                self.assertFalse(store.read().agent_paused)
+
+                # If owner had intentionally paused access before lock, desktop unlock keeps it paused.
+                app.workspace.pause(True)
+                app.workspace.pause(True, persist=False)
+                desktop.on_unlock()
+                self.assertTrue(app.workspace.paused)
+
 
 if __name__ == "__main__":
     unittest.main()

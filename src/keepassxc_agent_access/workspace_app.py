@@ -65,6 +65,10 @@ class WorkspaceApplication(Gtk.Application):
         self.grants = None
         self.edit_requests = None
         self.start_unlocked = True
+        self.unlock_on_desktop_unlock = False
+        self.resume_on_desktop_unlock = False
+        self._settings_error = None
+        self._sync_settings_sensitivity = None
         self.usage_approvals = ApprovalQueue()
         self.broker = None
         self.window = None
@@ -97,6 +101,7 @@ class WorkspaceApplication(Gtk.Application):
             return
         self.hold()
         self.desktop = self.desktop_factory(self._desktop_lock, self._quit)
+        self.desktop.on_unlock = self._desktop_unlock
         try:
             self.review_popups.load()
         except SettingsError as error:
@@ -106,6 +111,8 @@ class WorkspaceApplication(Gtk.Application):
             self.workspace = Workspace(self.directory, self.keyring)
             previous = self.workspace.legacy_access.read()
             self.start_unlocked = previous.start_unlocked
+            self.unlock_on_desktop_unlock = previous.unlock_on_desktop_unlock
+            self.resume_on_desktop_unlock = previous.resume_on_desktop_unlock
             self.activity.recover(previous.retention_days)
             self.grants = Grants(self.workspace, self.activity)
             self.edit_requests = EditRequests(self.workspace, self.grants, self.activity)
@@ -524,6 +531,14 @@ class WorkspaceApplication(Gtk.Application):
         style.add_class("keeper-usage-review" if review else "keeper-usage-allow")
         style.remove_class("keeper-usage-allow" if review else "keeper-usage-review")
 
+    def _report_owner_error(self, message):
+        if self._settings_error is not None:
+            self._settings_error.set_text(message)
+            self._settings_error.set_visible(bool(message))
+            self.message = ""
+        else:
+            self.message = message
+
     def _set_usage_policy(self, item):
         review = not item.get_active()
         if not self.workspace or self.workspace.review_usage == review:
@@ -533,11 +548,13 @@ class WorkspaceApplication(Gtk.Application):
             return
         try:
             self.workspace.set_review_usage(review)
-            self.message = ""
+            self._report_owner_error("")
         except OWNER_ERRORS as error:
-            self.message = str(error) or "Could not save the Auto Approve setting."
+            self._report_owner_error(str(error) or "Could not save the Auto Approve setting.")
             item.set_active(not self.workspace.review_usage)
         self._style_usage_policy()
+        if self._sync_settings_sensitivity:
+            self._sync_settings_sensitivity()
         self._refresh()
 
     def _set_request_popups(self, item):
@@ -546,9 +563,9 @@ class WorkspaceApplication(Gtk.Application):
             return
         try:
             self.review_popups.set_enabled(enabled)
-            self.message = ""
+            self._report_owner_error("")
         except SettingsError as error:
-            self.message = str(error)
+            self._report_owner_error(str(error))
             item.set_active(self.review_popups.enabled)
         self._refresh()
 
@@ -877,9 +894,9 @@ class WorkspaceApplication(Gtk.Application):
             return
         try:
             operation()
-            self.message = ""
+            self._report_owner_error("")
         except OWNER_ERRORS as error:
-            self.message = str(error) or "The operation could not be completed."
+            self._report_owner_error(str(error) or "The operation could not be completed.")
         self._refresh()
 
     def _background(self, operation, *, select=False, after=None, finished=None):
@@ -1132,7 +1149,17 @@ class WorkspaceApplication(Gtk.Application):
         panel.pack_start(sidebar, False, False, 0)
         divider = styled(Gtk.Separator(orientation=Gtk.Orientation.VERTICAL), "keeper-settings-divider")
         panel.pack_start(divider, False, False, 0)
-        panel.pack_start(stack, True, True, 0)
+        right = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0, hexpand=True, vexpand=True)
+        settings_error = styled(_label(""), "keeper-settings-danger")
+        settings_error.set_margin_start(20)
+        settings_error.set_margin_end(20)
+        settings_error.set_margin_top(12)
+        settings_error.set_no_show_all(True)
+        settings_error.hide()
+        self._settings_error = settings_error
+        right.pack_start(settings_error, False, False, 0)
+        right.pack_start(stack, True, True, 0)
+        panel.pack_start(right, True, True, 0)
         body.pack_start(panel, True, True, 0)
 
         def page(name, title, icon):
@@ -1162,33 +1189,75 @@ class WorkspaceApplication(Gtk.Application):
         actions.pack_start(styled(_label("Auto Approve These Requests"), "keeper-settings-caption"), False, False, 0)
         actions.pack_start(styled(_label("These switches apply to actions within approved permissions. Results - Read automatic approval starts off: enabling it trusts approved servers and the fields requested by agents."),
                                  "keeper-settings-description"), False, False, 0)
+        action_switches = []
         for operation, caption in REVIEW_ACTIONS.items():
             actions.pack_start(Gtk.Separator(), False, False, 0)
-            self._settings_switch(actions, caption, operation not in self.workspace.review_actions,
-                                  lambda control, operation=operation: self._set_action_auto_approval(control, operation),
-                                  operation,
-                                  "Trust the approved endpoint and requested fields when releasing results."
-                                  if operation == "read_results" else None)
+            action_switches.append(self._settings_switch(
+                actions, caption, operation not in self.workspace.review_actions,
+                lambda control, operation=operation: self._set_action_auto_approval(control, operation),
+                operation,
+                "Trust the approved endpoint and requested fields when releasing results."
+                if operation == "read_results" else None))
+        guest_switches = []
         for operation, caption in GUEST_AUTO_APPROVAL_OPTIONS.items():
             actions.pack_start(Gtk.Separator(), False, False, 0)
-            self._settings_switch(actions, caption, operation in self.workspace.auto_approve_guest_actions,
-                                  lambda control, operation=operation: self._set_guest_auto_approval(control, operation),
-                                  operation, "Allow another command at an endpoint you approved for a limited time."
-                                  if operation == "guest_run" else
-                                  "Allow an agent to reuse a connection you approved for a limited time.")
+            guest_switches.append(self._settings_switch(
+                actions, caption, operation in self.workspace.auto_approve_guest_actions,
+                lambda control, operation=operation: self._set_guest_auto_approval(control, operation),
+                operation, "Allow another command at an endpoint you approved for a limited time."
+                if operation == "guest_run" else
+                "Allow an agent to reuse a connection you approved for a limited time."))
         scoped = self._settings_card(approvals)
         scoped.pack_start(styled(_label("Use Approved Access"), "keeper-settings-caption"), False, False, 0)
         scoped.pack_start(styled(_label("Requires Auto Approve, HTTPS Requests and Results - Read to be enabled."),
                                  "keeper-settings-description"), False, False, 0)
+        scoped_switches = []
         for operation, (caption, description) in SCOPED_AUTO_APPROVAL_OPTIONS.items():
             scoped.pack_start(Gtk.Separator(), False, False, 0)
-            self._settings_switch(scoped, caption, operation in self.workspace.auto_approve_scoped_actions,
-                                  lambda control, operation=operation: self._set_scoped_auto_approval(control, operation),
-                                  operation, description)
-        self._token_auto_approval_settings(approvals)
+            scoped_switches.append(self._settings_switch(
+                scoped, caption, operation in self.workspace.auto_approve_scoped_actions,
+                lambda control, operation=operation: self._set_scoped_auto_approval(control, operation),
+                operation, description))
+        token_switches = self._token_auto_approval_settings(approvals)
+
+        def sync_sensitivity():
+            master = not self.workspace.review_usage
+            scoped_ready = (master and not self.workspace.requires_review("use_https")
+                            and not self.workspace.requires_review("read_results"))
+            token_ready = master and self.workspace.token_auto_approval_acknowledged
+            for switch, active in (
+                *((switch, master) for switch in (*action_switches, *guest_switches)),
+                *((switch, scoped_ready) for switch in scoped_switches),
+                *((switch, token_ready) for switch in token_switches.values()),
+            ):
+                style = switch.get_style_context()
+                if active:
+                    style.remove_class("keeper-settings-inactive")
+                else:
+                    style.add_class("keeper-settings-inactive")
+
+        def clear_settings_refs(*_):
+            self._settings_error = None
+            self._sync_settings_sensitivity = None
+
+        self._sync_settings_sensitivity = sync_sensitivity
+        sync_sensitivity()
+        dialog.connect("destroy", clear_settings_refs)
+
         vaults = page("vaults", "Vaults", "drive-harddisk-symbolic")
-        self._settings_switch(self._settings_card(vaults), "Start Unlocked", self.start_unlocked, self._set_start_unlocked,
+        vault_card = self._settings_card(vaults)
+        self._settings_switch(vault_card, "Start Unlocked", self.start_unlocked, self._set_start_unlocked,
                               "start-unlocked", "Use saved keyring passwords to unlock vaults when Keeper starts.")
+        vault_card.pack_start(Gtk.Separator(), False, False, 0)
+        self._settings_switch(vault_card, "Unlock Vaults on Desktop Unlock", self.unlock_on_desktop_unlock,
+                              lambda control: self._set_desktop_unlock_policy(control, "unlock_on_desktop_unlock"),
+                              "unlock-on-desktop-unlock",
+                              "Use saved keyring passwords to unlock vaults when your desktop session unlocks.")
+        vault_card.pack_start(Gtk.Separator(), False, False, 0)
+        self._settings_switch(vault_card, "Resume Agent Access on Unlock", self.resume_on_desktop_unlock,
+                              lambda control: self._set_desktop_unlock_policy(control, "resume_on_desktop_unlock"),
+                              "resume-on-desktop-unlock",
+                              "Automatically resume Agent Access after desktop unlock if it was active before locking.")
         updates = page("updates", "Updates", "system-software-update-symbolic")
         self._updates_settings_page(self._settings_card(updates))
         connect = page("connect-agent", "Connect an Agent", "network-wired-symbolic")
@@ -1249,7 +1318,7 @@ class WorkspaceApplication(Gtk.Application):
                                   "and choose which switches to enable."), "keeper-settings-description")
         suspended.set_no_show_all(True)
         suspended.set_visible(not self.workspace.token_auto_approval_acknowledged
-                              and (self.workspace.auto_approve_tokens or self.workspace.auto_approve_token_changes))
+                              and any(getattr(self.workspace, key) for key in TOKEN_AUTO_APPROVAL_OPTIONS))
 
         revealer = Gtk.Revealer(transition_type=Gtk.RevealerTransitionType.NONE,
                                 reveal_child=self.workspace.token_auto_approval_acknowledged)
@@ -1277,7 +1346,9 @@ class WorkspaceApplication(Gtk.Application):
                 switch.set_active(getattr(self.workspace, setting))
             revealer.set_reveal_child(acknowledged)
             suspended.set_visible(not acknowledged
-                                  and (self.workspace.auto_approve_tokens or self.workspace.auto_approve_token_changes))
+                                  and any(getattr(self.workspace, key) for key in TOKEN_AUTO_APPROVAL_OPTIONS))
+            if self._sync_settings_sensitivity:
+                self._sync_settings_sensitivity()
 
         self._settings_switch(
             card, "I Understand", self.workspace.token_auto_approval_acknowledged, acknowledge,
@@ -1287,6 +1358,7 @@ class WorkspaceApplication(Gtk.Application):
         )
         card.pack_start(suspended, False, False, 0)
         card.pack_start(revealer, False, False, 0)
+        return switches
 
     @staticmethod
     def _settings_card(page):
@@ -1401,10 +1473,12 @@ class WorkspaceApplication(Gtk.Application):
             return
         try:
             self.workspace.set_review_action(operation, not enabled)
-            self.message = ""
+            self._report_owner_error("")
         except OWNER_ERRORS as error:
-            self.message = str(error) or "Could not save the action’s auto approval setting."
+            self._report_owner_error(str(error) or "Could not save the action’s auto approval setting.")
             control.set_active(previous)
+        if self._sync_settings_sensitivity:
+            self._sync_settings_sensitivity()
         self._refresh()
 
     def _set_guest_auto_approval(self, control, operation):
@@ -1414,9 +1488,9 @@ class WorkspaceApplication(Gtk.Application):
             return
         try:
             self.workspace.set_guest_auto_approval(operation, enabled)
-            self.message = ""
+            self._report_owner_error("")
         except OWNER_ERRORS as error:
-            self.message = str(error) or "Could not save the guest auto approval setting."
+            self._report_owner_error(str(error) or "Could not save the guest auto approval setting.")
             control.set_active(previous)
         self._refresh()
 
@@ -1440,10 +1514,24 @@ class WorkspaceApplication(Gtk.Application):
             store = self.workspace.legacy_access
             store.write(replace(store.read(), start_unlocked=enabled))
             self.start_unlocked = enabled
-            self.message = ""
+            self._report_owner_error("")
         except OWNER_ERRORS as error:
-            self.message = str(error) or "Could not save the vault startup setting."
+            self._report_owner_error(str(error) or "Could not save the vault startup setting.")
             control.set_active(self.start_unlocked)
+        self._refresh()
+
+    def _set_desktop_unlock_policy(self, control, setting):
+        previous = getattr(self, setting)
+        enabled = control.get_active()
+        if enabled == previous:
+            return
+        try:
+            self.workspace.set_desktop_unlock_policy(setting, enabled)
+            setattr(self, setting, enabled)
+            self._report_owner_error("")
+        except OWNER_ERRORS as error:
+            self._report_owner_error(str(error) or "Could not save the desktop unlock setting.")
+            control.set_active(previous)
         self._refresh()
 
     def _broker_settings_page(self, body):
@@ -1472,12 +1560,16 @@ class WorkspaceApplication(Gtk.Application):
                 except KeyError:
                     raise ValueError("The runner account could not be found.") from None
                 store = self.workspace.legacy_access
-                updated = replace(store.read(), endpoint=path or None, uid=peer, retention_days=retention.get_value_as_int())
-                config = updated.broker_config()
-                self.workspace.pause(True, persist=False)
-                self.broker.update(lambda: store.write(updated), config)
-                if config:
-                    self.broker.start()
+                previous = store.read()
+                updated = replace(previous, endpoint=path or None, uid=peer, retention_days=retention.get_value_as_int())
+                if (updated.endpoint, updated.uid) == (previous.endpoint, previous.uid):
+                    store.write(updated)
+                else:
+                    config = updated.broker_config()
+                    self.workspace.pause(True, persist=False)
+                    self.broker.update(lambda: store.write(updated), config)
+                    if config:
+                        self.broker.start()
                 status.set_text("Broker settings saved.")
             except OWNER_ERRORS as error:
                 status.set_text(str(error) or "Could not save the broker settings.")
@@ -1502,6 +1594,19 @@ class WorkspaceApplication(Gtk.Application):
         self._lock_all()
         if self.window:
             self._view("browse")
+
+    def _desktop_unlock(self, *_):
+        if self.exiting or not self.workspace or self.desktop.locked:
+            return
+        if self.unlock_on_desktop_unlock:
+            self._unlock_all(cleanup=True)
+        if self.resume_on_desktop_unlock and self.broker and self.broker.enabled:
+            try:
+                if not self.workspace.legacy_access.read().agent_paused:
+                    self.workspace.pause(False, persist=False)
+            except SettingsError:
+                pass
+        self._refresh()
 
     def _prune(self):
         if self.workspace:
