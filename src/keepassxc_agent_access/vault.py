@@ -11,7 +11,7 @@ import sys
 from threading import Event, Lock
 from time import monotonic, sleep
 
-from .protocol import ListingError, RESPONSE_LIMIT, WORKER_TIMEOUT, decode, encode, read_frame, remaining
+from .protocol import ERRORS, ListingError, RESPONSE_LIMIT, WORKER_TIMEOUT, decode, encode, read_frame, remaining
 from .vault_edits import EDIT_LIMIT, EDIT_TIMEOUT
 
 
@@ -215,15 +215,18 @@ class VaultSession:
         window = (DYNAMIC_NETWORK_WINDOW if action.prompt_variable else DYNAMIC_LOCAL_WINDOW) if action.opaque else 0
         with self._exchange(request, timeout) as read:
             deadline = monotonic() + window
+            attempted = False
             # Keep the serialized vault request occupied for the common window,
             # including subprocess teardown, so another scoped request cannot
             # turn the child-controlled runtime into an exit/timing oracle.
             try:
                 response = decode(read())
                 if response != {"ready": True}:
+                    if isinstance(response, dict) and "error" in response:
+                        code = response["error"] if response["error"] in ERRORS else "unavailable"
+                        raise ListingError(code, detail=response.get("detail"))
                     return response
                 dispatched = False
-                attempted = False
 
                 def send():
                     nonlocal attempted
@@ -261,7 +264,7 @@ class VaultSession:
                             "_execution_outcome": private if private in ("succeeded", "failed", "uncertain") else "unknown"}
                 return response
             finally:
-                if window:
+                if window and attempted:
                     sleep(max(0, deadline - monotonic()))
 
     def _result_exchange(self, request, gate, steps):

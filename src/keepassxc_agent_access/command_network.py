@@ -44,27 +44,39 @@ def connection_target(sock):
     return host, port
 
 
-def approved_address(host):
+def approved_addresses(host):
     try:
-        address = ipaddress.ip_address(host)
+        return (ipaddress.ip_address(host),)
     except ValueError:
-        try:
-            lookup = subprocess.run(["/usr/bin/getent", "ahosts", host], env={"PATH": "/usr/bin:/bin"},
-                                    stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
-                                    cwd="/", timeout=2, check=True, text=True)
-            addresses = lookup.stdout.split()
-            address = ipaddress.ip_address(addresses[0]) if addresses else None
-        except (OSError, ValueError, subprocess.SubprocessError):
-            address = None
-    if address is None:
+        pass
+    addresses = []
+    try:
+        lookup = subprocess.run(["/usr/bin/getent", "ahosts", host], env={"PATH": "/usr/bin:/bin"},
+                                stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                                cwd="/", timeout=2, check=True, text=True)
+        for line in lookup.stdout.splitlines():
+            parts = line.split()
+            if not parts:
+                continue
+            address = ipaddress.ip_address(parts[0])
+            if address not in addresses:
+                addresses.append(address)
+    except (OSError, ValueError, subprocess.SubprocessError):
+        addresses = []
+    if not addresses:
         raise OSError("Could not resolve the approved network destination")
-    return address
+    return tuple(addresses)
+
+
+def approved_address(host):
+    return approved_addresses(host)[0]
 
 
 class Relay:
     def __init__(self, destination):
         self.destination = (destination.host, destination.port)
-        self.address = approved_address(destination.host)
+        self.addresses = approved_addresses(destination.host)
+        self.address = self.addresses[0]
         self.active = Event()
         self.closed = Event()
         self.transferred = Event()
@@ -99,14 +111,29 @@ class Relay:
             if connection_target(client) != self.destination or self.closed.is_set():
                 client.sendall(b"\x05\x02\x00\x01" + b"\0" * 6)
                 return
-            remote = socket.socket(socket.AF_INET6 if self.address.version == 6 else socket.AF_INET,
-                                   socket.SOCK_STREAM)
-            remote.settimeout(1)
-            with self.lock:
+            for address in self.addresses:
                 if self.closed.is_set():
                     return
-                self.connections.add(remote)
-            remote.connect((str(self.address), self.destination[1]))
+                candidate = None
+                try:
+                    candidate = socket.socket(socket.AF_INET6 if address.version == 6 else socket.AF_INET,
+                                              socket.SOCK_STREAM)
+                    candidate.settimeout(1)
+                    with self.lock:
+                        if self.closed.is_set():
+                            candidate.close()
+                            return
+                        self.connections.add(candidate)
+                    candidate.connect((str(address), self.destination[1]))
+                    remote = candidate
+                    break
+                except OSError:
+                    if candidate is not None:
+                        with self.lock:
+                            self.connections.discard(candidate)
+                        candidate.close()
+            if remote is None:
+                return
             client.sendall(b"\x05\x00\x00\x01" + b"\0" * 6)
             self.forward(client, remote)
         except (OSError, ValueError):

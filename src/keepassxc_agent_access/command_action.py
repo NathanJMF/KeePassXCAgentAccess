@@ -12,11 +12,12 @@ from pathlib import Path
 from select import select
 import stat
 import subprocess
+from tempfile import TemporaryFile
 from time import monotonic
 from uuid import uuid4
 
 from .command_network import network_relay
-from .protocol import ListingError, read_frame, remaining, validate_command
+from .protocol import ListingError, read_frame, remaining, sanitize_error_detail, validate_command
 
 
 _READY_TIMEOUT = 3
@@ -25,7 +26,7 @@ _SCOPE_TIMEOUT = 12
 _NETWORK_TIMEOUT = 15
 _NETWORK_SCOPE_TIMEOUT = 22
 _MEMORY_LIMIT = 192 * 1024**2
-_TASK_LIMIT = 16
+_TASK_LIMIT = 64
 _SECRET_LIMIT = 65536
 _PROMPT_SECRET_LIMIT = 4096
 _CA = Path('/etc/ssl/certs/ca-certificates.crt')
@@ -147,6 +148,7 @@ def sandbox_arguments(command, seccomp, scope, *, relay_path=None, prompt_variab
         "--dir", "/keeper", "--ro-bind", str(relay_path), "/keeper/relay",
         "--ro-bind", str(Path(__file__).with_name("command_prompt.py")), "/keeper/prompt",
         "--ro-bind", str(ca_file), "/keeper/trust.pem",
+        "--ro-bind", str(ca_file), "/etc/ssl/certs/ca-certificates.crt",
     ]
     if input_path is not None:
         arguments += ["--ro-bind", str(input_path), "/input"]
@@ -161,17 +163,30 @@ def verify_scope_limits(pid, scope, *, memory_limit=_MEMORY_LIMIT, task_limit=_T
     relative = next((line[4:] for line in lines if line.startswith("0::/")), "")
     location = Path(relative)
     if location.name != scope or ".." in location.parts:
-        raise OSError("The command is not in its isolated process scope.")
+        actual = sanitize_error_detail(relative) or "missing"
+        raise OSError(f"The command is not in its isolated process scope ({actual} != {scope}).")
     directory = Path("/sys/fs/cgroup") / location
     try:
         memory = int((directory / "memory.max").read_text())
         swap = int((directory / "memory.swap.max").read_text())
         tasks = int((directory / "pids.max").read_text())
         quota, period = map(int, (directory / "cpu.max").read_text().split())
-        if not (0 < memory <= memory_limit and swap == 0 and 0 < tasks <= task_limit and 0 < quota <= period):
-            raise ValueError
-    except (OSError, ValueError):
-        raise OSError("The command scope's resource limits are unavailable.") from None
+    except (OSError, ValueError) as error:
+        detail = sanitize_error_detail(str(error))
+        message = (f"The command scope's resource limits are unavailable: {detail}"
+                   if detail else "The command scope's resource limits are unavailable.")
+        raise OSError(message) from None
+    problems = []
+    if not 0 < memory <= memory_limit:
+        problems.append(f"memory.max={memory}")
+    if swap != 0:
+        problems.append(f"memory.swap.max={swap}")
+    if not 0 < tasks <= task_limit:
+        problems.append(f"pids.max={tasks}")
+    if not 0 < quota <= period:
+        problems.append(f"cpu.max={quota}/{period}")
+    if problems:
+        raise OSError(f"The command scope's resource limits are unavailable: {', '.join(problems)}")
 
 
 def stop_scope(scope, environment):
@@ -191,7 +206,8 @@ def prepare_command(command, digest, *, destination=None, prompt_variable="", in
         raise ValueError("The configured command executable changed.")
     scope = f"keeper-command-{uuid4().hex}.scope"
     relay_context = network_relay(destination) if destination is not None else nullcontext((None, None))
-    with syscall_filter(unix_sockets=destination is not None) as seccomp, relay_context as (relay_path, relay):
+    with syscall_filter(unix_sockets=destination is not None, unix_socket_pairs=True) as seccomp, \
+            relay_context as (relay_path, relay):
         # The session address is needed only by systemd-run. Bubblewrap drops
         # that environment before the trusted startup code runs.
         launcher_environment = {name: os.environ[name] for name in ("DBUS_SESSION_BUS_ADDRESS", "XDG_RUNTIME_DIR")
@@ -201,39 +217,54 @@ def prepare_command(command, digest, *, destination=None, prompt_variable="", in
         arguments = sandbox_arguments(command, seccomp, scope, relay_path=relay_path,
                                       prompt_variable=prompt_variable, input_path=input_path, ca_file=trust,
                                       generic_prompt=generic_prompt, environment=environment, prompt_contains=prompt_contains)
-        process = subprocess.Popen(arguments,
-                                   stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                                   stderr=subprocess.DEVNULL, cwd="/", env=launcher_environment,
-                                   start_new_session=True, pass_fds=(seccomp,))
-        readiness = process.stdout
-        deadline = monotonic() + _READY_TIMEOUT
+        with TemporaryFile("w+b") as startup_stderr:
+            process = subprocess.Popen(arguments,
+                                       stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                       stderr=startup_stderr, cwd="/", env=launcher_environment,
+                                       start_new_session=True, pass_fds=(seccomp,))
+            readiness = process.stdout
+            deadline = monotonic() + _READY_TIMEOUT
 
-        def read(size):
-            fd = readiness.fileno()
-            if not select([fd], [], [], remaining(deadline))[0]:
-                raise TimeoutError
-            return os.read(fd, min(size, 1))
+            def read(size):
+                fd = readiness.fileno()
+                if not select([fd], [], [], remaining(deadline))[0]:
+                    raise TimeoutError
+                return os.read(fd, min(size, 1))
 
-        try:
+            def startup_detail():
+                startup_stderr.seek(0)
+                return sanitize_error_detail(startup_stderr.read(1024).decode("utf-8", "replace"))
+
             try:
-                ready = read_frame(read, len(_READY) + 1)
-            except (EOFError, TimeoutError, ValueError, ListingError) as error:
-                raise OSError("The isolated command sandbox did not start.") from error
-            if ready != _READY:
-                raise OSError("The isolated command sandbox did not start.")
-            verify_scope_limits(process.pid, scope)
-            readiness.close()
-            process.stdout = None
-            yield process if relay is None else (process, relay)
-        finally:
-            # Stop the full cgroup even when its original process already
-            # exited, so a forked descendant cannot outlive this use.
-            stop_scope(scope, launcher_environment)
-            if process.poll() is None:
-                process.kill()
-            process.wait()
-            process.stdin.close()
-            readiness.close()
+                try:
+                    try:
+                        ready = read_frame(read, len(_READY) + 1)
+                    except (EOFError, TimeoutError, ValueError, ListingError) as error:
+                        detail = startup_detail()
+                        message = (f"The isolated command sandbox did not start: {detail}"
+                                   if detail else "The isolated command sandbox did not start.")
+                        raise OSError(message) from error
+                    if ready != _READY:
+                        detail = startup_detail()
+                        message = (f"The isolated command sandbox did not start: {detail}"
+                                   if detail else "The isolated command sandbox did not start.")
+                        raise OSError(message)
+                finally:
+                    # Close pre-dispatch stderr before scope verification or yielding to deliver credentials.
+                    startup_stderr.close()
+                verify_scope_limits(process.pid, scope)
+                readiness.close()
+                process.stdout = None
+                yield process if relay is None else (process, relay)
+            finally:
+                # Stop the full cgroup even when its original process already
+                # exited, so a forked descendant cannot outlive this use.
+                stop_scope(scope, launcher_environment)
+                if process.poll() is None:
+                    process.kill()
+                process.wait()
+                process.stdin.close()
+                readiness.close()
 
 
 def deliver_credential(process, secret):

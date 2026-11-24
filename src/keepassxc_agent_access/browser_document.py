@@ -23,7 +23,8 @@ FORM_SCRIPT = """
     if (forms.length !== 1 || !(forms[0] instanceof HTMLFormElement)) return null;
     const form = forms[0];
     if (form.method !== "post" || form.enctype !== "application/x-www-form-urlencoded") return null;
-    let username = false, password = false, hidden = [];
+    let username = false, password = false;
+    const extras = new Map();
     const names = new Set();
     for (const control of form.elements) {
         if (!form.contains(control)) return null;
@@ -31,14 +32,38 @@ FORM_SCRIPT = """
             || control.hasAttribute("formenctype")) return null;
         if (!control.name || control.matches(':disabled') ||
             ['submit', 'button', 'reset', 'image'].includes(control.type)) continue;
-        if (!(control instanceof HTMLInputElement) || names.has(control.name)
-            || control.name.length > 80 || control.value.length > 1024 || names.size >= 18) return null;
-        names.add(control.name);
-        if (control.name === config.username_field && ['text', 'email'].includes(control.type)) username = true;
-        else if (control.name === config.password_field && control.type === 'password') password = true;
-        else if (control.type === 'hidden' && control.name !== config.username_field
-                 && control.name !== config.password_field) hidden.push([control.name, control.value]);
-        else return null;
+        if (!(control instanceof HTMLInputElement) || control.name.length > 80
+            || control.value.length > 1024) return null;
+        if (control.name === config.username_field) {
+            if (!['text', 'email'].includes(control.type) || names.has(control.name) || names.size >= 18) return null;
+            names.add(control.name);
+            username = true;
+        } else if (control.name === config.password_field) {
+            if (control.type !== 'password' || names.has(control.name) || names.size >= 18) return null;
+            names.add(control.name);
+            password = true;
+        } else if (control.type === 'hidden' || control.type === 'checkbox') {
+            if (!names.has(control.name)) {
+                if (names.size >= 18) return null;
+                names.add(control.name);
+            }
+            const entry = extras.get(control.name) || {};
+            if (control.type in entry) return null;
+            entry[control.type] = control.type === 'checkbox'
+                ? {checked: control.checked, value: control.value}
+                : control.value;
+            extras.set(control.name, entry);
+        } else {
+            return null;
+        }
+    }
+    const hidden = [];
+    for (const [name, entry] of extras.entries()) {
+        if ('checkbox' in entry && entry.checkbox.checked) {
+            hidden.push([name, entry.checkbox.value]);
+        } else if ('hidden' in entry) {
+            hidden.push([name, entry.hidden]);
+        }
     }
     return username && password ? {action: form.action, hidden} : null;
 }

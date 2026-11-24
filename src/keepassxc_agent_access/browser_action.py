@@ -11,6 +11,7 @@ from types import SimpleNamespace
 from urllib.parse import urlencode, urljoin
 from urllib.request import Request
 from uuid import uuid4
+import zlib
 
 from .access_settings import Destination
 from .command_action import stop_scope, syscall_filter, verify_scope_limits
@@ -72,13 +73,25 @@ def inspect_html(document, url, config):
 
 
 def _html(response):
+    encoding = (response.headers.get("Content-Encoding") or "identity").strip().lower()
     if (response.headers.get_content_type() != "text/html"
             or response.headers.get_content_charset() not in (None, "utf-8")
-            or response.headers.get("Content-Encoding", "identity") != "identity"):
+            or encoding not in ("identity", "gzip")):
         return None
     data = response.read(_HTML_LIMIT + 1)
     if len(data) > _HTML_LIMIT:
         return None
+    if encoding == "gzip":
+        decompressor = zlib.decompressobj(16 + zlib.MAX_WBITS)
+        try:
+            data = decompressor.decompress(data, _HTML_LIMIT + 1)
+            if len(data) > _HTML_LIMIT or decompressor.unconsumed_tail:
+                return None
+            data += decompressor.flush(_HTML_LIMIT + 1 - len(data))
+        except zlib.error:
+            return None
+        if len(data) > _HTML_LIMIT or not decompressor.eof:
+            return None
     return data.decode("utf-8")
 
 

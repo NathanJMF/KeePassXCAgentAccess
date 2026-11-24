@@ -15,9 +15,10 @@ from .access_settings import ActionType, BrowserForm, Destination
 from .browser_action import prepare_browser
 from .command_action import deliver_credential, deliver_prompt, prepare_command
 from .console_request import open_console
+from .console_transport import ConsoleTimeoutError
 from .entry_projection import active_entry, entry_listing, owner_snapshot
 from .https_action import authenticate, failure, prepare_https
-from .protocol import RESPONSE_LIMIT, decode, encode
+from .protocol import RESPONSE_LIMIT, decode, encode, sanitize_error_detail
 from .result_delivery import GuestLoginCache, deliver_results, parse_result_usage
 from .vault_edits import EDIT_LIMIT, EditError, database_file, file_stamp, stage_edit
 
@@ -101,9 +102,10 @@ def load_vault():
                             login_context=data.get("login_context"), login_cache=guest_logins,
                             provision=provision, account=account)
             elif data["kind"] == ActionType.STDIN:
-                use_command(entry, data["command"], data["executable_sha256"])
+                use_command(entry, data["command"], data["executable_sha256"], opaque=data.get("opaque", False))
             elif data["kind"] == ActionType.NETWORK_PROMPT:
                 use_command(entry, data["command"], data["executable_sha256"],
+                            opaque=data.get("opaque", False),
                             destination=Destination.parse(data["url"]), prompt_variable=data["prompt_variable"],
                             input_path=data["input_path"], generic_prompt=data.get("opaque", False),
                             environment=data.get("environment", ()), prompt_contains=data.get("prompt_contains", ""))
@@ -210,6 +212,8 @@ def use_console(consoles, data, entry):
         else:
             console.input(data["events"])
         return {"outcome": "succeeded"}
+    except ConsoleTimeoutError:
+        return {"error": "console_timeout"}
     except (OSError, EOFError, HTTPException, ValueError, TypeError, KeyError, ImportError):
         console = consoles.pop(identifier, None)
         if console is not None:
@@ -217,14 +221,16 @@ def use_console(consoles, data, entry):
         return {"error": "console_failed"}
 
 
-def use_command(entry, command, digest, **profile):
+def use_command(entry, command, digest, *, opaque=False, **profile):
     if entry is None:
-        reply(encode(failure()))
+        reply(encode({"error": "unavailable", "detail": "The entry is unavailable."} if opaque else failure()))
         return
     result = failure()
+    ready = False
     try:
         with prepare_command(command, digest, **profile) as process:
             reply(encode({"ready": True}))
+            ready = True
             if sys.stdin.buffer.readline(16) == b"dispatch\n":
                 if "destination" in profile:
                     outcome = deliver_prompt(process, entry.password)
@@ -234,8 +240,11 @@ def use_command(entry, command, digest, **profile):
         # Complete scope/relay cleanup before releasing the serialized worker
         # request. A child-controlled teardown must not affect the next call.
         reply(encode(result))
-    except (OSError, ValueError):
-        reply(encode(failure()))
+    except (OSError, ValueError) as error:
+        if opaque and not ready:
+            reply(encode({"error": "unavailable", "detail": sanitize_error_detail(str(error))}))
+        else:
+            reply(encode(failure()))
 
 
 def main():
