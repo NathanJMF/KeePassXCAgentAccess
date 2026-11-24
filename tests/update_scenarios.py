@@ -66,7 +66,7 @@ subprocess.Popen(sys.argv[separator + 1:], env=environment, start_new_session=Tr
 
     installation = Installation()
     assert installation.base == root / "data/keeper"
-    subprocess.run([checkout / "install", "--no-launch"], check=True, capture_output=True)
+    subprocess.run([checkout / "install", "--app-only", "--no-launch"], check=True, capture_output=True)
     assert installation.installed()["update_url"] == str(publisher)
     assert installation.update_source != checkout
     assert git(installation.update_source, "rev-parse", "HEAD") == first

@@ -5,7 +5,8 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
-from keepassxc_agent_access.updates import UpdateError, apply_update, check_for_update
+from keepassxc_agent_access.installation import DESKTOP_SERVICE
+from keepassxc_agent_access.updates import UpdateError, apply_update, check_for_update, detached, git
 
 
 class UpdateTests(unittest.TestCase):
@@ -95,6 +96,35 @@ class UpdateTests(unittest.TestCase):
         with self.assertRaisesRegex(UpdateError, "fast-forwarded"):
             apply_update(self.installation, check_for_update(self.installation))
         self.assertEqual(self.git(self.checkout, "rev-parse", "HEAD"), head)
+
+    def test_untracked_files_do_not_block_update_and_defaults_to_app_only(self):
+        target = self.commit("Clean update")
+        (self.checkout / "untracked.tmp").write_text("harmless")
+        checked = check_for_update(self.installation)
+        with patch("keepassxc_agent_access.updates.external_broker_active", return_value=False), \
+             patch.dict(self.state, desktop_unit="fixture"), \
+             patch("keepassxc_agent_access.updates.systemctl") as manager, \
+             patch("keepassxc_agent_access.updates.present_application") as reopen:
+            self.installation.connection_update_needed = lambda: True
+            message = apply_update(self.installation, checked)
+            self.assertIn("Connect an Agent", message)
+            manager.assert_called_once_with("restart", DESKTOP_SERVICE)
+            reopen.assert_called_once_with()
+        self.assertEqual((self.checkout / "install-args").read_text().splitlines(), ["--no-launch", "--app-only"])
+
+    def test_git_and_detached_preserve_user_config_and_session_id(self):
+        with patch("keepassxc_agent_access.updates.subprocess.run") as run:
+            run.return_value = SimpleNamespace(stdout="ok\n")
+            git(self.checkout, "status")
+            cmd, env = run.call_args.args[0], run.call_args.kwargs["env"]
+            self.assertIn("core.fsmonitor=false", cmd)
+            self.assertIn("core.hooksPath=/dev/null", cmd)
+            self.assertNotIn("GIT_CONFIG_GLOBAL", env)
+
+            with patch.dict("keepassxc_agent_access.updates.os.environ", {"XDG_SESSION_ID": "session-42"}, clear=False):
+                detached(["/bin/true"])
+            detached_cmd = run.call_args.args[0]
+            self.assertIn("--setenv=XDG_SESSION_ID=session-42", detached_cmd)
 
 
 if __name__ == "__main__":

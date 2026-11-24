@@ -114,7 +114,7 @@ def main(root):
     installed.write_bytes(edited)
     subprocess.run(["./install-launcher"], check=True, capture_output=True)
     assert installed.read_bytes() == edited
-    subprocess.run(["./install", "--no-launch"], check=True, capture_output=True)
+    subprocess.run(["./install", "--app-only", "--no-launch"], check=True, capture_output=True)
     assert installed.read_bytes() == edited
     managed = Path(os.environ["XDG_DATA_HOME"]) / "keeper" / "app"
     launcher = Gio.DesktopAppInfo.new(DESKTOP_ID)
@@ -176,7 +176,7 @@ def main(root):
     assert access.path.read_bytes() == settings_before
     assert SystemKeyring().retrieve(saved_item) == PASSWORD
     subprocess.run(["./uninstall"], check=True, capture_output=True)
-    subprocess.run(["./install", "--no-launch"], check=True, capture_output=True)
+    subprocess.run(["./install", "--app-only", "--no-launch"], check=True, capture_output=True)
     assert (managed / "run-tray").exists()
     print("Launcher scenario passed: managed install, GNOME launch, single instance, open-only tray, removal, reinstall and preserved data",
           flush=True)
