@@ -23,6 +23,7 @@ from .account_provision import parse_provision, provision_body
 from .access_settings import Destination, HTTPS_METHODS, HTTPS_WRITE_METHODS, credential_headers, request_query
 from .command_network import approved_addresses
 from .protocol import MAX_GUEST_TEXT
+from .totp import entry_custom_attr, entry_totp, otp_uri_secret
 
 
 BODY_LIMIT = 2 * 1024 * 1024
@@ -37,7 +38,8 @@ _NAME = re.compile(r"[A-Za-z][A-Za-z0-9_]{0,31}")
 _COLUMN = re.compile(r"[A-Za-z0-9_.-]{1,128}")
 _HEADER_TOKEN = re.compile(r"[!#$%&'*+.^_`|~0-9A-Za-z-]{1,64}")
 _SAFE_HEADER_NAME = re.compile(r"[A-Za-z0-9-]{1,64}")
-_REFERENCE = re.compile(r"\{\{(password|username|session\.[A-Za-z][A-Za-z0-9_]{0,31})\}\}")
+_REFERENCE = re.compile(r"\{\{(password|username|totp|attr\.[A-Za-z0-9_.-]{1,64}|session\.[A-Za-z][A-Za-z0-9_]{0,31})\}\}")
+_CREDENTIAL_ATTR_RESERVED = frozenset(("attr.otp",))
 _PRIVATE_COLUMNS = frozenset(("password", "passwd", "secret", "token", "ticket", "csrfpreventiontoken",
                               "authorization", "cookie", "setcookie", "session", "apikey", "privatekey",
                               "accesstoken", "refreshtoken", "csrftoken", "credential", "credentials"))
@@ -110,11 +112,21 @@ def _path(value):
     return value
 
 
-def _references(value, allowed):
+def _is_allowed_ref(ref, allowed, allow_attrs):
+    if ref in allowed:
+        return True
+    return allow_attrs and ref.startswith("attr.") and ref not in _CREDENTIAL_ATTR_RESERVED
+
+
+def _has_credential_ref(refs):
+    return any(ref in ("password", "totp") or ref.startswith("attr.") for ref in refs)
+
+
+def _references(value, allowed, *, allow_attrs=False):
     if isinstance(value, str):
         references = set(_REFERENCE.findall(value))
         rest = _REFERENCE.sub("", value)
-        if not references <= allowed or "{{" in rest or "}}" in rest:
+        if any(not _is_allowed_ref(ref, allowed, allow_attrs) for ref in references) or "{{" in rest or "}}" in rest:
             raise ValueError("Unsupported credential reference.")
         return references
     if isinstance(value, dict):
@@ -122,12 +134,12 @@ def _references(value, allowed):
         for key, item in value.items():
             if not isinstance(key, str) or "{{" in key or "}}" in key:
                 raise ValueError("Credential references belong in values.")
-            result.update(_references(item, allowed))
+            result.update(_references(item, allowed, allow_attrs=allow_attrs))
         return result
     if isinstance(value, list):
         result = set()
         for item in value:
-            result.update(_references(item, allowed))
+            result.update(_references(item, allowed, allow_attrs=allow_attrs))
         return result
     return set()
 
@@ -155,7 +167,7 @@ def _valid_column(name):
                for segment in name.split("."))
 
 
-def _body(data, *, allowed=()):
+def _body(data, *, allowed=(), allow_attrs=False):
     if "form" in data and "json" in data:
         raise ValueError("Use either JSON or form values.")
     if "form" in data:
@@ -165,13 +177,13 @@ def _body(data, *, allowed=()):
                        or not isinstance(value, str) or not value.isprintable() for key, value in form.items())
                 or len(urlencode(form).encode("ascii")) > 65536):
             raise ValueError("Use a small printable form map.")
-        return {"form": dict(form)}, _references(form, set(allowed))
+        return {"form": dict(form)}, _references(form, set(allowed), allow_attrs=allow_attrs)
     if "json" in data:
         body = _decode(data["json"]) if isinstance(data["json"], str) else data["json"]
         _depth(body)
         if not isinstance(body, dict) or len(_json(body).encode("ascii")) > 65536:
             raise ValueError("Use a small JSON object.")
-        return {"json": body}, _references(body, set(allowed))
+        return {"json": body}, _references(body, set(allowed), allow_attrs=allow_attrs)
     return {}, set()
 
 
@@ -195,12 +207,13 @@ def parse_result_usage(data):
         if (not isinstance(login, dict) or not {"path", "capture"} <= login.keys() <= {"path", "capture", "method", "form", "json", "headers"}
                 or login.get("method", "POST") != "POST"):
             raise ValueError("Use a private POST authentication exchange.")
-        body, refs = _body(login, allowed={"password", "username"})
+        login_allowed = {"password", "username", "totp"}
+        body, refs = _body(login, allowed=login_allowed, allow_attrs=True)
         login_headers = dict(credential_headers(login.get("headers", {})))
-        refs = refs | _references(login_headers, {"password", "username"})
+        refs = refs | _references(login_headers, login_allowed, allow_attrs=True)
         capture = login["capture"]
-        if (not body and not login_headers) or "password" not in refs or not isinstance(capture, dict) or not 1 <= len(capture) <= 4:
-            raise ValueError("The private login needs a password reference and named captures.")
+        if (not body and not login_headers) or not _has_credential_ref(refs) or not isinstance(capture, dict) or not 1 <= len(capture) <= 4:
+            raise ValueError("The private login needs a credential reference and named captures.")
         for key, pointer in capture.items():
             if not isinstance(key, str) or not _NAME.fullmatch(key):
                 raise ValueError("Use short private capture names.")
@@ -225,9 +238,14 @@ def parse_result_usage(data):
     headers = dict(credential_headers(request.get("headers", {})))
     if auth in ("basic", "bearer") and any(name.lower() == "authorization" for name in headers):
         raise ValueError("Basic and Bearer requests set Authorization automatically.")
-    allowed = session_refs if auth == "session" else {"password", "username"} if auth == "template" else set()
-    refs = _references(headers, allowed)
-    if auth == "session" and (not session_refs or not refs) or auth == "template" and "password" not in refs:
+    if auth == "session":
+        allowed, allow_attrs = session_refs, False
+    elif auth == "template":
+        allowed, allow_attrs = {"password", "username", "totp"}, True
+    else:
+        allowed, allow_attrs = set(), False
+    refs = _references(headers, allowed, allow_attrs=allow_attrs)
+    if auth == "session" and (not session_refs or not refs) or auth == "template" and not _has_credential_ref(refs):
         raise ValueError("The resource authentication must use its private credential.")
     query = dict(request_query(request.get("query", {})))
     _references(query, set())
@@ -775,6 +793,20 @@ def _render_headers(raw_headers, values):
     return headers, rendered_auth
 
 
+def _used_credential_refs(data):
+    refs = set()
+    allowed = {"password", "username", "totp"}
+    if "login" in data:
+        login = data["login"]
+        for key in ("form", "json", "headers"):
+            if key in login:
+                refs.update(_references(login[key], allowed, allow_attrs=True))
+    request = data["request"]
+    if request["auth"] == "template" and "headers" in request:
+        refs.update(_references(request["headers"], allowed, allow_attrs=True))
+    return refs
+
+
 def deliver_results(config, entry, dispatch, *, allow_username=False, private_result=None,
                     login_context=None, login_cache=None, provision=None, account=None):
     """Release only the concrete approved projection; dispatch gates every send."""
@@ -783,16 +815,40 @@ def deliver_results(config, entry, dispatch, *, allow_username=False, private_re
     forbidden = []
     if hasattr(entry, "password") and isinstance(entry.password, str) and entry.password:
         forbidden.append(entry.password)
+    if hasattr(entry, "otp") and isinstance(entry.otp, str) and entry.otp:
+        forbidden.append(entry.otp)
+        raw_otp = otp_uri_secret(entry.otp)
+        if raw_otp:
+            forbidden.append(raw_otp)
     try:
         config = parse_result_usage(config.data if isinstance(config, ResultRequest) else config)
         data = config.data
-        password, username = entry.password, entry.username or ""
+        request = data["request"]
+        used_refs = _used_credential_refs(data)
+        password = getattr(entry, "password", None)
+        username = getattr(entry, "username", None) or ""
         if type(allow_username) is not bool:
             return {"outcome": "failed"}
-        if not isinstance(password, str) or not password or len(password.encode("utf-8")) > 65536:
+        needs_password = request["auth"] in ("basic", "bearer") or "password" in used_refs
+        if needs_password and (not isinstance(password, str) or not password or len(password.encode("utf-8")) > 65536):
             return {"outcome": "failed"}
-        values = {"password": password, "username": username}
-        forbidden = [password, username + ":" + password]
+        password_text = password if isinstance(password, str) else ""
+        values = {"password": password_text, "username": username}
+        forbidden = []
+        if password_text:
+            forbidden.extend((password_text, username + ":" + password_text))
+        if "totp" in used_refs:
+            totp_code, otp_secret = entry_totp(entry)
+            values["totp"] = totp_code
+            forbidden.extend((totp_code, otp_secret))
+            raw_otp = otp_uri_secret(otp_secret)
+            if raw_otp:
+                forbidden.append(raw_otp)
+        for ref in sorted(used_refs):
+            if ref.startswith("attr."):
+                attr_val = entry_custom_attr(entry, ref[5:])
+                values[ref] = attr_val
+                forbidden.append(attr_val)
         private_number = None
         if type(private_result) is int and 1 <= private_result < 2**53:
             private_number = private_result
@@ -804,7 +860,6 @@ def deliver_results(config, entry, dispatch, *, allow_username=False, private_re
             forbidden.append(username)
         deadline = monotonic() + WORKFLOW_SECONDS
         pin = data.get("certificate_sha256")
-        request = data["request"]
         if provision is not None:
             if account is None or login_context is not None:
                 raise ValueError("The approved account is unavailable.")

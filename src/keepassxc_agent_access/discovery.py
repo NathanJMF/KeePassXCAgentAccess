@@ -54,14 +54,76 @@ class DiscoveryCatalog:
         return tuple(item for record in workspace.registrations.values()
                      for item in (record, workspace.owner_session(record.id), self.snapshots.get(record.id)))
 
-    def read(self, workspace, *, vault=None, summary=False):
+    @staticmethod
+    def _filter_snapshot(data, query):
+        groups_by_id = {group["id"]: group for group in data["groups"]}
+        chains = {}
+
+        def group_chain(identifier):
+            if identifier in chains:
+                return chains[identifier]
+            chain = []
+            visited = set()
+            current = identifier
+            while current is not None and current not in visited:
+                visited.add(current)
+                group = groups_by_id.get(current)
+                if group is None:
+                    break
+                chain.append(group)
+                current = group["parent"]
+            chain.reverse()
+            chains[identifier] = chain
+            return chain
+
+        matched_groups = set()
+        for group in data["groups"]:
+            chain = group_chain(group["id"])
+            names = [item["name"] for item in chain if item["name"]]
+            slash_path = "/".join(names).casefold()
+            spaced_path = " / ".join(names).casefold()
+            if query in group["name"].casefold() or query in slash_path or query in spaced_path:
+                matched_groups.add(group["id"])
+
+        matched_entries = [
+            entry for entry in data["entries"]
+            if query in entry["title"].casefold() or entry["group"] in matched_groups
+        ]
+        if not matched_groups and not matched_entries:
+            return None
+
+        included_groups = set()
+        for gid in matched_groups:
+            included_groups.update(item["id"] for item in group_chain(gid))
+        for entry in matched_entries:
+            included_groups.update(item["id"] for item in group_chain(entry["group"]))
+
+        return {
+            "groups": [group for group in data["groups"] if group["id"] in included_groups],
+            "entries": matched_entries,
+        }
+
+    def read(self, workspace, *, vault=None, summary=False, query=None):
+        needle = None
+        if query is not None:
+            if not isinstance(query, str) or not query.strip() or len(query) > 128 or not query.isprintable():
+                raise ValueError("Invalid discovery query.")
+            needle = query.casefold()
         rows = []
         for record in workspace.registrations.values():
             if vault is not None and record.id != vault:
                 continue
             session = workspace.owner_session(record.id)
             cached = self.snapshots.get(record.id)
-            data = snapshot(session.groups, session.entries) if session and not summary else cached
+            data = snapshot(session.groups, session.entries) if session and (not summary or needle is not None) else cached
+            if needle is not None:
+                vault_matches = needle in record.name.casefold()
+                if not vault_matches:
+                    if not data:
+                        continue
+                    data = self._filter_snapshot(data, needle)
+                    if data is None:
+                        continue
             rows.append({
                 "id": record.id, "name": record.name, "locked": session is None,
                 "cached": session is None and cached is not None, "available": session is not None or data is not None,

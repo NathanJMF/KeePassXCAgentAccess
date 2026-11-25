@@ -26,6 +26,7 @@ APPROVAL_TIMEOUT = 60
 CLIENT_TIMEOUT = APPROVAL_TIMEOUT + 35
 _MAX_ARGS = 32
 _MAX_ARG_BYTES = 4096
+ENTRY_FIELDS = ("username", "url", "notes", "has_totp", "custom_attribute_keys", "attachments")
 LIST_REQUEST = {"version": 1, "operation": "list_entries"}
 ERRORS = {
     "unavailable": "Agent access is unavailable. Ask the vault owner to check broker access.",

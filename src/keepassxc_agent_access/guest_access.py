@@ -54,7 +54,7 @@ class GuestAccess:
         registration = self.workspace.registrations.get(grant.vault)
         return (not self.workspace.paused and monotonic() < grant.expires
                 and self.workspace.generation == grant.generation
-                and self.broker.grants.is_active(token) and token.generation == grant.token_generation
+                and self.broker.grants.is_active(token) and token.revocation_generation == grant.token_generation
                 and self.workspace.session(grant.vault) is grant.session and registration is not None
                 and registration.credential_revision(grant.entry) == grant.revision
                 and (grant.trusted_endpoint is None or self.broker.grants.result_certificate_trusted(
@@ -123,7 +123,7 @@ class GuestAccess:
                 reused = permit is not None
                 if automatic and not reused and len(self.grants) + self.pending.total() < MAX_GUEST_JOBS:
                     reuse_minutes = requested_minutes
-                grant = permit or GuestGrant(token.id, token.generation, self.workspace.generation, vault, entry,
+                grant = permit or GuestGrant(token.id, token.revocation_generation, self.workspace.generation, vault, entry,
                                              revision, session, monotonic() + self.broker.approvals.timeout + 30)
                 pending_pin = None
                 if automatic and not reused and self.workspace.scoped_auto_approval_enabled("guest_first_use"):

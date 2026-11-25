@@ -74,6 +74,16 @@ def _entry_timestamp(entry, field):
         return None
 
 
+_TOTP_PROPERTY_KEYS = frozenset({"otp", "TOTP Seed", "TOTP Settings"})
+
+
+def _entry_has_totp(entry, custom):
+    otp = getattr(entry, "otp", None)
+    if isinstance(otp, str) and otp.strip():
+        return True
+    return any(isinstance(custom.get(key), str) and custom[key].strip() for key in ("otp", "TOTP Seed"))
+
+
 def owner_snapshot(vault):
     recycle_id = _recycle_id(vault)
     groups = [{"id": str(group.uuid), "name": group.name or "",
@@ -83,8 +93,16 @@ def owner_snapshot(vault):
     for entry in vault.entries:
         row = _project(entry, recycle_id)
         if row is not None:
+            custom = getattr(entry, "custom_properties", None) or {}
+            attachments = sorted(
+                str(att.filename) for att in (getattr(entry, "attachments", ()) or ())
+                if isinstance(getattr(att, "filename", None), str) and att.filename
+            )
             entries.append(dict(row, group=str(entry.group.uuid),
                                 username=entry.username or "", url=entry.url or "",
+                                has_totp=_entry_has_totp(entry, custom),
+                                custom_attribute_keys=sorted(str(key) for key in custom if key not in _TOTP_PROPERTY_KEYS),
+                                attachments=attachments,
                                 created=_entry_timestamp(entry, "ctime"),
                                 modified=_entry_timestamp(entry, "mtime")))
     recycle_group = next((group for group in vault.groups if group.uuid == recycle_id), None)

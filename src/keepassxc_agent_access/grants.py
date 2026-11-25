@@ -19,7 +19,7 @@ from .workspace import new_id, ordered_groups
 MAX_ITEMS = 32
 MAX_PENDING = 64
 LIVE_GRANT_STATES = frozenset(("pending", "active", "disabled"))
-OPTIONAL_METADATA_FIELDS = ("username", "url")
+OPTIONAL_METADATA_FIELDS = ("username", "url", "notes")
 CREDENTIAL_USES = {
     "local_command": "Use Password in Local Commands",
     "networked_command": "Use Password in Networked Commands",
@@ -113,14 +113,14 @@ def group_location(groups, identifier):
 
 def verifier(credential):
     if not isinstance(credential, str) or not re.fullmatch(r"[0-9a-f]{64}", credential):
-        raise ListingError("ineligible")
+        raise ListingError("ineligible", detail="Invalid token credential.")
     return sha256(bytes.fromhex(credential)).hexdigest()
 
 
-def _validate_metadata(metadata, username, url):
-    if any(type(permission) is not bool for permission in (metadata, username, url)):
+def _validate_metadata(metadata, username, url, notes=False):
+    if any(type(permission) is not bool for permission in (metadata, username, url, notes)):
         raise ValueError
-    if (username or url) and not metadata:
+    if (username or url or notes) and not metadata:
         raise ValueError
 
 
@@ -133,13 +133,14 @@ class Item:
     action: str | None
     username: bool = False
     url: bool = False
+    notes: bool = False
     group: str | None = None
     edits: tuple[str, ...] = ()
     uses: tuple[str, ...] = ()
     origins: tuple[str, ...] = ()
 
     def __post_init__(self):
-        _validate_metadata(self.metadata, self.username, self.url)
+        _validate_metadata(self.metadata, self.username, self.url, self.notes)
         object.__setattr__(self, "edits", _edit_permissions(self.edits, GROUP_EDITS if self.group else ENTRY_EDITS))
         uses, origins = credential_permissions(self.uses, self.origins, group=self.group)
         object.__setattr__(self, "uses", uses)
@@ -167,6 +168,7 @@ class Item:
                    label(name) if name is not None else None, metadata,
                    action_id(action) if action is not None else None,
                    username=data.get("username", False), url=data.get("url", False),
+                   notes=data.get("notes", False),
                    group=uuid_text(group) if group is not None else None, edits=edits, uses=uses, origins=origins)
 
 
@@ -192,6 +194,7 @@ class Scope:
     revision: str | None
     username: bool = False
     url: bool = False
+    notes: bool = False
     group: str | None = None
     edits: tuple[str, ...] = ()
     uses: tuple[str, ...] = ()
@@ -204,7 +207,7 @@ class Scope:
         if self.use_revision is not None and (not isinstance(self.use_revision, str)
                 or not re.fullmatch(r"[0-9a-f]{64}", self.use_revision) or not self.uses):
             raise ValueError("Invalid credential-use approval revision.")
-        _validate_metadata(self.metadata, self.username, self.url)
+        _validate_metadata(self.metadata, self.username, self.url, self.notes)
         object.__setattr__(self, "edits", _edit_permissions(self.edits, GROUP_EDITS if self.group else ENTRY_EDITS))
         uses, origins = credential_permissions(self.uses, self.origins, group=self.group)
         object.__setattr__(self, "uses", uses)
@@ -220,7 +223,9 @@ class Scope:
         ))
 
     def audit_summary(self):
-        operations = [name for name in ("metadata", *OPTIONAL_METADATA_FIELDS) if getattr(self, name)]
+        operations = [name for name in ("metadata", "username", "url") if getattr(self, name)]
+        if self.notes:
+            operations.append("Entry Notes")
         if self.action:
             operations.append(f"action {self.action}")
         operations.extend(self.edits)
@@ -249,6 +254,8 @@ class PermissionChange:
     context: Attribution
     items: tuple[Item, ...]
     status: str = "pending"
+    mode: str = "replace"
+    submitted_items: tuple[Item, ...] | None = None
 
 
 @dataclass(frozen=True)
@@ -280,6 +287,7 @@ class Grant:
     scope: tuple[Scope, ...] = ()
     last_used: float | None = None
     generation: int = 0
+    revocation_generation: int | None = None
     change: PermissionChange | None = None
     superseded_changes: tuple[str, ...] = ()
     released_entries: tuple[tuple[str, str], ...] = ()
@@ -288,6 +296,8 @@ class Grant:
     extension: ExtensionRequest | None = None
 
     def __post_init__(self):
+        if self.revocation_generation is None:
+            object.__setattr__(self, "revocation_generation", self.generation)
         if self.expires_at is not None and (type(self.expires_at) not in (int, float) or not isfinite(self.expires_at)):
             raise ValueError("Invalid token expiration.")
         if self.workflow is not None:
@@ -321,8 +331,14 @@ class Grants:
             for row in saved["grants"]:
                 change = row.get("change")
                 if change is not None:
-                    change = PermissionChange(**dict(change, context=Attribution(**change["context"]),
-                                                     items=tuple(Item(**item) for item in change["items"])))
+                    submitted = change.get("submitted_items")
+                    change = PermissionChange(**dict(
+                        change,
+                        context=Attribution(**change["context"]),
+                        items=tuple(Item(**item) for item in change["items"]),
+                        **({"submitted_items": tuple(Item(**item) for item in submitted)}
+                           if submitted is not None else {}),
+                    ))
                 ext = row.get("extension")
                 if ext is not None:
                     ext = ExtensionRequest(**dict(ext, context=Attribution(**ext["context"])))
@@ -382,6 +398,7 @@ class Grants:
                     decision = "Pending token expired" if record.status == "pending" else "Token life span expired"
                     updated = replace(
                         record, status="expired", generation=record.generation + 1,
+                        revocation_generation=record.revocation_generation + 1,
                         scope=(), items=(), change=None, extension=None,
                         superseded_changes=(), released_entries=(),
                     )
@@ -408,17 +425,17 @@ class Grants:
         identifier = self.credentials.get(verifier(credential))
         record = self.records.get(identifier)
         if record is None or record.uid != uid or record.workflow is not None and not allow_workflow:
-            raise ListingError("ineligible")
+            raise ListingError("ineligible", detail="Token credential is unrecognized, belongs to another user, or is restricted to a workflow.")
         if record.status in LIVE_GRANT_STATES and self.is_expired(record):
             self.prune_expired()
             record = self.records.get(identifier)
             if record is None:
-                raise ListingError("ineligible")
+                raise ListingError("ineligible", detail="Token has expired and is no longer available.")
         return record
 
     def can_issue_workflow(self, draft):
         if draft.verifier in self.credentials:
-            raise ListingError("ineligible")
+            raise ListingError("ineligible", detail="Token credential is already registered.")
         if any(row.status in LIVE_GRANT_STATES and row.identity.strip().casefold() == draft.identity.casefold()
                for row in self.records.values()):
             raise ListingError("identity_in_use")
@@ -434,7 +451,7 @@ class Grants:
         request = Item.parse(item)
         choices = self.choices(request)
         if len(choices) != 1:
-            raise ListingError("ineligible")
+            raise ListingError("ineligible", detail="Workflow target entry could not be uniquely resolved.")
         self.prune_expired()
         now = time()
         draft = Grant(new_id(), verifier(credential), uid, now, identity, project, context,
@@ -537,7 +554,7 @@ class Grants:
     @staticmethod
     def _scope_without_revision(scope):
         return (scope.vault, scope.entry, scope.metadata, scope.action, scope.group,
-                scope.username, scope.url, scope.edits, scope.uses, scope.origins)
+                scope.username, scope.url, scope.notes, scope.edits, scope.uses, scope.origins)
 
     @staticmethod
     def _preserve_trusted_pins(previous_scope, new_scopes):
@@ -644,9 +661,14 @@ class Grants:
 
     def enroll(self, credential, uid, payload, attribution):
         try:
-            if not isinstance(payload, dict) or not {"items"} <= payload.keys() <= {"identity", "project", "items", "change_id"}:
+            if not isinstance(payload, dict) or not {"items"} <= payload.keys() <= {"identity", "project", "items", "change_id", "mode"}:
                 raise ValueError
             change_id = uuid_text(payload["change_id"]) if "change_id" in payload else None
+            mode = payload.get("mode", "replace")
+            if not isinstance(mode, str) or mode not in ("replace", "add"):
+                raise ValueError
+            if mode == "add" and change_id is None:
+                raise ValueError
             if change_id is None and not {"identity", "project"} <= payload.keys():
                 raise ValueError
             identity = label(payload["identity"]).strip() if "identity" in payload else None
@@ -670,22 +692,22 @@ class Grants:
                 record = self.records[identifier]
                 if record.status in ("denied", "removed", "expired"):
                     if record.workflow is not None or record.uid != uid or change_id is not None:
-                        raise ListingError("ineligible")
+                        raise ListingError("ineligible", detail="This token is closed and cannot accept permission changes.")
                     stale_record = record
                 else:
                     if record.workflow is not None:
-                        raise ListingError("ineligible")
+                        raise ListingError("ineligible", detail="Workflow tokens cannot be modified.")
                     if (record.uid != uid
                             or (identity is not None and record.identity.strip() != identity)
                             or (project is not None and record.project != project)):
-                        raise ListingError("ineligible")
+                        raise ListingError("ineligible", detail="Token identity, project, or user does not match the existing registration.")
                     if change_id:
-                        return self._request_change(record, change_id, items, attribution)
+                        return self._request_change(record, change_id, items, attribution, mode=mode)
                     if record.items != items:
-                        raise ListingError("ineligible")
+                        raise ListingError("ineligible", detail="Use change_id to update an existing token's permissions.")
                     return record.status
             if change_id:
-                raise ListingError("ineligible")
+                raise ListingError("ineligible", detail="No existing token matches this credential for a permission change.")
             identity_key = identity.casefold()
             if any(row.status in LIVE_GRANT_STATES and row.identity.strip().casefold() == identity_key
                    for row in self.records.values()):
@@ -713,28 +735,78 @@ class Grants:
                 return "active"
             return record.status
 
-    def _request_change(self, record, change_id, items, attribution):
+    @staticmethod
+    def _merge_add_items(existing_scope, incoming_items):
+        merged = []
+        index_by_key = {}
+
+        def merge_pair(base, extra):
+            return Item(
+                base.vault,
+                base.entry,
+                base.label or extra.label,
+                base.metadata or extra.metadata,
+                base.action or extra.action,
+                username=base.username or extra.username,
+                url=base.url or extra.url,
+                notes=base.notes or extra.notes,
+                group=base.group,
+                edits=tuple(sorted(set(base.edits) | set(extra.edits))),
+                uses=tuple(sorted(set(base.uses) | set(extra.uses))),
+                origins=tuple(sorted(set(base.origins) | set(extra.origins))),
+            )
+
+        def add_item(item):
+            if item.entry is not None or item.group is not None:
+                key = ("target", item.vault, item.entry, item.group, item.action)
+            else:
+                key = ("label", item.vault, item.label, item.action)
+            if key in index_by_key:
+                pos = index_by_key[key]
+                merged[pos] = merge_pair(merged[pos], item)
+            else:
+                index_by_key[key] = len(merged)
+                merged.append(item)
+
+        for scope in existing_scope:
+            add_item(Item(
+                scope.vault, scope.entry, None, scope.metadata, scope.action,
+                username=scope.username, url=scope.url, notes=scope.notes,
+                group=scope.group, edits=scope.edits, uses=scope.uses, origins=scope.origins,
+            ))
+        for item in incoming_items:
+            add_item(item)
+        if len(merged) > MAX_ITEMS:
+            raise ValueError(f"Combined scope exceeds maximum of {MAX_ITEMS} items.")
+        return tuple(merged)
+
+    def _request_change(self, record, change_id, items, attribution, *, mode="replace"):
         if record.status != "active":
-            raise ListingError("ineligible")
+            raise ListingError("ineligible", detail=f"Token status is {record.status}; an active token is required for permission changes.")
         previous = record.change
         if previous and change_id == previous.id:
-            if previous.items != items:
+            expected_items = previous.submitted_items if previous.submitted_items is not None else previous.items
+            if previous.mode != mode or expected_items != items:
                 raise ListingError("invalid_request")
             return previous.status
         if change_id in record.superseded_changes:
             raise ListingError("revoked")
         if record.pending_change:
             raise ListingError("token_change_pending")
+        try:
+            effective_items = self._merge_add_items(record.scope, items) if mode == "add" else items
+        except ValueError as error:
+            raise ListingError("invalid_request", detail=str(error) or None) from None
         self._check_request_capacity()
-        change = PermissionChange(change_id, time(), attribution, items)
+        change = PermissionChange(change_id, time(), attribution, effective_items, mode=mode, submitted_items=items)
         superseded = (*record.superseded_changes, previous.id) if previous else record.superseded_changes
         row = replace(record, change=change, superseded_changes=superseded)
         choices = None
         if self.workspace.token_auto_approval_enabled("auto_approve_token_changes"):
             allow_uses = self.workspace.token_auto_approval_enabled("auto_approve_token_credential_uses")
-            choices = self._automatic_choices(items, allow_uses=allow_uses)
+            choices = self._automatic_choices(effective_items, allow_uses=allow_uses)
         if choices is None and self.workspace.token_auto_approval_enabled("auto_approve_token_rotations"):
-            candidate = self._automatic_choices(items, allow_uses=True)
+            candidate = self._automatic_choices(effective_items, allow_uses=True)
             if candidate and (Counter(self._scope_without_revision(s) for s in record.scope)
                               == Counter(self._scope_without_revision(c.scope) for c in candidate)):
                 choices = candidate
@@ -794,7 +866,8 @@ class Grants:
                     if item.action and (binding is None or not binding.action.enabled):
                         continue
                     scope = Scope(identifier, entry["id"], item.metadata, item.action,
-                                  binding.revision if binding else None, username=item.username, url=item.url, edits=item.edits,
+                                  binding.revision if binding else None, username=item.username, url=item.url,
+                                  notes=item.notes, edits=item.edits,
                                   uses=item.uses, origins=item.origins,
                                   use_revision=record.credential_revision(entry["id"]) if item.uses else None)
                     result.append(Choice(scope, record.name, (*entry["group_path"], entry["title"]),
@@ -811,6 +884,29 @@ class Grants:
     @staticmethod
     def _restores_released_entry(record, scopes):
         return not set(record.released_entries).isdisjoint((item.vault, item.entry) for item in scopes)
+
+    @staticmethod
+    def _scope_covers(old_scopes, new_scopes):
+        def covers(old, new):
+            return (
+                new.vault == old.vault
+                and new.entry == old.entry
+                and new.group == old.group
+                and new.action == old.action
+                and (old.action is None or new.revision == old.revision)
+                and (not old.metadata or new.metadata)
+                and (not old.username or new.username)
+                and (not old.url or new.url)
+                and (not old.notes or new.notes)
+                and set(old.edits) <= set(new.edits)
+                and set(old.uses) <= set(new.uses)
+                and (not old.uses or new.use_revision == old.use_revision)
+                and set(old.origins) <= set(new.origins)
+                and set(old.result_certificates) <= set(new.result_certificates)
+                and set(old.ssh_host_keys) <= set(new.ssh_host_keys)
+            )
+
+        return all(any(covers(old, new) for new in new_scopes) for old in old_scopes)
 
     def _decide(self, record, choices, *, change_id=None, automatic=False):
         if record.status in LIVE_GRANT_STATES and self.is_expired(record):
@@ -842,11 +938,15 @@ class Grants:
         granted = {(item.vault, item.entry) for item in scope}
         released = tuple(entry for entry in record.released_entries if entry not in granted)
         action = "Approve token permissions" if change_id else "Approve token"
+        additive = False
         if change_id:
             scope = self._preserve_trusted_pins(record.scope, scope)
+            additive = self._scope_covers(record.scope, scope)
         row = replace(record, status="active", scope=scope, released_entries=released)
         if change_id:
-            row = replace(row, change=replace(change, status="active"), generation=record.generation + 1)
+            rev_gen = record.revocation_generation if additive else record.revocation_generation + 1
+            row = replace(row, change=replace(change, status="active"),
+                          generation=record.generation + 1, revocation_generation=rev_gen)
         else:
             now = time()
             row = replace(row, expires_at=max(record.expires_at or now,
@@ -860,9 +960,9 @@ class Grants:
             current = self.records.get(token.id)
             if current is not None and current.status in LIVE_GRANT_STATES and self.is_expired(current):
                 self.prune_expired()
-                raise ListingError("ineligible")
+                raise ListingError("ineligible", detail="Token has expired.")
             if not self.is_active(current) or current.generation != token.generation:
-                raise ListingError("ineligible")
+                raise ListingError("ineligible", detail="An active, current token is required to release an entry.")
             target = (vault, entry)
             removed = tuple(item for item in current.scope if (item.vault, item.entry) == target)
             pending = current.pending_change
@@ -876,7 +976,8 @@ class Grants:
                     return {"status": "released", "cancelled_change": False}
             remaining = tuple(item for item in current.scope if (item.vault, item.entry) != target)
             change = replace(pending, status="denied") if pending else current.change
-            row = replace(current, scope=remaining, generation=current.generation + 1, change=change,
+            row = replace(current, scope=remaining, generation=current.generation + 1,
+                          revocation_generation=current.revocation_generation + 1, change=change,
                           released_entries=tuple(sorted(set(current.released_entries) | {target})))
             decision = "Released by agent"
             if pending:
@@ -903,7 +1004,8 @@ class Grants:
             action = commands.get((record.status, status))
             if action is None:
                 raise ListingError("revoked")
-            row = replace(record, status=status, generation=record.generation + 1)
+            row = replace(record, status=status, generation=record.generation + 1,
+                          revocation_generation=record.revocation_generation + 1)
             if row.pending_change:
                 row = replace(row, change=replace(row.change, status="denied"))
             if status == "disabled" and row.pending_extension:
@@ -947,12 +1049,13 @@ class Grants:
         with self.workspace.mutex:
             record = self.records.get(token_id)
             if record is None:
-                raise ListingError("ineligible")
+                raise ListingError("ineligible", detail="Token credential is unrecognized.")
             if record.status in LIVE_GRANT_STATES and self.is_expired(record):
                 self.prune_expired()
-                raise ListingError("ineligible")
+                raise ListingError("ineligible", detail="Token has expired.")
             if record.workflow is not None or not self.is_active(record):
-                raise ListingError("ineligible")
+                detail = "Workflow tokens cannot be extended." if record.workflow is not None else f"Cannot extend token with status {record.status}."
+                raise ListingError("ineligible", detail=detail)
             if extension_id is not None:
                 if record.extension and record.extension.id == extension_id:
                     if record.extension.days != requested_days:

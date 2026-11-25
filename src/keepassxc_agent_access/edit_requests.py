@@ -21,7 +21,7 @@ class _EditKind:
     required: tuple[str, ...] = ()
 
 
-_ENTRY_FIELDS = ("title", "username", "url")
+_ENTRY_FIELDS = ("title", "username", "url", "notes")
 _KINDS = {
     "create_entry": _EditKind("Create entry", None, True, _ENTRY_FIELDS, ("title",)),
     "update_entry": _EditKind("Update entry", "entry", False, _ENTRY_FIELDS),
@@ -284,7 +284,7 @@ class EditRequests:
         attribution = encode(asdict(context or token.context))
         with self.workspace.mutex:
             if not self._active(token):
-                raise ListingError("ineligible")
+                raise ListingError("ineligible", detail="An active, current token is required to submit edit requests.")
             self._discard_stale_proposals()
             with self.activity.connection() as db:
                 previous = self._get(db, token.id, request.id)
@@ -340,12 +340,12 @@ class EditRequests:
             raise ListingError("invalid_request") from None
         with self.workspace.mutex:
             if not self._active(token):
-                raise ListingError("ineligible")
+                raise ListingError("ineligible", detail="An active, current token is required to check edit status.")
             self._discard_stale_proposals()
             with self.activity.connection() as db:
                 row = self._get(db, token.id, request_id)
                 if row is None:
-                    raise ListingError("ineligible")
+                    raise ListingError("ineligible", detail="Edit request ID was not found for this token.")
                 return self._response(row)
 
     def rows(self):
@@ -540,7 +540,7 @@ def _preview(record, vault_name, session):
         source, _ = _group_path(session.groups, entry["group"])
         target = (*source, entry["title"])
         entry_count = 1
-        old = tuple((field, entry[field]) for field, _ in request.fields)
+        old = tuple((field, entry.get(field, "")) for field, _ in request.fields)
     if request.group:
         group = _unique(session.groups, request.group)
         if group["parent"] is None:
@@ -559,6 +559,8 @@ def _preview(record, vault_name, session):
         values = dict(parent=request.parent, entry=None, title=proposed["title"],
                       username=proposed.get("username", ""), url=proposed.get("url", ""), password=None,
                       generate_password=request.password_source == "generate", require_group=True)
+        if "notes" in proposed:
+            values["notes"] = proposed["notes"]
     elif operation == "create_group":
         change = "put_group"
         values = dict(parent=request.parent, group=None, name=proposed["name"])
@@ -566,7 +568,9 @@ def _preview(record, vault_name, session):
         change = "put_entry"
         values = dict(parent=request.parent or entry["group"], entry=request.entry,
                       password=None, generate_password=request.password_source == "generate",
-                      **{field: proposed.get(field, entry[field]) for field in _ENTRY_FIELDS})
+                      **{field: proposed.get(field, entry.get(field, "")) for field in ("title", "username", "url")})
+        if "notes" in proposed:
+            values["notes"] = proposed["notes"]
         if operation == "move_entry":
             values["require_group"] = True
     elif operation in ("rename_group", "move_group"):

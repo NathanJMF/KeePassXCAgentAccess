@@ -418,7 +418,7 @@ def table_card(scroll, empty):
 
 def metadata_labels(permission):
     return [label for field, label in (("metadata", "Entry Metadata"), ("username", "Username"),
-                                       ("url", "Stored URL")) if getattr(permission, field)]
+                                       ("url", "Stored URL"), ("notes", "Entry Notes")) if getattr(permission, field)]
 
 
 def credential_use_labels(permission):
@@ -1495,6 +1495,8 @@ class AccessView(Gtk.Box):
                 access_permission(permissions, "Read Username", (choice.username or "—") if choice else None)
             if item.url:
                 access_permission(permissions, "Read Stored URL", (choice.url or "—") if choice else None)
+            if item.notes:
+                access_permission(permissions, "Read Entry Notes", "Entry notes text")
             for operation in item.edits:
                 access_permission(permissions, EDIT_PERMISSIONS[operation])
             for caption, description in credential_use_labels(item):
@@ -1806,7 +1808,7 @@ def add_activity_section(container, heading, pairs):
     container.pack_start(section, False, False, 0)
 
 
-EDIT_FIELD_LABELS = {"title": "Title", "username": "Username", "url": "URL", "name": "Name"}
+EDIT_FIELD_LABELS = {"title": "Title", "username": "Username", "url": "URL", "notes": "Notes", "name": "Name"}
 
 
 def activity_edit_fields(row):

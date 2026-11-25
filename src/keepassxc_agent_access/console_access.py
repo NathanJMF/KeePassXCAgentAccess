@@ -51,7 +51,7 @@ class ConsoleAccess:
         registration = self.workspace.registrations.get(grant.vault)
         return (monotonic() < grant.expires and not self.workspace.paused
                 and self.workspace.generation == grant.generation
-                and self.broker.grants.is_active(token) and token.generation == grant.token_generation
+                and self.broker.grants.is_active(token) and token.revocation_generation == grant.token_generation
                 and self.workspace.session(grant.vault) is grant.session and registration is not None
                 and registration.credential_revision(grant.entry) == grant.credential_revision
                 and (grant.trusted_pin is None or self.broker.grants.result_certificate_trusted(
@@ -162,7 +162,7 @@ class ConsoleAccess:
                 if len(self.sessions) >= MAX_CONSOLES:
                     raise ListingError("busy")
                 identifier = new_id()
-                grant = ConsoleGrant(token.id, token.generation, self.workspace.generation,
+                grant = ConsoleGrant(token.id, token.revocation_generation, self.workspace.generation,
                                      vault, entry, revision, origin, descriptor["socket"]["path"], session,
                                      monotonic() + CONSOLE_SECONDS + self.broker.approvals.timeout)
                 reuse_minutes = 0

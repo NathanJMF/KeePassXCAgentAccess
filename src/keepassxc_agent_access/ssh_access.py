@@ -95,7 +95,7 @@ class SshAccess:
             and monotonic() < permit.expires
             and self.workspace.generation == permit.generation
             and self.broker.grants.is_active(token)
-            and token.generation == permit.token_generation
+            and token.revocation_generation == permit.token_generation
             and self.workspace.session(permit.vault) is permit.session
             and registration is not None
             and registration.credential_revision(permit.entry) == permit.revision
@@ -200,7 +200,9 @@ class SshAccess:
             registration = self.workspace.registrations.get(vault)
             session = self.workspace.session(vault) if registration else None
             if session is None:
-                raise ListingError("ineligible", detail="The target vault is locked or not in this token's scope.")
+                in_scope = registration is not None and any(s.vault == vault for s in token.scope)
+                detail = "The target vault is locked." if in_scope else "The target vault is not in this token's scope."
+                raise ListingError("ineligible", detail=detail)
 
             credential_revision = registration.credential_revision(entry)
             sudo_revision = registration.credential_revision(sudo_entry) if sudo_entry else None
@@ -257,13 +259,24 @@ class SshAccess:
             if primary_stale or sudo_stale:
                 raise ListingError("credential_changed")
             if not permitted or not sudo_permitted or not any(row["id"] == entry for row in session.entries):
-                raise ListingError(
-                    "ineligible",
-                    detail="This token does not permit the requested SSH operation, entry, or origin.",
-                )
+                if not any((s.vault, s.entry) == (vault, entry) for s in token.scope):
+                    detail = "Grant does not cover this entry in the selected vault."
+                elif not any((s.vault, s.entry) == (vault, entry) and needed_primary <= set(s.uses) for s in token.scope):
+                    missing = sorted(needed_primary - {
+                        use for s in token.scope if (s.vault, s.entry) == (vault, entry) for use in s.uses
+                    })
+                    detail = f"Grant does not permit {', '.join(missing)} for this entry."
+                elif not permitted:
+                    detail = "Destination origin is not in this entry's approved SSH origins."
+                elif sudo_entry is not None and not sudo_permitted:
+                    detail = "Grant does not permit ssh_sudo on the requested sudo entry and origin."
+                else:
+                    detail = "The target entry was not found in the unlocked vault."
+                raise ListingError("ineligible", detail=detail)
 
             generation = self.workspace.generation
             token_generation = token.generation
+            revocation_generation = token.revocation_generation
             folder, title = entry_target_labels(session.entries, entry)
             if operation == "ssh_exec":
                 scope_summary = f"Command ({len(command)} chars)" + (" · sudo" if sudo else "")
@@ -289,7 +302,7 @@ class SshAccess:
             with self.workspace.mutex:
                 current = self.broker.grants.records.get(token.id)
                 if (self.workspace.paused or self.workspace.generation != generation
-                        or current is None or current.generation != token_generation
+                        or current is None or current.revocation_generation != revocation_generation
                         or not self.broker.grants.is_active(current)):
                     return False
                 if self.workspace.session(vault) is not session:
@@ -541,7 +554,7 @@ class SshAccess:
                     self.permits = {k: p for k, p in self.permits.items() if self._permit_current(p)}
                     if len(self.permits) < MAX_SSH_PERMITS:
                         self.permits[permit_key] = SshPermit(
-                            token.id, token_generation, generation, vault, entry,
+                            token.id, revocation_generation, generation, vault, entry,
                             credential_revision, sudo_revision, sudo_entry, session,
                             probed_hex, monotonic() + requested_minutes * 60,
                         )

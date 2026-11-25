@@ -15,8 +15,8 @@ from .activity import ActivityError, Attribution, entry_label, entry_target_labe
 from .console_access import ConsoleAccess
 from .grants import LIVE_GRANT_STATES, OPTIONAL_METADATA_FIELDS, verifier
 from .guest_access import GuestAccess
-from .protocol import (CONSOLE_OPERATIONS, ERRORS, GUEST_OPERATIONS, RESPONSE_LIMIT, SSH_OPERATIONS, WORKFLOW_OPERATIONS,
-                       ListingError, decode, encode, validate_command, validate_upload)
+from .protocol import (CONSOLE_OPERATIONS, ENTRY_FIELDS, ERRORS, GUEST_OPERATIONS, RESPONSE_LIMIT, SSH_OPERATIONS,
+                       WORKFLOW_OPERATIONS, ListingError, decode, encode, validate_command, validate_upload)
 from .result_delivery import result_fields
 from .settings import SettingsError
 from .ssh_access import SshAccess
@@ -34,6 +34,8 @@ def access_details(token, workspace=None):
     def item(value, *, requested=False):
         result = {key: getattr(value, key) for key in
                   ("vault", "entry", "group", "metadata", "username", "url", "action")}
+        if value.notes:
+            result["notes"] = True
         result["edits"] = list(value.edits)
         if value.uses:
             result["uses"] = list(value.uses)
@@ -180,9 +182,13 @@ class ScopedBroker:
                 receipt = uuid_text(payload["receipt"])
             elif operation == "release_entry" and keys == {"vault", "entry"}:
                 vault, entry = uuid_text(payload["vault"]), uuid_text(payload["entry"])
-            elif operation == "discover" and keys <= {"vault", "summary"}:
+            elif operation == "discover" and keys <= {"vault", "summary", "query"}:
                 vault = uuid_text(payload["vault"]) if "vault" in keys else None
                 if type(payload.get("summary", False)) is not bool:
+                    raise ValueError
+                query = payload.get("query")
+                if "query" in keys and (not isinstance(query, str) or not query.strip()
+                                        or len(query) > 128 or not query.isprintable()):
                     raise ValueError
             elif operation == "access_status" and keys <= {"details"}:
                 if type(payload.get("details", False)) is not bool:
@@ -198,8 +204,8 @@ class ScopedBroker:
             elif operation == "list_entries" and keys <= {"vault", "fields"}:
                 vault = uuid_text(payload["vault"]) if "vault" in keys else None
                 fields = payload.get("fields", [])
-                if (not isinstance(fields, list) or len(fields) > len(OPTIONAL_METADATA_FIELDS)
-                        or any(field not in OPTIONAL_METADATA_FIELDS for field in fields)
+                if (not isinstance(fields, list) or len(fields) > len(ENTRY_FIELDS)
+                        or any(not isinstance(field, str) or field not in ENTRY_FIELDS for field in fields)
                         or len(set(fields)) != len(fields)):
                     raise ValueError
             elif (operation == "use_password"
@@ -239,7 +245,8 @@ class ScopedBroker:
         if operation == "discover":
             if "credential" in payload:
                 raise ListingError("invalid_request", detail="Discovery does not accept a token credential.")
-            return self._discover(uid, context, live, deliver, vault=vault, summary=payload.get("summary", False))
+            return self._discover(uid, context, live, deliver, vault=vault, summary=payload.get("summary", False),
+                                  query=payload.get("query"))
         credential = payload.get("credential")
         if credential is None:
             raise ListingError("token_required")
@@ -525,9 +532,27 @@ class ScopedBroker:
                 if session is not None and write_approval_required:
                     raise ListingError("write_approval_required")
                 if session is None:
-                    raise ListingError("ineligible", detail="The target vault is locked or not in this token's scope.")
+                    detail = ("The target vault is locked." if chosen in registered
+                              else "The target vault is not in this token's scope.")
+                    raise ListingError("ineligible", detail=detail)
                 if operation == "use_password" and not permitted:
-                    raise ListingError("ineligible", detail="This token does not permit the requested entry, action, or origin.")
+                    detail = "This token does not permit the requested entry, action, or origin."
+                    if usage is not None:
+                        if not any((s.vault, s.entry) == (chosen, entry) for s in token.scope):
+                            detail = "Grant does not cover this entry in the selected vault."
+                        elif not any((s.vault, s.entry) == (chosen, entry) and usage["type"] in s.uses
+                                     for s in token.scope):
+                            detail = f"Grant does not permit {usage['type']} for this entry."
+                        elif origin is not None and not any(
+                                (s.vault, s.entry) == (chosen, entry) and usage["type"] in s.uses
+                                and origin in s.origins for s in token.scope):
+                            detail = "Destination origin is not in this entry's approved origins."
+                        elif body_required and not any(
+                                (s.vault, s.entry) == (chosen, entry) and usage["type"] in s.uses
+                                and (origin is None or origin in s.origins) and "https_body" in s.uses
+                                for s in token.scope):
+                            detail = "Credential request bodies require https_body permission."
+                    raise ListingError("ineligible", detail=detail)
             if operation == "use_password":
                 expected = binding.action.command if binding.action.is_command else None
                 if ((usage is None and command != expected)
@@ -584,9 +609,14 @@ class ScopedBroker:
                     identifiers = {item.entry for item in grants}
                     paths = tuple(" / ".join((*row["group_path"], entry_label(row["title"])))
                                   for row in session.entries if row["id"] in identifiers)
-                    optional = {"username": "username", "url": "stored URL"}
+                    optional = {
+                        "username": "username", "url": "stored URL", "notes": "entry notes",
+                        "has_totp": "TOTP status", "custom_attribute_keys": "custom attribute keys",
+                        "attachments": "attachment names",
+                    }
                     columns = ("entry ID", "title", "group path",
-                               *(optional[field] for field in fields if any(getattr(item, field) for item in grants)))
+                               *(optional[field] for field in fields
+                                 if field not in OPTIONAL_METADATA_FIELDS or any(getattr(item, field) for item in grants)))
                     scope = (registration.name, *(paths or ("No entries in scope",)),
                              "Visible fields: " + ", ".join(columns))
                 else:
@@ -809,7 +839,7 @@ class ScopedBroker:
         operation = "Browser form POST" if action.browser else action.method
         return f"{operation} {usage_origin(action.url)}"
 
-    def _discover(self, uid, context, live, deliver, *, vault=None, summary=False):
+    def _discover(self, uid, context, live, deliver, *, vault=None, summary=False, query=None):
         with self.workspace.mutex:
             self._charge_request(("discovery", uid), uid, active=False)
             if not live():
@@ -819,7 +849,7 @@ class ScopedBroker:
             references = self.workspace.discovery.references(self.workspace)
             catalog = None
             if not self.workspace.paused:
-                catalog = self.workspace.discovery.read(self.workspace, vault=vault, summary=summary)
+                catalog = self.workspace.discovery.read(self.workspace, vault=vault, summary=summary, query=query)
 
         def guard(effect):
             with self.workspace.mutex:
@@ -857,11 +887,20 @@ class ScopedBroker:
 
     @staticmethod
     def _entries(token, session, vault, fields):
+        metadata_scopes = [scope for scope in token.scope if scope.vault == vault and scope.metadata]
+        if "notes" in fields and not any(scope.notes for scope in metadata_scopes):
+            raise ListingError("ineligible", detail="Grant does not permit reading entry notes.")
+        if set(fields) - set(OPTIONAL_METADATA_FIELDS) and not metadata_scopes:
+            raise ListingError("ineligible", detail="Grant does not permit reading entry metadata.")
         permissions = {}
-        for scope in token.scope:
-            if scope.vault == vault and scope.metadata:
-                allowed = permissions.setdefault(scope.entry, set())
-                allowed.update(field for field in fields if getattr(scope, field))
+        for scope in metadata_scopes:
+            allowed = permissions.setdefault(scope.entry, set())
+            for field in fields:
+                if field in OPTIONAL_METADATA_FIELDS:
+                    if getattr(scope, field):
+                        allowed.add(field)
+                else:
+                    allowed.add(field)
         result = session.worker.scoped_entries(permissions.keys())
         if "error" in result:
             raise ListingError(result["error"])
@@ -880,7 +919,29 @@ class ScopedBroker:
                 continue
             projected = {"id": identifier, "title": row["title"], "group_path": row["group_path"]}
             values = owner_rows.get(identifier, {})
-            projected.update({field: values[field] for field in fields
-                              if field in permissions[identifier] and isinstance(values.get(field), str)})
+            for field in fields:
+                if field not in permissions[identifier]:
+                    continue
+                if field == "notes":
+                    if "notes" in values:
+                        val = values["notes"]
+                    elif hasattr(session.worker, "owner_entry_notes"):
+                        val = session.worker.owner_entry_notes(identifier)
+                    else:
+                        continue
+                    if isinstance(val, str):
+                        projected[field] = "".join(ch for ch in val[:4096] if ch in "\t\n\r" or ch.isprintable())
+                    continue
+                if field not in values:
+                    continue
+                val = values[field]
+                if field == "has_totp":
+                    if type(val) is bool:
+                        projected[field] = val
+                elif field in ("custom_attribute_keys", "attachments"):
+                    if isinstance(val, list) and all(isinstance(item, str) for item in val):
+                        projected[field] = val
+                elif isinstance(val, str):
+                    projected[field] = val
             rows.append(projected)
         return {"entries": rows}

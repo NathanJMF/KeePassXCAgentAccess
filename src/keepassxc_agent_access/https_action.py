@@ -12,6 +12,7 @@ import zlib
 
 from .access_settings import ActionType, Destination, HTTPS_WRITE_METHODS, credential_headers, request_query
 from .protocol import sanitize_error_detail
+from .totp import entry_custom_attr, entry_totp, otp_uri_secret
 
 
 SOCKET_TIMEOUT = 15
@@ -20,6 +21,7 @@ ERROR_BODY_LIMIT = 4096
 ERROR_DETAIL_LIMIT = 512
 _CERT_SHA256 = re.compile(r"[0-9a-f]{64}")
 _ANSI_ESCAPE = re.compile(r"\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07\x1b]*(?:\x07|\x1b\\)|[@-Z\\-_])")
+_TEMPLATE_REF = re.compile(r"\{\{(password|username|totp|attr\.[A-Za-z0-9_.-]{1,64})\}\}")
 
 
 def failure():
@@ -158,30 +160,77 @@ def authenticate(connection, path, entry, kind=ActionType.BASIC, *, method="GET"
     return _send_request(connection, method, path, body, request_headers, secrets)
 
 
+def _collect_template_refs(value):
+    if isinstance(value, str):
+        refs = set(_TEMPLATE_REF.findall(value))
+        rest = _TEMPLATE_REF.sub("", value)
+        if "{{" in rest or "}}" in rest or "attr.otp" in refs:
+            raise ValueError("Unsupported credential reference.")
+        return refs
+    if isinstance(value, dict):
+        refs = set()
+        for key, item in value.items():
+            if not isinstance(key, str) or "{{" in key or "}}" in key:
+                raise ValueError("Credential references belong in JSON values, not object keys.")
+            refs.update(_collect_template_refs(item))
+        return refs
+    if isinstance(value, list):
+        refs = set()
+        for item in value:
+            refs.update(_collect_template_refs(item))
+        return refs
+    return set()
+
+
 def authenticate_template(connection, path, entry, *, method="GET", request_json="", headers=()):
     """Render references only inside the trusted worker, never in returned data."""
-    password, username = entry.password, entry.username or ""
-    if not isinstance(password, str) or not password or len(password.encode("utf-8")) > 65536:
-        return failure()
-
-    def render(value):
-        if isinstance(value, str):
-            return re.sub(r"\{\{(password|username)\}\}",
-                          lambda match: password if match[1] == "password" else username, value)
-        if isinstance(value, dict):
-            return {key: render(item) for key, item in value.items()}
-        if isinstance(value, list):
-            return [render(item) for item in value]
-        return value
-
-    secrets = [password]
-    if username:
-        secrets.append(f"{username}:{password}")
     try:
         raw_headers = credential_headers(headers)
+        parsed_json = json.loads(request_json) if request_json else None
+        refs = _collect_template_refs([value for _, value in raw_headers])
+        if parsed_json is not None:
+            refs.update(_collect_template_refs(parsed_json))
+
+        password = getattr(entry, "password", None)
+        username = getattr(entry, "username", None) or ""
+        if "password" in refs or not refs:
+            if not isinstance(password, str) or not password or len(password.encode("utf-8")) > 65536:
+                return failure()
+
+        password_text = password if isinstance(password, str) else ""
+        values = {"password": password_text, "username": username}
+        secrets = []
+        if password_text:
+            secrets.append(password_text)
+            if username:
+                secrets.append(f"{username}:{password_text}")
+
+        if "totp" in refs:
+            totp_code, otp_secret = entry_totp(entry)
+            values["totp"] = totp_code
+            secrets.extend((totp_code, otp_secret))
+            raw_otp_secret = otp_uri_secret(otp_secret)
+            if raw_otp_secret:
+                secrets.append(raw_otp_secret)
+
+        for ref in sorted(refs):
+            if ref.startswith("attr."):
+                attr_val = entry_custom_attr(entry, ref[5:])
+                values[ref] = attr_val
+                secrets.append(attr_val)
+
+        def render(value):
+            if isinstance(value, str):
+                return _TEMPLATE_REF.sub(lambda match: values[match[1]], value)
+            if isinstance(value, dict):
+                return {key: render(item) for key, item in value.items()}
+            if isinstance(value, list):
+                return [render(item) for item in value]
+            return value
+
         result_headers = {key: render(value) for key, value in raw_headers}
         for (key, template), (_, rendered) in zip(raw_headers, result_headers.items()):
-            if key.lower() == "authorization" or "{{password}}" in template or "{{username}}" in template:
+            if key.lower() == "authorization" or _TEMPLATE_REF.search(template):
                 secrets.append(rendered)
         if any(any(ord(char) < 32 or ord(char) == 127 for char in value) or len(value.encode("utf-8")) > 65536
                for value in result_headers.values()):
@@ -189,8 +238,8 @@ def authenticate_template(connection, path, entry, *, method="GET", request_json
         if sum(len(name.encode("ascii")) + len(value.encode("utf-8")) for name, value in result_headers.items()) > 65536:
             return failure()
         body = None
-        if request_json:
-            body = json.dumps(render(json.loads(request_json)), ensure_ascii=False, allow_nan=False,
+        if parsed_json is not None:
+            body = json.dumps(render(parsed_json), ensure_ascii=False, allow_nan=False,
                               separators=(",", ":"), sort_keys=True).encode("utf-8")
             if len(body) > 131072:
                 return failure()

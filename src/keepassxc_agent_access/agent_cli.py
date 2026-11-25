@@ -15,21 +15,20 @@ from urllib.parse import urlsplit
 
 from .runner_token import UninitializedProfile, credential
 from .protocol import (
-    CLIENT_TIMEOUT, CONSOLE_OPERATIONS, CONSOLE_SECONDS, ERRORS, GUEST_OPERATIONS, LIST_REQUEST, ListingError,
-    MAX_CONSOLE_REUSE_MINUTES, MAX_GUEST_REUSE_MINUTES, MAX_GUEST_TEXT, MAX_SSH_REUSE_MINUTES, MAX_SSH_TIMEOUT,
-    MAX_TOKEN_LIFESPAN_DAYS, MAX_WAIT_SECONDS, REQUEST_LIMIT, REQUEST_TIMEOUT, RESPONSE_LIMIT, SSH_OPERATIONS,
-    UPLOAD_LIMIT, WORKFLOW_OPERATIONS,
+    CLIENT_TIMEOUT, CONSOLE_OPERATIONS, CONSOLE_SECONDS, ENTRY_FIELDS, ERRORS, GUEST_OPERATIONS, LIST_REQUEST,
+    ListingError, MAX_CONSOLE_REUSE_MINUTES, MAX_GUEST_REUSE_MINUTES, MAX_GUEST_TEXT, MAX_SSH_REUSE_MINUTES,
+    MAX_SSH_TIMEOUT, MAX_TOKEN_LIFESPAN_DAYS, MAX_WAIT_SECONDS, REQUEST_LIMIT, REQUEST_TIMEOUT, RESPONSE_LIMIT,
+    SSH_OPERATIONS, UPLOAD_LIMIT, WORKFLOW_OPERATIONS,
     decode, encode, receive, remaining, sanitize_error_detail, validate_command,
 )
 
 
-ENTRY_FIELDS = ("username", "url")
 USE_TYPES = frozenset(("local_command", "networked_command", "https", "https_results", "browser"))
 CREDENTIAL_USE_TYPES = USE_TYPES | {"https_body", "ssh_exec", "ssh_sftp", "ssh_sudo"}
 EDIT_STATUSES = ("pending", "applying", "applied", "denied", "stale", "interrupted", "failed")
 EDIT_OPERATIONS = {
-    "create_entry": (("parent",), {"title"}, {"username", "url"}),
-    "update_entry": (("entry",), set(), {"title", "username", "url"}),
+    "create_entry": (("parent",), {"title"}, {"username", "url", "notes"}),
+    "update_entry": (("entry",), set(), {"title", "username", "url", "notes"}),
     "create_group": (("parent",), {"name"}, set()),
     "rename_group": (("group",), {"name"}, set()),
     "move_entry": (("entry", "parent"), set(), set()),
@@ -367,7 +366,8 @@ def _validate_access_details(reply):
         if not isinstance(values, list) or len(values) > 32:
             raise ValueError
         for value in values:
-            if (not isinstance(value, dict) or not fields <= value.keys() <= fields | {"uses", "origins"} | scope_optional
+            if (not isinstance(value, dict)
+                    or not fields <= value.keys() <= fields | {"uses", "origins", "notes"} | scope_optional
                     or bool({"uses", "origins"} & value.keys()) and not {"uses", "origins"} <= value.keys()):
                 raise ValueError
             if not requested:
@@ -399,7 +399,9 @@ def _validate_access_details(reply):
                     raise ValueError
             if any(type(value[key]) is not bool for key in ("metadata", "username", "url")):
                 raise ValueError
-            if (value["username"] or value["url"]) and not value["metadata"]:
+            if "notes" in value and type(value["notes"]) is not bool:
+                raise ValueError
+            if (value["username"] or value["url"] or value.get("notes", False)) and not value["metadata"]:
                 raise ValueError
             action = value["action"]
             if action is not None and (not isinstance(action, str) or not action or len(action) > 160 or not action.isprintable()):
@@ -740,13 +742,24 @@ def _validate(reply, payload):
         if (
             not isinstance(row, dict)
             or not required <= row.keys() <= allowed
-            or any(field in row and not isinstance(row[field], str) for field in fields)
             or not isinstance(row["id"], str)
             or not isinstance(row["title"], str)
             or not isinstance(row["group_path"], list)
             or not all(isinstance(name, str) for name in row["group_path"])
         ):
             raise ListingError("invalid_response")
+        for field in fields:
+            if field not in row:
+                continue
+            val = row[field]
+            if field == "has_totp":
+                if type(val) is not bool:
+                    raise ListingError("invalid_response")
+            elif field in ("custom_attribute_keys", "attachments"):
+                if not isinstance(val, list) or not all(isinstance(item, str) for item in val):
+                    raise ListingError("invalid_response")
+            elif not isinstance(val, str):
+                raise ListingError("invalid_response")
         try:
             if str(UUID(row["id"])) != row["id"]:
                 raise ValueError
@@ -826,6 +839,7 @@ def main(argv=None):
     discover.add_argument("--json", action="store_true", required=True, help="Emit JSON")
     discover.add_argument("--vault", help="Return the catalog for one vault")
     discover.add_argument("--summary", action="store_true", help="List vault names and status without group or entry rows")
+    discover.add_argument("--query", help="Case-insensitive substring filter on vault names, group paths, and entry titles")
     discover.set_defaults(operation="discover")
     access = topics.add_parser("access", help="Request and check a scoped token")
     commands = access.add_subparsers(required=True)
@@ -1123,6 +1137,11 @@ def main(argv=None):
         payload["details"] = True
     if getattr(options, "summary", False):
         payload["summary"] = True
+    if getattr(options, "query", None) is not None:
+        query = options.query
+        if not isinstance(query, str) or not query.strip() or len(query) > 128 or not query.isprintable():
+            parser.error("--query must be a non-empty printable string of at most 128 characters.")
+        payload["query"] = query
     context = {}
     for key in ("model", "chat", "chat_id", "note"):
         raw = os.environ.get(f"KEEPASSXC_AGENT_{key.upper()}", "")
@@ -1190,6 +1209,11 @@ def main(argv=None):
                 if not raw or len(raw) >= REQUEST_LIMIT:
                     raise ValueError
                 submitted = decode(raw)
+                if options.operation == "request_access":
+                    if isinstance(submitted, dict) and "mode" in submitted:
+                        if submitted["mode"] not in ("replace", "add") or (
+                                submitted["mode"] == "add" and "change_id" not in submitted):
+                            raise ValueError
                 if options.operation == "request_access" and any(key in os.environ for key in
                         ("KEEPASSXC_AGENT_IDENTITY", "KEEPASSXC_AGENT_PROJECT")):
                     identity = os.environ.get("KEEPASSXC_AGENT_IDENTITY")

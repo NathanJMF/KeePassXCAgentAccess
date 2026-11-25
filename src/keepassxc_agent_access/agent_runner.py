@@ -68,7 +68,9 @@ ENROLLMENT = {
     "properties": {
         "identity": {"type": "string", "description": "Required when creating a token; optional when updating with change_id."},
         "project": {"type": "string", "description": "Required when creating a token; optional when updating with change_id."},
-        "change_id": {**REFERENCE, "description": "A new UUID to replace this active token’s scope. Reuse it to check the change."},
+        "change_id": {**REFERENCE, "description": "A new UUID to update this active token’s scope. Reuse it to check the change."},
+        "mode": {"enum": ["replace", "add"],
+                 "description": "Permission change mode: 'replace' (default) replaces scope, 'add' merges with existing approved scope (requires change_id)."},
         "items": {"type": "array", "minItems": 1, "maxItems": 32, "items": {
             "type": "object",
             "properties": {
@@ -81,6 +83,7 @@ ENROLLMENT = {
                 "metadata": {"type": "boolean"},
                 "username": {"type": "boolean"},
                 "url": {"type": "boolean"},
+                "notes": {"type": "boolean"},
                 "action": {"type": "string", "description": "Optional legacy configured action ID."},
                 "uses": {"type": "array", "items": {"enum": sorted(CREDENTIAL_USE_TYPES)}, "minItems": 1, "uniqueItems": True},
                 "origins": {"type": "array", "items": {"type": "string"}, "maxItems": 16, "uniqueItems": True,
@@ -103,7 +106,7 @@ EDIT_REQUEST = {
         "parent": REFERENCE,
         "fields": {
             "type": "object",
-            "properties": {key: {"type": "string"} for key in ("title", "username", "url", "name")},
+            "properties": {key: {"type": "string"} for key in ("title", "username", "url", "notes", "name")},
             "additionalProperties": False,
         },
         "password_source": {"enum": ["owner", "generate"]},
@@ -231,13 +234,16 @@ USAGE = {
 }
 OPERATIONS = {
     "discover": (("discover",), tool("discover", "List all vaults, groups and entry names before requesting access. Returns only names, references and cache/lock status.",
-        {"vault": REFERENCE, "summary": {"type": "boolean", "description": "List vault names and status only; use a vault UUID to fetch its groups and entry names separately."}})),
+        {"vault": REFERENCE,
+         "summary": {"type": "boolean", "description": "List vault names and status only; use a vault UUID to fetch its groups and entry names separately."},
+         "query": {"type": "string", "minLength": 1, "maxLength": 128,
+                   "description": "Optional case-insensitive substring filter across vault names, group paths, and entry titles."}})),
     "access_status": (("access", "status"), tool(
         "access_status", "Check this token profile's status; request details to see its identity and permissions.",
         {"details": {"type": "boolean"}},
     )),
     "request_access": (("access", "request"), tool(
-        "request_access", "Request a scoped token or replace this token’s scope using a change_id.",
+        "request_access", "Request a scoped token or update this token’s scope using a change_id (mode 'replace' or 'add').",
         {"request": ENROLLMENT}, required=("request",), read_only=False,
     )),
     "extend_access": (("access", "extend"), tool(
@@ -425,7 +431,7 @@ OPERATIONS = {
     )),
     "list_vaults": (("vaults", "list"), tool("list_vaults", "List vaults available to the active token.")),
     "list_entries": (("entries", "list"), tool(
-        "list_entries", "List approved entry metadata and optionally request approved username or URL fields.",
+        "list_entries", "List approved entry metadata and optionally request approved username, URL, notes, or capability fields.",
         {"vault": REFERENCE, "fields": FIELDS},
     )),
     "use_password": (("use",), tool(
@@ -566,6 +572,11 @@ def invocation(name, arguments):
                 raise ValueError(f"{flag} must be a boolean.")
             if arguments[flag]:
                 command.append(f"--{flag}")
+    if name == "discover" and "query" in arguments:
+        query = arguments["query"]
+        if not isinstance(query, str) or not query.strip() or len(query) > 128 or not query.isprintable():
+            raise ValueError("query must be a non-empty printable string of at most 128 characters.")
+        command.append(f"--query={query}")
     if name == "edit_status":
         command.append(f"--request={_require_uuid(arguments['id'], 'id')}")
     if name == "extend_access":
@@ -597,14 +608,19 @@ def invocation(name, arguments):
         fields = arguments["fields"]
         if (not isinstance(fields, list) or len(fields) > len(ENTRY_FIELDS)
                 or any(field not in ENTRY_FIELDS for field in fields)):
-            raise ValueError("fields must be a list of allowed entry metadata fields (username, url).")
+            raise ValueError(f"fields must be a list of allowed entry metadata fields ({', '.join(ENTRY_FIELDS)}).")
         command.extend(f"--field={field}" for field in dict.fromkeys(fields))
     request = arguments.get("request")
     if "request" in arguments and not isinstance(request, dict):
         raise ValueError("request must be a JSON object.")
-    if name == "request_access" and "change_id" not in request and (
-            not isinstance(request.get("identity"), str) or not isinstance(request.get("project"), str)):
-        raise ValueError("request must include identity and project strings when creating a new token.")
+    if name == "request_access":
+        if "mode" in request and request["mode"] not in ("replace", "add"):
+            raise ValueError("mode must be 'replace' or 'add'.")
+        if request.get("mode") == "add" and "change_id" not in request:
+            raise ValueError("mode 'add' requires change_id.")
+        if "change_id" not in request and (
+                not isinstance(request.get("identity"), str) or not isinstance(request.get("project"), str)):
+            raise ValueError("request must include identity and project strings when creating a new token.")
     if name == "request_edit":
         try:
             request = edit_request(request)
