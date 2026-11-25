@@ -15,6 +15,7 @@ GUEST_OPERATIONS = frozenset({"guest_run", "guest_status", "guest_release"})
 MAX_GUEST_REUSE_MINUTES = 60
 MAX_GUEST_TEXT = 2048
 MAX_WAIT_SECONDS = 60
+MAX_TOKEN_LIFESPAN_DAYS = 365
 WORKFLOW_OPERATIONS = frozenset({"workflow_request", "workflow_run", "workflow_status"})
 REQUEST_TIMEOUT = 5
 WORKER_TIMEOUT = 3
@@ -46,6 +47,7 @@ ERRORS = {
     "wait_elapsed": "The wait ended before Keeper received a status response. Check the existing operation again without resubmitting it.",
     "credential_changed": "That entry's credential changed after approval. Request a permission change for owner review.",
     "token_change_pending": "This token already has a permission change awaiting review.",
+    "token_extension_pending": "This token already has a life span extension awaiting review.",
     "identity_in_use": "That identity is already in use. Choose a different identity and retry the request.",
     "token_required": "An approved access token is required. Request access through this runner.",
     "paused": "The owner has paused agent access.",

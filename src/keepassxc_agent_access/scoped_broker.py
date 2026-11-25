@@ -10,10 +10,10 @@ from time import monotonic, time
 
 from .approvals import Approval, ApprovalQueue
 from .account_provision import parse_provision
-from .access_settings import ActionType, Destination, action_id, uuid_text
+from .access_settings import ActionType, Destination, MAX_TOKEN_LIFESPAN_DAYS, action_id, uuid_text
 from .activity import ActivityError, Attribution, entry_label, entry_target_labels
 from .console_access import ConsoleAccess
-from .grants import OPTIONAL_METADATA_FIELDS, verifier
+from .grants import LIVE_GRANT_STATES, OPTIONAL_METADATA_FIELDS, verifier
 from .guest_access import GuestAccess
 from .protocol import (CONSOLE_OPERATIONS, ERRORS, GUEST_OPERATIONS, RESPONSE_LIMIT, WORKFLOW_OPERATIONS, ListingError,
                        decode, encode, validate_command, validate_upload)
@@ -48,6 +48,7 @@ def access_details(token, workspace=None):
         return result
 
     pending = token.pending_change
+    ext = token.pending_extension
     result = {
         "status": token.status, "identity": token.identity, "project": token.project,
         **{key: getattr(token.context, key) for key in ("model", "chat", "chat_id")},
@@ -55,11 +56,17 @@ def access_details(token, workspace=None):
         "requested_items": [item(value, requested=True) for value in token.items],
         "pending_change": ({"id": pending.id, "items": [item(value, requested=True) for value in pending.items]}
                            if pending else None),
+        "pending_extension": {"id": ext.id, "days": ext.days} if ext else None,
     }
+    if token.expires_at is not None and token.status in LIVE_GRANT_STATES:
+        result["expires_at"] = int(token.expires_at)
+        result["expires_in"] = max(0, int(token.expires_at - time()))
     if workspace is not None:
         result["paused"] = bool(workspace.paused)
     if token.change and token.change.status == "denied":
         result["last_change"] = {"id": token.change.id, "status": "denied"}
+    if token.extension and token.extension.status == "denied":
+        result["last_extension"] = {"id": token.extension.id, "status": "denied"}
     if token.workflow:
         result["workflow"] = token.workflow[0]
     return result
@@ -169,6 +176,12 @@ class ScopedBroker:
             elif operation == "access_status" and keys <= {"details"}:
                 if type(payload.get("details", False)) is not bool:
                     raise ValueError
+            elif operation == "extend_access" and keys <= {"days", "extension_id"}:
+                if "days" in keys and (type(payload["days"]) is not int
+                                       or not 1 <= payload["days"] <= MAX_TOKEN_LIFESPAN_DAYS):
+                    raise ValueError
+                if "extension_id" in keys:
+                    uuid_text(payload["extension_id"])
             elif operation == "list_vaults" and not keys:
                 pass
             elif operation == "list_entries" and keys <= {"vault", "fields"}:
@@ -247,7 +260,7 @@ class ScopedBroker:
                 if not live():
                     raise ListingError("revoked")
                 token = self.grants.authenticate(credential, uid)
-                if self.edits is None or token.status != "active":
+                if self.edits is None or not self.grants.is_active(token):
                     raise ListingError("ineligible", detail="An active token with edit support is required.")
                 self._charge_request(token.verifier, uid, active=True)
             return encode(self.edits.submit(token, payload["request"], context, live=live))
@@ -264,15 +277,24 @@ class ScopedBroker:
             token = self.grants.authenticate(credential, uid, allow_workflow=approved_step is not None
                                              or operation in ("access_status", "release_entry"))
             if operation == "release_entry":
-                self._charge_request(token.verifier, uid, active=token.status == "active")
+                self._charge_request(token.verifier, uid, active=self.grants.is_active(token))
                 return encode(self.grants.release_entry(token, vault, entry, context))
             if operation == "access_status":
                 return encode(access_details(token, workspace=self.workspace) if payload.get("details") else {"status": token.status})
+            if operation == "extend_access":
+                self._charge_request(token.verifier, uid, active=self.grants.is_active(token))
+                status, updated = self.grants.request_extension(
+                    token.id, payload.get("days"), context, extension_id=payload.get("extension_id"))
+                return encode({
+                    "status": status,
+                    "expires_at": int(updated.expires_at) if updated.expires_at is not None else None,
+                    "expires_in": max(0, int(updated.expires_at - time())) if updated.expires_at is not None else 0,
+                })
             if operation == "edit_status":
                 if self.edits is None:
                     raise ListingError("ineligible", detail="Vault edit support is unavailable.")
                 return encode(self.edits.status(token, payload["id"]))
-            self._charge_request(token.verifier, uid, active=token.status == "active")
+            self._charge_request(token.verifier, uid, active=self.grants.is_active(token))
             generation = self.workspace.generation
             name = {"list_vaults": "List vaults", "list_entries": "List entries",
                     "use_password": "Use password"}[operation]
@@ -431,7 +453,7 @@ class ScopedBroker:
             with self.workspace.mutex:
                 current = self.grants.records[token.id]
                 if (self.workspace.paused or self.workspace.generation != generation
-                        or current.generation != token.generation or current.status != "active"):
+                        or current.generation != token.generation or not self.grants.is_active(current)):
                     return False
                 if approved_step and not self.workflows.current(approved_step[0]):
                     return False
@@ -467,7 +489,7 @@ class ScopedBroker:
         result_steps = 0
         certificate_reservation = None
         try:
-            if token.status != "active":
+            if not self.grants.is_active(token):
                 raise ListingError("ineligible", detail=f"Token status is {token.status}; an active token is required.")
             with self.workspace.mutex:
                 if self.workspace.paused:
@@ -732,7 +754,7 @@ class ScopedBroker:
             with self.workspace.mutex:
                 current = self.grants.records.get(token.id)
                 if (self.workspace.paused or self.workspace.generation != generation or row is None
-                        or current is None or current.status != "active"):
+                        or not self.grants.is_active(current)):
                     return False
                 if row["generation"] != current.generation:
                     return False

@@ -25,7 +25,7 @@ All following commands use `--profile "$profile"`. Identity and project are supp
 
     "$keeper" --profile "$profile" access status --details --json
 
-Detailed status shows this profile's identity, project and attribution, approved `scope`, original `requested_items`, and any `pending_change`. An uninitialized profile has no token yet. Reuse the same profile while waiting for its approval and throughout this task. Profiles sharing an OS account require a host-enforced runtime boundary; a profile handle alone does not isolate otherwise unrestricted host tools.
+Detailed status shows this profile's identity, project and attribution, approved `scope`, original `requested_items`, any `pending_change`, and for live tokens `expires_at`, `expires_in`, and `pending_extension` (plus `last_extension` if denied). An uninitialized profile has no token yet. Reuse the same profile while waiting for its approval and throughout this task. Profiles sharing an OS account require a host-enforced runtime boundary; a profile handle alone does not isolate otherwise unrestricted host tools.
 
 If the command reports that Keeper is unavailable, ask the owner to open Keeper with agent support installed. If access is paused, ask the owner to resume it. Do not change Keeper settings, owner files, services, approvals or agent-client configuration to get around a failure.
 
@@ -81,11 +81,20 @@ Use the exact discovered vault and entry UUIDs. Request only the permissions nee
 
 Combine required uses in one array. `origins` is a list of exact HTTPS origins, including a nondefault port when needed, with no resource path or query. The owner reviews these destinations independently; editing the entry's stored URL does not expand an existing grant. Local-only permissions have no origins. Requests containing reusable credential permissions always await owner review. After approval, individual uses follow the owner's Auto Approve settings for the transport. The body permission allows disclosure that the service may store or publish; ask for it only when the task requires that behavior.
 
-No action ID or preconfigured command is needed. An unchanged enrollment retry is safe. A denied or removed token needs a fresh `begin` profile and a new access request. Edit permissions use an `edits` array of exact operation names, with entry IDs for entry edits or vault and group IDs for group permissions.
+No action ID or preconfigured command is needed. An unchanged enrollment retry is safe. A denied, removed, or expired token needs a fresh access request (or a fresh `begin` profile). Edit permissions use an `edits` array of exact operation names, with entry IDs for entry edits or vault and group IDs for group permissions.
 
 To change this task's active token permissions, keep the same profile and omit `identity`/`project` from the JSON (in MCP `request_access`, provide `change_id` and the complete replacement `items` list; `identity` and `project` are optional on updates). Add a new UUID as `change_id` to the access request and send the complete replacement `items` list, including any permissions you still need. Resubmit the same request and UUID to check the permission change. A pending or denied change leaves current permissions in effect.
 
-Keeper can auto approve ordinary metadata/edit token requests and permission changes when the owner enables the main Auto Approve setting and corresponding token option. Requests containing reusable credential permissions require owner review. If a request is pending, tell the user and check again after they review it. Only active tokens can run scoped operations. Ask the owner about disabled tokens, locked vaults, or globally paused agent access.
+Keeper can auto approve ordinary metadata/edit token requests and permission changes when the owner enables the main Auto Approve setting and corresponding token option. Requests containing reusable credential permissions require owner review. If a request is pending, tell the user and check again after they review it. Only active tokens can run scoped operations. Ask the owner about disabled tokens, locked vaults, expired tokens, or globally paused agent access.
+
+### Extend a token's life span
+
+Tokens have a finite life span (default 3 days) and expire automatically when their window ends. Check `expires_in` in `access status --details --json` (`access_status` with `details: true`). When an active non-workflow token needs more time, request an extension instead of creating a duplicate token:
+
+    "$keeper" --profile "$profile" --note "Extend token for ongoing deployment" access extend --json
+    "$keeper" --profile "$profile" --note "Request 7-day token extension" access extend --days 7 --id "$extension_uuid" --json
+
+In MCP, call `extend_access` with optional `days` (1–365; defaults to the owner's configured life span) and optional `extension_id` (a fresh UUID reused across retries). When **Access Tokens - Extend Life Span** is enabled alongside **Auto Approve**, requests up to the owner's default life span are approved automatically as a sliding window from the current time; otherwise the request waits for owner review in Access while existing permissions keep working. Extending a token preserves its active workflows and consoles.
 
 ### Give up access when you are done
 

@@ -4,11 +4,12 @@ from collections import Counter
 from dataclasses import asdict, dataclass, replace
 from hashlib import sha256
 import json
+from math import isfinite
 from pathlib import Path
 import re
 from time import time
 
-from .access_settings import ActionType, Destination, action_id, label, uuid_text
+from .access_settings import MAX_TOKEN_LIFESPAN_DAYS, ActionType, Destination, action_id, label, uuid_text
 from .activity import Attribution, entry_target_labels, folder_label
 from .protocol import ListingError
 from .settings import SettingsError, write_private_json
@@ -209,6 +210,21 @@ class PermissionChange:
 
 
 @dataclass(frozen=True)
+class ExtensionRequest:
+    id: str
+    requested: float
+    context: Attribution
+    days: int
+    status: str = "pending"
+
+    def __post_init__(self):
+        if self.status not in ("pending", "active", "denied"):
+            raise ValueError("Invalid extension request status.")
+        if type(self.days) is not int or not 1 <= self.days <= MAX_TOKEN_LIFESPAN_DAYS:
+            raise ValueError("Invalid extension duration.")
+
+
+@dataclass(frozen=True)
 class Grant:
     id: str
     verifier: str
@@ -226,8 +242,12 @@ class Grant:
     superseded_changes: tuple[str, ...] = ()
     released_entries: tuple[tuple[str, str], ...] = ()
     workflow: tuple[str, str] | None = None
+    expires_at: float | None = None
+    extension: ExtensionRequest | None = None
 
     def __post_init__(self):
+        if self.expires_at is not None and (type(self.expires_at) not in (int, float) or not isfinite(self.expires_at)):
+            raise ValueError("Invalid token expiration.")
         if self.workflow is not None:
             if not isinstance(self.workflow, (list, tuple)) or len(self.workflow) != 2:
                 raise ValueError("Invalid workflow token restriction.")
@@ -239,6 +259,10 @@ class Grant:
     @property
     def pending_change(self):
         return self.change if self.change and self.change.status == "pending" else None
+
+    @property
+    def pending_extension(self):
+        return self.extension if self.extension and self.extension.status == "pending" else None
 
 
 class Grants:
@@ -257,9 +281,13 @@ class Grants:
                 if change is not None:
                     change = PermissionChange(**dict(change, context=Attribution(**change["context"]),
                                                      items=tuple(Item(**item) for item in change["items"])))
+                ext = row.get("extension")
+                if ext is not None:
+                    ext = ExtensionRequest(**dict(ext, context=Attribution(**ext["context"])))
                 record = Grant(**dict(row, context=Attribution(**row["context"]),
                                       items=tuple(Item(**item) for item in row["items"]),
                                       scope=tuple(Scope(**scope) for scope in row["scope"]), change=change,
+                                      extension=ext,
                                       superseded_changes=tuple(row.get("superseded_changes", ())),
                                       released_entries=tuple((uuid_text(vault), uuid_text(entry))
                                                              for vault, entry in row.get("released_entries", ()))))
@@ -271,6 +299,21 @@ class Grants:
             pass
         except (OSError, ValueError, TypeError, KeyError):
             raise SettingsError("Access tokens could not be loaded.") from None
+        now = time()
+        default_expiry = now + self.workspace.token_lifespan_days * 86400
+        backfilled = False
+        for identifier, record in list(self.records.items()):
+            if record.status in LIVE_GRANT_STATES and record.expires_at is None:
+                self.records[identifier] = replace(record, expires_at=default_expiry)
+                backfilled = True
+        if backfilled:
+            self._save_all(self.records)
+        self.prune_expired(now=now)
+
+    def _save_all(self, records):
+        write_private_json(self.path, {"version": 1, "grants": [asdict(r) for r in records.values()]})
+        self.records = records
+        self.credentials = {r.verifier: r.id for r in records.values()}
 
     def _put(self, record):
         records = {**self.records, record.id: record}
@@ -278,11 +321,57 @@ class Grants:
         self.records = records
         self.credentials[record.verifier] = record.id
 
+    def is_expired(self, record, now=None):
+        return record.expires_at is not None and (time() if now is None else now) >= record.expires_at
+
+    def is_active(self, record, now=None):
+        return record is not None and record.status == "active" and not self.is_expired(record, now)
+
+    def extension_target(self, record, days, now=None):
+        now = time() if now is None else now
+        return max(record.expires_at or now, now + days * 86400)
+
+    def prune_expired(self, now=None, retention_days=None):
+        now = time() if now is None else now
+        with self.workspace.mutex:
+            affected = set()
+            for record in list(self.records.values()):
+                if record.status in LIVE_GRANT_STATES and self.is_expired(record, now):
+                    decision = "Pending token expired" if record.status == "pending" else "Token life span expired"
+                    updated = replace(
+                        record, status="expired", generation=record.generation + 1,
+                        scope=(), items=(), change=None, extension=None,
+                        superseded_changes=(), released_entries=(),
+                    )
+                    self._change(updated, "Expire token", "Expired", target_scope=record.scope, decision=decision)
+                    affected.add(record.id)
+            if retention_days is not None:
+                cutoff = now - retention_days * 86400
+                remaining = {}
+                pruned = False
+                for identifier, record in self.records.items():
+                    anchor = record.expires_at if record.expires_at is not None else record.requested
+                    if (record.status in ("expired", "removed", "denied")
+                            and anchor <= cutoff
+                            and (record.last_used is None or record.last_used <= cutoff)):
+                        affected.add(identifier)
+                        pruned = True
+                    else:
+                        remaining[identifier] = record
+                if pruned:
+                    self._save_all(remaining)
+            return len(affected)
+
     def authenticate(self, credential, uid, *, allow_workflow=False):
         identifier = self.credentials.get(verifier(credential))
         record = self.records.get(identifier)
         if record is None or record.uid != uid or record.workflow is not None and not allow_workflow:
             raise ListingError("ineligible")
+        if record.status in LIVE_GRANT_STATES and self.is_expired(record):
+            self.prune_expired()
+            record = self.records.get(identifier)
+            if record is None:
+                raise ListingError("ineligible")
         return record
 
     def can_issue_workflow(self, draft):
@@ -304,8 +393,11 @@ class Grants:
         choices = self.choices(request)
         if len(choices) != 1:
             raise ListingError("ineligible")
-        draft = Grant(new_id(), verifier(credential), uid, time(), identity, project, context,
-                      (request,), status="active", scope=(choices[0].scope,), workflow=workflow)
+        self.prune_expired()
+        now = time()
+        draft = Grant(new_id(), verifier(credential), uid, now, identity, project, context,
+                      (request,), status="active", scope=(choices[0].scope,), workflow=workflow,
+                      expires_at=now + self.workspace.token_lifespan_days * 86400)
         self.can_issue_workflow(draft)
         return draft
 
@@ -361,7 +453,7 @@ class Grants:
             return None
         with self.workspace.mutex:
             record = self.records.get(token_id)
-            if (record is None or record.status != "active" or record.workflow is not None
+            if (not self.is_active(record) or record.workflow is not None
                     or (vault, entry) in record.released_entries):
                 return None
             if not any((s.vault, s.entry) == (vault, entry) and s.uses
@@ -378,7 +470,7 @@ class Grants:
 
     def is_stale(self, record):
         """Return True if any credential-use scope on an active/disabled grant is stale."""
-        if record.status not in ("active", "disabled"):
+        if record.status not in ("active", "disabled") or self.is_expired(record):
             return False
         with self.workspace.mutex:
             for scope in record.scope:
@@ -393,6 +485,9 @@ class Grants:
         """Re-approve current vault credential revisions for an active or disabled grant."""
         with self.workspace.mutex:
             record = self.records.get(identifier)
+            if record is not None and record.status in LIVE_GRANT_STATES and self.is_expired(record):
+                self.prune_expired()
+                raise ListingError("revoked")
             if record is None or record.status not in ("active", "disabled"):
                 raise ListingError("revoked")
             updated_scope = []
@@ -428,7 +523,7 @@ class Grants:
         """
         with self.workspace.mutex:
             record = self.records[identifier]
-            if record.status != "active" or record.generation != generation:
+            if not self.is_active(record) or record.generation != generation:
                 raise ListingError("revoked")
             pins = self.result_certificate_pins(record, vault, entry, revision, origin)
             if not pins or (pins != expected and any(pin != fingerprint for pin in pins)):
@@ -470,11 +565,12 @@ class Grants:
             raise ListingError("invalid_request") from None
         digest = verifier(credential)
         with self.workspace.mutex:
+            self.prune_expired()
             identifier = self.credentials.get(digest)
             stale_record = None
             if identifier:
                 record = self.records[identifier]
-                if record.status in ("denied", "removed"):
+                if record.status in ("denied", "removed", "expired"):
                     if record.workflow is not None or record.uid != uid or change_id is not None:
                         raise ListingError("ineligible")
                     stale_record = record
@@ -500,7 +596,9 @@ class Grants:
             if stale_record is not None:
                 del self.records[stale_record.id]
                 del self.credentials[digest]
-            record = Grant(new_id(), digest, uid, time(), identity, project, attribution, items)
+            now = time()
+            record = Grant(new_id(), digest, uid, now, identity, project, attribution, items,
+                           expires_at=now + self.workspace.token_lifespan_days * 86400)
             try:
                 self._change(record, "Request token", "Pending approval")
             except BaseException:
@@ -552,7 +650,7 @@ class Grants:
         return change.status
 
     def _check_request_capacity(self):
-        pending = sum(row.status == "pending" or bool(row.pending_change)
+        pending = sum(row.status == "pending" or bool(row.pending_change) or bool(row.pending_extension)
                       for row in self.records.values())
         if pending >= MAX_PENDING:
             raise ListingError("busy")
@@ -570,6 +668,8 @@ class Grants:
 
     def rows(self):
         with self.workspace.mutex:
+            if any(row.status in LIVE_GRANT_STATES and self.is_expired(row) for row in self.records.values()):
+                self.prune_expired()
             rows = [row for row in self.records.values() if row.status in LIVE_GRANT_STATES]
             return sorted(rows, key=lambda row: (row.status != "pending", -row.requested, row.id))
 
@@ -615,6 +715,9 @@ class Grants:
         return not set(record.released_entries).isdisjoint((item.vault, item.entry) for item in scopes)
 
     def _decide(self, record, choices, *, change_id=None, automatic=False):
+        if record.status in LIVE_GRANT_STATES and self.is_expired(record):
+            self.prune_expired()
+            raise ListingError("revoked")
         if change_id:
             change = record.change
             if record.status != "active" or change is None or (change.id, change.status) != (change_id, "pending"):
@@ -629,7 +732,7 @@ class Grants:
                 self._change(replace(record, change=replace(change, status="denied")),
                              "Deny token permissions", "Denied", context=context, target_scope=())
             else:
-                self._change(replace(record, status="denied", items=()), "Deny token", "Denied")
+                self._change(replace(record, status="denied", items=(), expires_at=None), "Deny token", "Denied")
             return
         if len(choices) != len(items) or any(
             selected not in self.choices(item) for item, selected in zip(items, choices)
@@ -646,6 +749,10 @@ class Grants:
         row = replace(record, status="active", scope=scope, released_entries=released)
         if change_id:
             row = replace(row, change=replace(change, status="active"), generation=record.generation + 1)
+        else:
+            now = time()
+            row = replace(row, expires_at=max(record.expires_at or now,
+                                              now + self.workspace.token_lifespan_days * 86400))
         decision = "Auto approved" if automatic else "Approved in Access"
         self._change(row, action, "Approved", context=context, decision=decision)
 
@@ -653,7 +760,10 @@ class Grants:
         """Relinquish one entry on the calling token, including all its uses."""
         with self.workspace.mutex:
             current = self.records.get(token.id)
-            if current is None or current.status != "active" or current.generation != token.generation:
+            if current is not None and current.status in LIVE_GRANT_STATES and self.is_expired(current):
+                self.prune_expired()
+                raise ListingError("ineligible")
+            if not self.is_active(current) or current.generation != token.generation:
                 raise ListingError("ineligible")
             target = (vault, entry)
             removed = tuple(item for item in current.scope if (item.vault, item.entry) == target)
@@ -680,7 +790,12 @@ class Grants:
 
     def transition(self, identifier, status):
         with self.workspace.mutex:
-            record = self.records[identifier]
+            record = self.records.get(identifier)
+            if record is None:
+                raise ListingError("revoked")
+            if record.status in LIVE_GRANT_STATES and self.is_expired(record):
+                self.prune_expired()
+                raise ListingError("revoked")
             commands = {
                 ("active", "disabled"): "Disable token",
                 ("disabled", "active"): "Re-enable token",
@@ -693,9 +808,104 @@ class Grants:
             row = replace(record, status=status, generation=record.generation + 1)
             if row.pending_change:
                 row = replace(row, change=replace(row.change, status="denied"))
+            if status == "disabled" and row.pending_extension:
+                row = replace(row, extension=replace(row.extension, status="denied"))
             if status == "removed":
-                row = replace(row, scope=(), items=(), change=None, superseded_changes=(), released_entries=())
+                row = replace(row, scope=(), items=(), change=None, extension=None, expires_at=None,
+                              superseded_changes=(), released_entries=())
             self._change(row, action, status.capitalize(), target_scope=record.scope)
+
+    def extend(self, identifier, days=None, *, decision="Extended in Access"):
+        """Extend an active or disabled non-expired token directly for the owner."""
+        if days is not None and (type(days) is not int or not 1 <= days <= MAX_TOKEN_LIFESPAN_DAYS):
+            raise ValueError(f"Choose an extension between 1 and {MAX_TOKEN_LIFESPAN_DAYS} days.")
+        with self.workspace.mutex:
+            record = self.records.get(identifier)
+            if record is None:
+                raise ListingError("revoked")
+            if record.status in LIVE_GRANT_STATES and self.is_expired(record):
+                self.prune_expired()
+                raise ListingError("revoked")
+            if record.status not in ("active", "disabled"):
+                raise ListingError("revoked")
+            now = time()
+            add_days = self.workspace.token_lifespan_days if days is None else days
+            new_exp = min(now + MAX_TOKEN_LIFESPAN_DAYS * 86400, max(now, record.expires_at or now) + add_days * 86400)
+            ext = replace(record.pending_extension, status="active") if record.pending_extension else record.extension
+            updated = replace(record, expires_at=new_exp, extension=ext)
+            self._change(updated, "Extend token", "Approved", decision=decision)
+            return updated
+
+    def request_extension(self, token_id, days, attribution, *, extension_id=None):
+        """Record or auto-approve an agent life span extension request."""
+        requested_days = self.workspace.token_lifespan_days if days is None else days
+        if type(requested_days) is not int or not 1 <= requested_days <= MAX_TOKEN_LIFESPAN_DAYS:
+            raise ListingError("invalid_request")
+        if extension_id is not None:
+            try:
+                extension_id = uuid_text(extension_id)
+            except (AttributeError, TypeError, ValueError):
+                raise ListingError("invalid_request") from None
+        with self.workspace.mutex:
+            record = self.records.get(token_id)
+            if record is None:
+                raise ListingError("ineligible")
+            if record.status in LIVE_GRANT_STATES and self.is_expired(record):
+                self.prune_expired()
+                raise ListingError("ineligible")
+            if record.workflow is not None or not self.is_active(record):
+                raise ListingError("ineligible")
+            if extension_id is not None:
+                if record.extension and record.extension.id == extension_id:
+                    if record.extension.days != requested_days:
+                        raise ListingError("invalid_request")
+                    return record.extension.status, record
+                if record.pending_extension:
+                    raise ListingError("token_extension_pending")
+            elif record.pending_extension:
+                if record.pending_extension.days == requested_days:
+                    return "pending", record
+                raise ListingError("token_extension_pending")
+            now = time()
+            ext_id = extension_id or new_id()
+            auto = (not self.workspace.paused
+                    and self.workspace.token_auto_approval_enabled("auto_approve_token_extensions")
+                    and requested_days <= self.workspace.token_lifespan_days)
+            if auto:
+                new_exp = self.extension_target(record, requested_days, now)
+                ext = ExtensionRequest(ext_id, now, attribution, requested_days, status="active")
+                updated = replace(record, expires_at=new_exp, extension=ext)
+                self._change(updated, "Extend token", "Approved", context=attribution,
+                             decision=f"Auto approved ({requested_days}d)")
+                return "active", updated
+            self._check_request_capacity()
+            ext = ExtensionRequest(ext_id, now, attribution, requested_days, status="pending")
+            updated = replace(record, extension=ext)
+            self._change(updated, "Request token extension", "Pending approval", context=attribution)
+            return "pending", updated
+
+    def decide_extension(self, identifier, extension_id, approved):
+        """Approve or deny a pending agent life span extension request."""
+        with self.workspace.mutex:
+            record = self.records.get(identifier)
+            if record is None:
+                raise ListingError("revoked")
+            if record.status in LIVE_GRANT_STATES and self.is_expired(record):
+                self.prune_expired()
+                raise ListingError("revoked")
+            ext = record.pending_extension
+            if record.status not in ("active", "disabled") or ext is None or ext.id != extension_id:
+                raise ListingError("revoked")
+            if not approved:
+                updated = replace(record, extension=replace(ext, status="denied"))
+                self._change(updated, "Deny token extension", "Denied", context=ext.context)
+                return updated
+            now = time()
+            new_exp = self.extension_target(record, ext.days, now)
+            updated = replace(record, expires_at=new_exp, extension=replace(ext, status="active"))
+            self._change(updated, "Extend token", "Approved", context=ext.context,
+                         decision=f"Approved in Access ({ext.days}d)")
+            return updated
 
     def _target(self, scope):
         vault_ids = {item.vault for item in scope}
@@ -732,5 +942,5 @@ class Grants:
 
     def used(self, record):
         current = self.records[record.id]
-        if current.generation == record.generation and current.status == "active":
+        if current.generation == record.generation and self.is_active(current):
             self._put(replace(current, last_used=max(time(), current.last_used or 0)))

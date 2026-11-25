@@ -18,7 +18,8 @@ gi.require_version("Gtk", "3.0")
 gi.require_version("Gdk", "3.0")
 from gi.repository import Gdk, Gio, GLib, Gtk, Pango
 
-from .access_settings import (AccessSettings, GUEST_AUTO_APPROVAL_OPTIONS, REVIEW_ACTIONS,
+from .access_settings import (AccessSettings, GUEST_AUTO_APPROVAL_OPTIONS, MAX_TOKEN_LIFESPAN_DAYS,
+                              MIN_TOKEN_LIFESPAN_DAYS, REVIEW_ACTIONS,
                               SCOPED_AUTO_APPROVAL_OPTIONS, TOKEN_AUTO_APPROVAL_OPTIONS)
 from .activity import ActivityError, ActivityStore
 from .agent_connection import connection_socket, installed_connection
@@ -26,7 +27,7 @@ from .approvals import ApprovalQueue
 from .broker import BrokerConfig, ListingBroker
 from .desktop import DesktopSession
 from .edit_requests import EditRequests
-from .grants import Grants
+from .grants import Grants, LIVE_GRANT_STATES
 from .installation import Installation, administer_connection
 from .keyring import KeyringError, SystemKeyring
 from .launcher import (
@@ -546,6 +547,15 @@ class WorkspaceApplication(Gtk.Application):
     def _refresh(self):
         if self.password_clipboard:
             self.password_clipboard.check()
+        if self.grants and self.workspace:
+            records = getattr(self.grants, "records", None)
+            if isinstance(records, dict):
+                try:
+                    if any(self.grants.is_expired(row) for row in records.values()
+                           if row.status in LIVE_GRANT_STATES):
+                        self.grants.prune_expired()
+                except OWNER_ERRORS as error:
+                    self.message = str(error) or "Expired token cleanup failed."
         if self.window and not self.exiting:
             paused = not self.workspace or self.workspace.paused
             pending = self._review_requests()
@@ -598,6 +608,8 @@ class WorkspaceApplication(Gtk.Application):
             *(("usage", str(ticket.id)) for ticket in waiting),
             *(("grant", grant.id) for grant in grants if grant.status == "pending"),
             *(("grant-change", f"{grant.id}/{grant.change.id}") for grant in grants if grant.pending_change),
+            *(("grant-extend", f"{grant.id}/{grant.extension.id}")
+              for grant in grants if getattr(grant, "pending_extension", None)),
             *(("edit", f"{edit.token_id}/{edit.id}") for edit in self.pending_edits() if edit.status == "pending"),
         )
 
@@ -1303,6 +1315,21 @@ class WorkspaceApplication(Gtk.Application):
                 scoped, caption, operation in self.workspace.auto_approve_scoped_actions,
                 lambda control, operation=operation: self._set_scoped_auto_approval(control, operation),
                 operation, description))
+        lifespan_card = self._settings_card(approvals)
+        lifespan_card.pack_start(styled(_label("Token Life Span"), "keeper-settings-caption"), False, False, 0)
+        lifespan_card.pack_start(styled(_label(
+            "Tokens expire automatically after their life span and are removed from Access. "
+            "Active agents can request an extension before expiry."
+        ), "keeper-settings-description"), False, False, 0)
+        lifespan_row = Gtk.Box(spacing=16)
+        lifespan_row.pack_start(_label("Default Token Life Span (Days)"), True, True, 0)
+        lifespan = Gtk.SpinButton.new_with_range(MIN_TOKEN_LIFESPAN_DAYS, MAX_TOKEN_LIFESPAN_DAYS, 1)
+        lifespan.set_name("token-lifespan-days")
+        lifespan.get_accessible().set_name("Default Token Life Span (Days)")
+        lifespan.set_value(self.workspace.token_lifespan_days)
+        lifespan.connect("value-changed", self._set_token_lifespan_days)
+        lifespan_row.pack_end(lifespan, False, False, 0)
+        lifespan_card.pack_start(lifespan_row, False, False, 0)
         token_switches = self._token_auto_approval_settings(approvals)
 
         def sync_sensitivity():
@@ -1728,6 +1755,23 @@ class WorkspaceApplication(Gtk.Application):
         self.owner_operation(lambda: self.workspace.set_token_auto_approval(setting, enabled))
         control.set_active(getattr(self.workspace, setting))
 
+    def _set_token_lifespan_days(self, control):
+        if not self.workspace:
+            return
+        days = control.get_value_as_int()
+        if days == self.workspace.token_lifespan_days:
+            return
+        if self.desktop.locked:
+            control.set_value(self.workspace.token_lifespan_days)
+            return
+        try:
+            self.workspace.set_token_lifespan_days(days)
+            self._report_owner_error("")
+        except OWNER_ERRORS as error:
+            self._report_owner_error(str(error) or "Could not save the token life span setting.")
+            control.set_value(self.workspace.token_lifespan_days)
+        self._refresh()
+
     def _set_start_unlocked(self, control):
         enabled = control.get_active()
         if enabled == self.start_unlocked:
@@ -1843,10 +1887,13 @@ class WorkspaceApplication(Gtk.Application):
     def _prune(self):
         if self.workspace:
             try:
-                self.activity.prune(self.workspace.legacy_access.read().retention_days)
+                retention = self.workspace.legacy_access.read().retention_days
+                self.activity.prune(retention)
                 if self.edit_requests:
-                    self.edit_requests.prune(self.workspace.legacy_access.read().retention_days)
-            except (SettingsError, ActivityError):
+                    self.edit_requests.prune(retention)
+                if self.grants:
+                    self.grants.prune_expired(retention_days=retention)
+            except (SettingsError, ActivityError, OSError):
                 self.message = "Local activity cleanup is unavailable."
         return GLib.SOURCE_CONTINUE
 

@@ -16,7 +16,7 @@ from urllib.parse import urlsplit
 from .runner_token import UninitializedProfile, credential
 from .protocol import (
     CLIENT_TIMEOUT, CONSOLE_OPERATIONS, CONSOLE_SECONDS, ERRORS, GUEST_OPERATIONS, LIST_REQUEST, ListingError,
-    MAX_CONSOLE_REUSE_MINUTES, MAX_GUEST_REUSE_MINUTES, MAX_GUEST_TEXT, MAX_WAIT_SECONDS,
+    MAX_CONSOLE_REUSE_MINUTES, MAX_GUEST_REUSE_MINUTES, MAX_GUEST_TEXT, MAX_TOKEN_LIFESPAN_DAYS, MAX_WAIT_SECONDS,
     REQUEST_LIMIT, REQUEST_TIMEOUT, RESPONSE_LIMIT, UPLOAD_LIMIT, WORKFLOW_OPERATIONS,
     decode, encode, receive, remaining, sanitize_error_detail, validate_command,
 )
@@ -271,12 +271,29 @@ def usage_request(data):
 
 def _validate_access_details(reply):
     required = {"status", "identity", "project", "model", "chat", "chat_id", "scope", "requested_items", "pending_change"}
-    if not required <= reply.keys() <= required | {"workflow", "paused", "last_change"}:
+    optional = {"workflow", "paused", "last_change", "expires_at", "expires_in", "pending_extension", "last_extension"}
+    if not required <= reply.keys() <= required | optional:
         raise ValueError
     if "workflow" in reply and edit_uuid(reply["workflow"]) != reply["workflow"]:
         raise ValueError
     if "paused" in reply and type(reply["paused"]) is not bool:
         raise ValueError
+    if "expires_at" in reply and type(reply["expires_at"]) is not int:
+        raise ValueError
+    if "expires_in" in reply and (type(reply["expires_in"]) is not int or reply["expires_in"] < 0):
+        raise ValueError
+    if "pending_extension" in reply and reply["pending_extension"] is not None:
+        pending_ext = reply["pending_extension"]
+        if (not isinstance(pending_ext, dict) or set(pending_ext) != {"id", "days"}
+                or edit_uuid(pending_ext["id"]) != pending_ext["id"]
+                or type(pending_ext["days"]) is not int
+                or not 1 <= pending_ext["days"] <= MAX_TOKEN_LIFESPAN_DAYS):
+            raise ValueError
+    if "last_extension" in reply and reply["last_extension"] is not None:
+        last_ext = reply["last_extension"]
+        if (not isinstance(last_ext, dict) or set(last_ext) != {"id", "status"}
+                or edit_uuid(last_ext["id"]) != last_ext["id"] or last_ext["status"] != "denied"):
+            raise ValueError
     if "last_change" in reply and reply["last_change"] is not None:
         last_change = reply["last_change"]
         if (not isinstance(last_change, dict) or set(last_change) != {"id", "status"}
@@ -375,7 +392,7 @@ def _validate(reply, payload):
                 and (detail is None or isinstance(detail, str) and detail.isprintable())):
             raise ListingError(error, detail=sanitize_error_detail(detail))
     if operation in ("request_access", "access_status"):
-        if reply.get("status") not in ("pending", "active", "disabled", "denied", "removed"):
+        if reply.get("status") not in ("pending", "active", "disabled", "denied", "removed", "expired"):
             raise ListingError("invalid_response")
         if operation == "access_status" and payload.get("details"):
             try:
@@ -383,6 +400,13 @@ def _validate(reply, payload):
             except (ValueError, TypeError, KeyError):
                 raise ListingError("invalid_response") from None
         elif set(reply) != {"status"}:
+            raise ListingError("invalid_response")
+        return reply
+    if operation == "extend_access":
+        if (set(reply) != {"status", "expires_at", "expires_in"}
+                or reply["status"] not in ("pending", "active", "denied")
+                or type(reply["expires_at"]) is not int
+                or type(reply["expires_in"]) is not int or reply["expires_in"] < 0):
             raise ListingError("invalid_response")
         return reply
     if operation == "release_entry":
@@ -684,6 +708,13 @@ def main(argv=None):
     status.add_argument("--json", action="store_true", required=True, help="Emit JSON")
     status.add_argument("--details", action="store_true", help="Show the registered identity, project, attribution, and permission scope")
     status.set_defaults(operation="access_status")
+    extend = commands.add_parser("extend", help="Request to extend this token's life span")
+    extend.add_argument("--days", type=int, metavar="DAYS",
+                        help=f"Optional requested life span in days (1-{MAX_TOKEN_LIFESPAN_DAYS}; defaults to owner setting)")
+    extend.add_argument("--id", dest="extension_id", type=_request_id,
+                        help="Optional extension request UUID for idempotent retries")
+    extend.add_argument("--json", action="store_true", required=True, help="Emit JSON")
+    extend.set_defaults(operation="extend_access")
     release = commands.add_parser("release", help="Give up this token's access to one entry")
     release.add_argument("--vault", required=True, type=_request_id)
     release.add_argument("--entry", required=True, type=_request_id)
@@ -855,6 +886,13 @@ def main(argv=None):
                     parser.error("Invalid credential-use command or destination.")
     elif getattr(options, "include_reviewed", False):
         payload["include_reviewed"] = True
+    if options.operation == "extend_access":
+        if options.days is not None:
+            if not 1 <= options.days <= MAX_TOKEN_LIFESPAN_DAYS:
+                parser.error(f"--days needs a duration from 1 to {MAX_TOKEN_LIFESPAN_DAYS} days")
+            payload["days"] = options.days
+        if options.extension_id is not None:
+            payload["extension_id"] = options.extension_id
     if options.operation == "edit_status":
         payload["id"] = options.request
     if options.operation in ("workflow_run", "workflow_status"):
@@ -979,7 +1017,7 @@ def main(argv=None):
                 raise ListingError("invalid_request", detail=detail) from None
         if options.operation != "discover" and (token_file or options.operation in GUEST_OPERATIONS | WORKFLOW_OPERATIONS
                 or options.operation in (
-            "request_access", "access_status", "release_entry", "list_vaults", "request_edit", "edit_status", "write_status",
+            "request_access", "access_status", "extend_access", "release_entry", "list_vaults", "request_edit", "edit_status", "write_status",
         )):
             scope = payload.get("request")
             create = (options.operation == "request_access" and isinstance(scope, dict) and "change_id" not in scope

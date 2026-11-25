@@ -159,10 +159,11 @@ class RunnerTests(TestCase):
         self.assertEqual(replies[0]["result"]["protocolVersion"], "2025-06-18")
         self.assertTrue(replies[0]["result"]["instructions"])
         self.assertEqual({tool["name"] for tool in replies[1]["result"]["tools"]},
-                         {"discover", "access_status", "request_access", "release_entry", "request_edit", "edit_status",
-                          "list_vaults", "list_entries", "use_password", "write_status", "guest_run", "guest_status",
-                          "guest_release", "guest_wait", "console_open", "console_view", "console_wait", "console_input",
-                          "console_close", "workflow_request", "workflow_status", "workflow_run", "provision_account"})
+                         {"discover", "access_status", "request_access", "extend_access", "release_entry",
+                          "request_edit", "edit_status", "list_vaults", "list_entries", "use_password",
+                          "write_status", "guest_run", "guest_status", "guest_release", "guest_wait",
+                          "console_open", "console_view", "console_wait", "console_input", "console_close",
+                          "workflow_request", "workflow_status", "workflow_run", "provision_account"})
         self.assertEqual(payload(replies[2]), MISSING)
         self.assertEqual(stat.S_IMODE(self.profile.stat().st_mode), 0o700)
         self.assertEqual(list(self.profile.iterdir()), [])
@@ -495,3 +496,50 @@ class RunnerTests(TestCase):
             self.assertEqual(received[0], {"jsonrpc": "2.0", "method": "keeper/profile", "params": {"name": "Work-1"}})
             self.assertEqual(b64decode(received[1]["params"]["arguments"]["input_base64"]), b"hello\x00world")
             self.assertIn("input_path", decode(out.getvalue())["result"]["tools"][0]["inputSchema"]["properties"])
+
+    def test_extend_access_tool_invocation_validation_and_roundtrip(self):
+        from uuid import uuid4
+
+        ext_id = str(uuid4())
+        args, data = invocation("extend_access", {})
+        self.assertEqual(args[1:], ["access", "extend", "--json"])
+        self.assertEqual(data, b"")
+
+        args, data = invocation("extend_access", {"days": 7, "extension_id": ext_id, "note": "Need extra week"})
+        self.assertEqual(args[1:], ["access", "extend", "--json", "--days=7", f"--id={ext_id}"])
+        self.assertEqual(data, b"")
+
+        for bad in (
+            {"days": 0},
+            {"days": 366},
+            {"days": True},
+            {"days": "7"},
+            {"extension_id": "not-a-uuid"},
+            {"extra": 1},
+        ):
+            with self.subTest(bad=bad), self.assertRaises(ValueError):
+                invocation("extend_access", bad)
+
+        self.profile.mkdir(mode=0o700)
+        credential(self.profile / "token", create=True)
+        with socket.socket(socket.AF_UNIX) as listener:
+            listener.bind(str(self.endpoint))
+            listener.listen()
+            listener.settimeout(8)
+            observed = []
+
+            def serve():
+                connection, _ = listener.accept()
+                with connection, connection.makefile("rb") as stream:
+                    observed.append(decode(stream.readline()))
+                    connection.sendall(encode({"status": "active", "expires_at": 1700604800, "expires_in": 604800}))
+
+            thread = Thread(target=serve, daemon=True)
+            thread.start()
+            _, replies = self.run_server(call_tool("extend_access", {"days": 7, "extension_id": ext_id, "note": "Extend"}))
+            thread.join(8)
+            self.assertEqual(payload(replies[0]), {"status": "active", "expires_at": 1700604800, "expires_in": 604800})
+            self.assertEqual(observed[0]["operation"], "extend_access")
+            self.assertEqual(observed[0]["days"], 7)
+            self.assertEqual(observed[0]["extension_id"], ext_id)
+            self.assertEqual(observed[0]["context"]["note"], "Extend")

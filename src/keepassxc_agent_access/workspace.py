@@ -10,7 +10,8 @@ from pathlib import Path
 from threading import Event, RLock
 from uuid import uuid4
 
-from .access_settings import (Action, AccessStore, GUEST_AUTO_APPROVAL_OPTIONS, SCOPED_AUTO_APPROVAL_OPTIONS,
+from .access_settings import (Action, AccessStore, GUEST_AUTO_APPROVAL_OPTIONS, MAX_TOKEN_LIFESPAN_DAYS,
+                              MIN_TOKEN_LIFESPAN_DAYS, SCOPED_AUTO_APPROVAL_OPTIONS,
                               TOKEN_AUTO_APPROVAL_OPTIONS, label, uuid_text)
 from .discovery import DiscoveryCatalog
 from .keyring import KeyringError
@@ -110,8 +111,10 @@ class Workspace:
         self.auto_approve_guest_actions = preferences.auto_approve_guest_actions
         self.auto_approve_scoped_actions = preferences.auto_approve_scoped_actions
         self.auto_approve_token_changes = preferences.auto_approve_token_changes
+        self.auto_approve_token_extensions = preferences.auto_approve_token_extensions
         self.auto_approve_token_credential_uses = preferences.auto_approve_token_credential_uses
         self.auto_approve_token_rotations = preferences.auto_approve_token_rotations
+        self.token_lifespan_days = preferences.token_lifespan_days
         self.unlock_on_desktop_unlock = preferences.unlock_on_desktop_unlock
         self.resume_on_desktop_unlock = preferences.resume_on_desktop_unlock
         self.token_auto_approval_acknowledged = preferences.token_auto_approval_acknowledged
@@ -502,6 +505,14 @@ class Workspace:
                 raise ValueError("Accept the warning before enabling token auto-approval.")
             self.legacy_access.write(replace(self.legacy_access.read(), **{setting: enabled}))
             setattr(self, setting, enabled)
+
+    def set_token_lifespan_days(self, days):
+        """Set the default life span in days for new and auto-extended tokens."""
+        if type(days) is not int or not MIN_TOKEN_LIFESPAN_DAYS <= days <= MAX_TOKEN_LIFESPAN_DAYS:
+            raise ValueError(f"Choose a token life span between {MIN_TOKEN_LIFESPAN_DAYS} and {MAX_TOKEN_LIFESPAN_DAYS} days.")
+        with self.mutex:
+            self.legacy_access.write(replace(self.legacy_access.read(), token_lifespan_days=days))
+            self.token_lifespan_days = days
 
     def pause(self, paused=True, *, persist=True):
         with self.mutex:

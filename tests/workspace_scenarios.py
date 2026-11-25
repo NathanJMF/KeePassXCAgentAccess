@@ -11,6 +11,7 @@ from pathlib import Path
 import shutil
 import subprocess
 import sys
+from time import time
 import traceback
 from unittest.mock import patch
 from uuid import UUID, uuid4
@@ -24,8 +25,9 @@ from keepassxc_agent_access.access_settings import (
     GUEST_AUTO_APPROVAL_OPTIONS, REVIEW_ACTIONS, SCOPED_AUTO_APPROVAL_OPTIONS, TOKEN_AUTO_APPROVAL_OPTIONS,
     AccessMode, AccessStore, Action, ActionType, VaultPolicy,
 )
-from keepassxc_agent_access.activity import ActivityStore
+from keepassxc_agent_access.activity import ActivityStore, Attribution
 from keepassxc_agent_access.controller import VaultController
+from keepassxc_agent_access.grants import ExtensionRequest
 from keepassxc_agent_access.launcher import install as install_launcher
 from keepassxc_agent_access.settings import SettingsStore
 from keepassxc_agent_access.setup import VaultSetup
@@ -35,7 +37,7 @@ from keepassxc_agent_access.workspace_app import (
     ENTRY_FOLDER_COLUMN, ENTRY_ID_COLUMN, Gdk, WorkspaceApplication,
 )
 from keepassxc_agent_access.workspace_editor import edit_entry
-from keepassxc_agent_access.workspace_views import edit_binding
+from keepassxc_agent_access.workspace_views import edit_binding, format_lifespan
 from keepassxc_agent_access.keyring import SystemKeyring
 from tls_fixture import AUTHORIZATION, PASSWORD, USERNAME, tls_service
 
@@ -1314,9 +1316,15 @@ def main(root):
                 access_view = app.access_view
                 access_table = access_view.table
                 assert [column.get_title() for column in access_table.get_columns()] == [
-                    "Requested", "Last Used", "Identity", "Model", "Project", "Chat", "Status",
+                    "Requested", "Last Used", "Identity", "Model", "Project", "Chat", "Life Span", "Status", "Extend",
                 ]
                 assert [row[access_view.STATUS] for row in access_table.get_model()] == ["Pending", "Pending", "Active"]
+                assert access_root("alpha")[access_view.CAN_EXTEND]
+                assert not access_root("beta")[access_view.CAN_EXTEND]
+                assert access_root("alpha")[access_view.LIFESPAN] != "—"
+                assert access_root("beta")[access_view.LIFESPAN] == format_lifespan(
+                    app.grants.records[token_ids["beta"]].expires_at,
+                )
                 identity_column = access_view.TITLES.index("Identity")
                 model_column, chat_column = (access_view.TITLES.index(name) for name in ("Model", "Chat"))
                 assert token_ids["beta"] != token_ids["review"]
@@ -1333,7 +1341,9 @@ def main(root):
                 assert access_model.iter_has_child(access_root("alpha").iter)
                 assert all(timestamp.fullmatch(row[0]) and row[1] == "—" for row in access_table.get_model())
                 assert token_context_menu("beta") == ["Review Request…"]
-                assert token_context_menu("alpha") == ["View Permissions…", "Disable Token", "Remove Token…"]
+                assert token_context_menu("alpha") == [
+                    "View Permissions…", "Extend Life Span", "Disable Token", "Remove Token…",
+                ]
                 assert not app.review_popups.enabled
                 deny("review")
                 assert app.workspace.paused
@@ -1568,7 +1578,9 @@ def main(root):
                 disabled_listing = invoke("alpha", "entries", "list", expected=1)
                 assert "unavailable for this token" in disabled_listing and "disabled" in disabled_listing
                 assert invoke("beta", "entries", "list")["entries"] == fixture[2:]
-                assert token_context_menu("alpha") == ["View Permissions…", "Re-enable Token", "Remove Token…"]
+                assert token_context_menu("alpha") == [
+                    "View Permissions…", "Extend Life Span", "Re-enable Token", "Remove Token…",
+                ]
                 disabled = access_root("alpha")
                 assert disabled[app.access_view.STATUS] == "Disabled"
                 access_table.expand_row(disabled.path, False)
@@ -1805,6 +1817,78 @@ def main(root):
                 assert not settings_switch("auto-approve", "token-auto-approval-acknowledged", False)
                 assert not old_access.read().auto_approve_token_changes
                 assert invoke("auto-token", "entries", "list", "--vault", first)["entries"][0]["id"] == first_entry
+
+                assert "auto_approve_token_extensions" in TOKEN_AUTO_APPROVAL_OPTIONS
+                assert TOKEN_AUTO_APPROVAL_OPTIONS["auto_approve_token_extensions"] == "Access Tokens - Extend Life Span"
+                assert not settings_switch("auto-approve", "auto_approve_token_extensions",
+                                           label="Access Tokens - Extend Life Span")
+
+                def configure_lifespan(dialog):
+                    pages = next(widget for widget in descendants(dialog) if widget.get_name() == "keeper-settings-pages")
+                    pages.set_visible_child_name("auto-approve")
+                    spin = next(widget for widget in descendants(pages.get_visible_child())
+                                if isinstance(widget, Gtk.SpinButton) and widget.get_name() == "token-lifespan-days")
+                    assert spin.get_accessible().get_name() == "Default Token Life Span (Days)"
+                    assert spin.get_value_as_int() == 3
+                    spin.set_value(7)
+                    dialog.close()
+
+                drive_dialog(app.settings_button.clicked, configure_lifespan)
+                assert app.workspace.token_lifespan_days == 7
+                assert old_access.read().token_lifespan_days == 7
+
+                app.access_button.clicked()
+                wait_for_paint(access_table)
+                before_extend = app.grants.records[token].expires_at
+                extend_col = access_table.get_column(access_view.EXTEND)
+                auto_path = access_root("auto-token").path
+                rect = access_table.get_cell_area(auto_path, extend_col)
+                click_x = rect.x + max(1, rect.width // 2)
+                click_y = rect.y + max(1, rect.height // 2)
+                hit = access_table.get_path_at_pos(click_x, click_y)
+                assert hit and hit[0] == auto_path and hit[1] is extend_col
+                click_event = Gdk.Event.new(Gdk.EventType.BUTTON_PRESS)
+                click_event.button.window = access_table.get_bin_window()
+                click_event.button.button = Gdk.BUTTON_PRIMARY
+                click_event.button.x = click_x
+                click_event.button.y = click_y
+                click_event.set_device(access_table.get_display().get_default_seat().get_pointer())
+                assert access_table.emit("button-press-event", click_event)
+                after_extend = app.grants.records[token].expires_at
+                assert after_extend > before_extend and after_extend >= time() + 6 * 86400
+                assert access_root("auto-token")[access_view.LIFESPAN] == format_lifespan(after_extend)
+
+                ext_id = str(uuid4())
+                extension = ExtensionRequest(
+                    id=ext_id,
+                    requested=time(),
+                    context=Attribution(enrollment_model, enrollment_chat, "test-chat", "Extend token for follow-up"),
+                    days=10,
+                    status="pending",
+                )
+                app.grants._put(replace(app.grants.records[token], extension=extension))
+                app._refresh()
+                assert ("grant-extend", f"{token}/{ext_id}") in app._review_requests()
+                ext_row, = [row for row in access_table.get_model() if row[access_view.RECORD_ID] == f"{token}/{ext_id}"]
+                assert ext_row[access_view.STATUS] == "Extension Pending"
+
+                def approve_extension(dialog):
+                    assert dialog.get_title() == "Review Token Extension Request"
+                    labels = {child.get_text() for child in descendants(dialog) if isinstance(child, Gtk.Label)}
+                    assert {"Extend token for follow-up", "10 days"} <= labels
+                    click_decision(dialog.get_widget_for_response(Gtk.ResponseType.ACCEPT))
+
+                drive_request_popup(approve_extension)
+                assert app.grants.records[token].pending_extension is None
+                extended_until = app.grants.records[token].expires_at
+                assert extended_until > after_extend
+                assert access_root("auto-token")[access_view.LIFESPAN] == format_lifespan(extended_until)
+
+                app.grants._put(replace(app.grants.records[token], expires_at=time() - 10))
+                app._refresh()
+                assert app.grants.records[token].status == "expired"
+                assert all(row.id != token for row in app.grants.rows())
+                assert not any(row[access_view.RECORD_ID] == token for row in access_table.get_model())
 
                 set_screen_active(True)
                 wait_for(lambda: app.desktop.locked and not app.workspace.sessions, "Desktop lock did not close both workers")

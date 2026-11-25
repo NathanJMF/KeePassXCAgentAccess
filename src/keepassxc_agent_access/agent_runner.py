@@ -15,8 +15,8 @@ from uuid import UUID
 
 from .agent_cli import EDIT_OPERATIONS, ENTRY_FIELDS, CREDENTIAL_USE_TYPES, USE_TYPES, edit_request, edit_uuid, usage_request
 from .protocol import (CLIENT_TIMEOUT, ERRORS, ListingError, MAX_CONSOLE_REUSE_MINUTES, MAX_GUEST_REUSE_MINUTES,
-                       MAX_GUEST_TEXT, MAX_WAIT_SECONDS, REQUEST_LIMIT, UPLOAD_LIMIT, decode, encode,
-                       sanitize_error_detail, validate_command)
+                       MAX_GUEST_TEXT, MAX_TOKEN_LIFESPAN_DAYS, MAX_WAIT_SECONDS, REQUEST_LIMIT, UPLOAD_LIMIT,
+                       decode, encode, sanitize_error_detail, validate_command)
 from .runner_token import UninitializedProfile, open_profile
 
 
@@ -233,6 +233,13 @@ OPERATIONS = {
     "request_access": (("access", "request"), tool(
         "request_access", "Request a scoped token or replace this token’s scope using a change_id.",
         {"request": ENROLLMENT}, required=("request",), read_only=False,
+    )),
+    "extend_access": (("access", "extend"), tool(
+        "extend_access", "Request to extend this active token's life span or refresh its window up to the owner's configured default.",
+        {"days": {"type": "integer", "minimum": 1, "maximum": MAX_TOKEN_LIFESPAN_DAYS,
+                  "description": "Optional requested life span in days (defaults to the owner's setting)."},
+         "extension_id": {**REFERENCE, "description": "Optional extension request UUID for idempotent retries."}},
+        read_only=False,
     )),
     "release_entry": (("access", "release"), tool(
         "release_entry", "Immediately give up this token's access to one entry. A new owner grant is required to regain it.",
@@ -511,6 +518,14 @@ def invocation(name, arguments):
                 command.append(f"--{flag}")
     if name == "edit_status":
         command.append(f"--request={_require_uuid(arguments['id'], 'id')}")
+    if name == "extend_access":
+        if "days" in arguments:
+            days = arguments["days"]
+            if type(days) is not int or not 1 <= days <= MAX_TOKEN_LIFESPAN_DAYS:
+                raise ValueError(f"days must be an integer between 1 and {MAX_TOKEN_LIFESPAN_DAYS}.")
+            command.append(f"--days={days}")
+        if "extension_id" in arguments:
+            command.append(f"--id={_require_uuid(arguments['extension_id'], 'extension_id')}")
     if "receipt" in arguments:
         if name == "use_password" and (usage is None or usage["type"] != "https_results"
                 or usage["request"].get("method") not in ("POST", "PUT", "PATCH", "DELETE")):

@@ -2,11 +2,11 @@
 
 from collections import Counter
 from dataclasses import dataclass
-from math import ceil
+from math import ceil, pi
 from shlex import join, split
-from time import monotonic
+from time import monotonic, time
 
-from gi.repository import Gdk, GLib, Gtk, Pango
+from gi.repository import Gdk, GLib, GObject, Gtk, Pango
 
 from .access_settings import Action, ActionType, BrowserForm, HTTPS_METHODS, HTTPS_WRITE_METHODS
 from .activity import ActivityError
@@ -249,6 +249,7 @@ def _table_text_color(_column, cell, model, row, context):
 ACCESS_STATES = {
     "Pending": ("appointment-soon-symbolic", "keeper_warning"),
     "Permission Change Pending": ("appointment-soon-symbolic", "keeper_warning"),
+    "Extension Pending": ("appointment-soon-symbolic", "keeper_warning"),
     "Edit Pending": ("appointment-soon-symbolic", "keeper_warning"),
     "Applying Edit": ("content-loading-symbolic", "keeper_accent"),
     "Usage Pending": ("appointment-soon-symbolic", "keeper_warning"),
@@ -309,6 +310,10 @@ ACTIVITY_ACTION_ICONS = {
     "Request token permissions": "dialog-question-symbolic",
     "Approve token permissions": "changes-allow-symbolic",
     "Deny token permissions": "changes-prevent-symbolic",
+    "Request token extension": "dialog-question-symbolic",
+    "Extend token": "changes-allow-symbolic",
+    "Deny token extension": "changes-prevent-symbolic",
+    "Expire token": "appointment-soon-symbolic",
     "Disable token": "changes-prevent-symbolic",
     "Re-enable token": "changes-allow-symbolic",
     "Remove token": "user-trash-symbolic",
@@ -535,6 +540,137 @@ def approved_entries_tree(workspace, scopes):
     return tree, needs_unlock
 
 
+def format_lifespan(expires_at, now=None):
+    """Format remaining token life span as a compact human-readable string."""
+    if expires_at is None:
+        return "—"
+    rem = expires_at - (time() if now is None else now)
+    if rem <= 0:
+        return "0m"
+    if rem < 60:
+        return "<1m"
+    minutes = max(1, round(rem / 60))
+    if minutes < 60:
+        return f"{minutes}m"
+    hours, rem_min = divmod(minutes, 60)
+    if hours < 24:
+        return f"{hours}h {rem_min}m" if rem_min else f"{hours}h"
+    days, rem_hr = divmod(hours, 24)
+    return f"{days}d {rem_hr}h" if rem_hr else f"{days}d"
+
+
+class ExtendButtonRenderer(Gtk.CellRenderer):
+    """Cell renderer drawing an inline Extend button for live tokens."""
+
+    visible_button = GObject.Property(type=bool, default=False)
+    sensitive_button = GObject.Property(type=bool, default=True)
+    label = GObject.Property(type=str, default="Extend")
+    __gsignals__ = {
+        "activate": (GObject.SignalFlags.RUN_LAST, None, (str,)),
+    }
+
+    def __init__(self):
+        super().__init__()
+        self.set_property("mode", Gtk.CellRendererMode.ACTIVATABLE)
+        self.set_padding(10, 4)
+
+    def _layout(self, widget):
+        return widget.create_pango_layout(self.label or "")
+
+    def do_get_preferred_width(self, widget):
+        text_w, _ = self._layout(widget).get_pixel_size()
+        xpad, _ = self.get_padding()
+        width = text_w + 2 * xpad + 8
+        return width, width
+
+    def do_get_preferred_height(self, widget):
+        _, text_h = self._layout(widget).get_pixel_size()
+        _, ypad = self.get_padding()
+        height = text_h + 2 * ypad + 6
+        return height, height
+
+    def do_get_size(self, widget, cell_area):
+        width, _ = self.do_get_preferred_width(widget)
+        height, _ = self.do_get_preferred_height(widget)
+        if cell_area is not None:
+            return (max(0, (cell_area.width - width) // 2),
+                    max(0, (cell_area.height - height) // 2), width, height)
+        return 0, 0, width, height
+
+    def do_activate(self, *args):
+        if len(args) == 1:
+            return
+        _event, _widget, path, _background_area, _cell_area, _flags = args
+        if self.visible_button and self.sensitive_button:
+            self.emit("activate", path)
+            return True
+        return False
+
+    def do_render(self, cr, widget, _background_area, cell_area, flags):
+        if not self.visible_button:
+            return
+        layout = self._layout(widget)
+        text_w, text_h = layout.get_pixel_size()
+        xpad, ypad = self.get_padding()
+        btn_w = min(max(1, cell_area.width - 6), text_w + 2 * xpad)
+        btn_h = min(max(1, cell_area.height - 4), text_h + 2 * ypad)
+        bx = cell_area.x + (cell_area.width - btn_w) / 2.0
+        by = cell_area.y + (cell_area.height - btn_h) / 2.0
+        radius = min(6.0, btn_w / 2.0, btn_h / 2.0)
+        alpha = 1.0 if self.sensitive_button else 0.52
+
+        context = widget.get_style_context()
+        found_s, surface = context.lookup_color("keeper_surface")
+        found_c, cobalt = context.lookup_color("keeper_cobalt")
+        found_a, accent = context.lookup_color("keeper_accent")
+        found_l, line = context.lookup_color("keeper_line")
+
+        cr.save()
+        cr.new_sub_path()
+        cr.arc(bx + btn_w - radius, by + radius, radius, -pi / 2, 0)
+        cr.arc(bx + btn_w - radius, by + btn_h - radius, radius, 0, pi / 2)
+        cr.arc(bx + radius, by + btn_h - radius, radius, pi / 2, pi)
+        cr.arc(bx + radius, by + radius, radius, pi, 3 * pi / 2)
+        cr.close_path()
+
+        if found_s and found_c:
+            mix = 0.14 if (flags & Gtk.CellRendererState.PRELIGHT) else 0.08
+            cr.set_source_rgba(
+                surface.red * (1 - mix) + cobalt.red * mix,
+                surface.green * (1 - mix) + cobalt.green * mix,
+                surface.blue * (1 - mix) + cobalt.blue * mix,
+                alpha,
+            )
+        else:
+            cr.set_source_rgba(0.95, 0.96, 0.98, alpha)
+        cr.fill_preserve()
+
+        if found_a:
+            cr.set_source_rgba(accent.red, accent.green, accent.blue, 0.35 * alpha)
+        elif found_l:
+            cr.set_source_rgba(line.red, line.green, line.blue, line.alpha * alpha)
+        else:
+            cr.set_source_rgba(0.5, 0.55, 0.65, 0.5 * alpha)
+        cr.set_line_width(1.0)
+        cr.stroke()
+
+        tx = bx + (btn_w - text_w) / 2.0
+        ty = by + (btn_h - text_h) / 2.0
+        if alpha < 1.0:
+            cr.push_group()
+        context.save()
+        state = widget.get_state_flags()
+        if not self.sensitive_button:
+            state |= Gtk.StateFlags.INSENSITIVE
+        context.set_state(state)
+        Gtk.render_layout(context, cr, tx, ty, layout)
+        context.restore()
+        if alpha < 1.0:
+            cr.pop_group_to_source()
+            cr.paint_with_alpha(alpha)
+        cr.restore()
+
+
 class AccessIdentityRenderer(Gtk.CellRendererText):
     inline_scope = False
 
@@ -544,13 +680,15 @@ class AccessIdentityRenderer(Gtk.CellRendererText):
 
 
 class AccessView(Gtk.Box):
-    TITLES = ("Requested", "Last Used", "Identity", "Model", "Project", "Chat", "Status")
+    TITLES = ("Requested", "Last Used", "Identity", "Model", "Project", "Chat", "Life Span", "Status", "Extend")
     IDENTITY, PROJECT = 2, 4
-    STATUS, RECORD_ID, KIND = 6, 7, 8
-    REQUESTED_TIME, LAST_USED_TIME, REVIEW_GROUP = 9, 10, 11
-    ROW_KEY, SEPARATOR_OFFSETS = 12, 13
+    LIFESPAN, STATUS, EXTEND = 6, 7, 8
+    RECORD_ID, KIND = 9, 10
+    REQUESTED_TIME, LAST_USED_TIME, EXPIRES_TIME, REVIEW_GROUP = 11, 12, 13, 14
+    ROW_KEY, SEPARATOR_OFFSETS, CAN_EXTEND = 15, 16, 17
     REMOVE = "Remove Token…"
     REAPPROVE_RESPONSE = 1
+    EXTEND_RESPONSE = 2
 
     def __init__(self, app):
         super().__init__(orientation=Gtk.Orientation.VERTICAL, spacing=18)
@@ -570,17 +708,31 @@ class AccessView(Gtk.Box):
         self.review_button.set_sensitive(False)
         self.pack_start(header, False, False, 0)
         self.table, scroll = pane_table(
-            Gtk.TreeStore(*([str] * 9), object, object, bool, object, object, object),
-            self.TITLES, (138, 138, 122, 106, 109, 106, 119),
-            status=(self.STATUS, ACCESS_STATES), muted_columns=(0, 1), expand_columns=(2, 3, 4, 5),
-            time_columns={0: self.REQUESTED_TIME, 1: self.LAST_USED_TIME},
-            text_renderers={self.IDENTITY: AccessIdentityRenderer}, full_text_columns=(self.STATUS,), indent_rows=True,
+            Gtk.TreeStore(*([str] * 9), object, object, object, object, object, bool, object, object, bool, object),
+            self.TITLES, (138, 138, 122, 106, 109, 106, 92, 119, 82),
+            status=(self.STATUS, ACCESS_STATES), muted_columns=(0, 1, self.LIFESPAN),
+            expand_columns=(2, 3, 4, 5),
+            time_columns={0: self.REQUESTED_TIME, 1: self.LAST_USED_TIME, self.LIFESPAN: self.EXPIRES_TIME},
+            text_renderers={self.IDENTITY: AccessIdentityRenderer},
+            full_text_columns=(self.LIFESPAN, self.STATUS, self.EXTEND), indent_rows=True,
             sort_group=self.REVIEW_GROUP, replace_rows=replace_tree_rows,
         )
         self.table.set_enable_tree_lines(True)
         self.table.set_expander_column(self.table.get_column(0))
         identity = self.table.get_column(self.IDENTITY)
         identity.set_cell_data_func(identity.get_cells()[-1], self._scope_label)
+        lifespan_col = self.table.get_column(self.LIFESPAN)
+        lifespan_col.set_cell_data_func(lifespan_col.get_cells()[-1], self._lifespan_text_color)
+        extend_col = self.table.get_column(self.EXTEND)
+        extend_col.get_area().remove(extend_col.get_cells()[1])
+        self.extend_renderer = ExtendButtonRenderer()
+        self.extend_renderer.connect("activate", self._on_extend_activated)
+        extend_col.pack_start(self.extend_renderer, False)
+        extend_col.set_cell_data_func(self.extend_renderer, self._extend_button_data)
+        extend_col.set_clickable(False)
+        extend_col.set_resizable(False)
+        extend_col.set_min_width(82)
+        self.table.connect("button-press-event", self._on_table_button_press)
         self.table.connect_after("draw", self._draw_scope_labels)
         self.table.connect("row-activated", self._open)
         attach_row_context(self.table, self._context, destructive_labels=(self.REMOVE,))
@@ -588,6 +740,53 @@ class AccessView(Gtk.Box):
             bool(selected_key(self.table, self.RECORD_ID))))
         self.empty, self.empty_label, _ = empty_state("changes-prevent-symbolic", "No access requests or tokens")
         self.pack_start(table_card(scroll, self.empty), True, True, 0)
+
+    def _lifespan_text_color(self, _column, cell, model, row, *_):
+        expires_at = model[row][self.EXPIRES_TIME]
+        expiring_soon = expires_at is not None and 0 < expires_at - time() < 43200
+        palette = "keeper_warning" if expiring_soon else "keeper_muted"
+        found, color = self.table.get_style_context().lookup_color(palette)
+        tint = found and not self.table.get_selection().iter_is_selected(row)
+        if tint:
+            cell.set_property("foreground-rgba", color)
+        cell.set_property("foreground-set", tint)
+
+    def _extend_button_data(self, _column, cell, model, row, *_):
+        can_extend = bool(model[row][self.CAN_EXTEND])
+        cell.set_property("visible-button", can_extend)
+        cell.set_property("sensitive-button", can_extend and not self.app.desktop.locked and not self.app.busy)
+
+    def _on_table_button_press(self, table, event):
+        if event.type != Gdk.EventType.BUTTON_PRESS or event.button != Gdk.BUTTON_PRIMARY:
+            return False
+        if event.window is not None and event.window != table.get_bin_window():
+            return False
+        hit = table.get_path_at_pos(int(event.x), int(event.y))
+        if not hit:
+            return False
+        path, column, _cell_x, _cell_y = hit
+        if column is not table.get_column(self.EXTEND):
+            return False
+        row = table.get_model()[path]
+        if row[self.CAN_EXTEND] and not self.app.desktop.locked and not self.app.busy:
+            table.get_selection().select_path(path)
+            grant_id = row[self.RECORD_ID].partition("/")[0]
+            self._extend_token(grant_id)
+            return True
+        return False
+
+    def _on_extend_activated(self, _renderer, path):
+        if self.app.desktop.locked or self.app.busy:
+            return
+        row = self.table.get_model()[path]
+        if row[self.CAN_EXTEND]:
+            grant_id = row[self.RECORD_ID].partition("/")[0]
+            self._extend_token(grant_id)
+
+    def _extend_token(self, grant_id):
+        if self.app.desktop.locked or self.app.busy or not self.app.grants:
+            return
+        self.app.owner_operation(lambda: self.app.grants.extend(grant_id))
 
     def _is_stale(self, grant):
         return bool(grant and self.app.grants and getattr(self.app.grants, "is_stale", None)
@@ -608,25 +807,35 @@ class AccessView(Gtk.Box):
         snapshots = {}
         for grant in grants:
             change = grant.pending_change
-            other = grant.status != "pending" and not change
+            ext = getattr(grant, "pending_extension", None)
+            other = grant.status != "pending" and not change and not ext
             scope = self._scope_rows(grant, snapshots) if grant.status == "active" or other else ()
-            requested = change.requested if change else grant.requested
-            context = change.context if change else grant.context
+            requested = change.requested if change else ext.requested if ext else grant.requested
+            context = change.context if change else ext.context if ext else grant.context
             stale = self._is_stale(grant)
             state = ("Permission Change Pending" if change else
+                     "Extension Pending" if ext else
                      "Active · Credential Changed" if grant.status == "active" and stale else
                      "Workflow Only" if grant.workflow and grant.status == "active" else grant.status.capitalize())
+            lifespan_text = format_lifespan(grant.expires_at)
             scope_text = " ".join(f"{child[self.IDENTITY]} {child[self.PROJECT]}" for child in scope)
             if not self._matches_search(
                 query, grant.identity, grant.project, context.model, context.chat, state, scope_text,
             ):
                 continue
-            identifier, kind = (f"{grant.id}/{change.id}", "grant-change") if change else (grant.id, "grant")
+            if change:
+                identifier, kind = f"{grant.id}/{change.id}", "grant-change"
+            elif ext:
+                identifier, kind = f"{grant.id}/{ext.id}", "grant-extend"
+            else:
+                identifier, kind = grant.id, "grant"
+            can_extend = grant.status in ("active", "disabled")
             rows.append((bool(other), -requested,
                          (table_time(requested), table_time(grant.last_used),
                           reported(grant.identity), reported(context.model), reported(grant.project),
-                          reported(context.chat), state, identifier, kind,
-                          requested, grant.last_used, bool(other), ("grant", grant.id), (), scope)))
+                          reported(context.chat), lifespan_text, state, "", identifier, kind,
+                          requested, grant.last_used, grant.expires_at, bool(other),
+                          ("grant", grant.id), (), can_extend, scope)))
         for edit in edits:
             state = "Edit Pending" if edit.status == "pending" else "Applying Edit"
             model = edit.context.model if edit.context else None
@@ -636,8 +845,8 @@ class AccessView(Gtk.Box):
             rows.append((False, -edit.requested,
                          (table_time(edit.requested), "—", reported(edit.identity),
                           reported(model), reported(edit.project), reported(chat),
-                          state, f"{edit.token_id}/{edit.id}", "edit", edit.requested, None,
-                          False, ("edit", edit.token_id, edit.id), (), ())))
+                          "—", state, "", f"{edit.token_id}/{edit.id}", "edit", edit.requested, None, None,
+                          False, ("edit", edit.token_id, edit.id), (), False, ())))
         for ticket in self.app.usage_approvals.pending():
             identifier = str(ticket.id)
             state = "Usage Pending"
@@ -649,8 +858,8 @@ class AccessView(Gtk.Box):
             rows.append((False, -ticket.requested,
                          (table_time(ticket.requested), "—", reported(ticket.identity),
                           reported(ticket.context.model), reported(ticket.project), reported(ticket.context.chat),
-                          state, identifier, "usage", ticket.requested, None,
-                          False, ("usage", identifier), (), ())))
+                          "—", state, "", identifier, "usage", ticket.requested, None, None,
+                          False, ("usage", identifier), (), False, ())))
         rows.sort()
         fill_table(self.table, [columns for _, _, columns in rows], self.ROW_KEY)
         self.empty_label.set_text("No tokens match this search" if query else "No access requests or tokens")
@@ -735,8 +944,8 @@ class AccessView(Gtk.Box):
             label = f"{prefix} > {item.name}"
             parts = (vault,) if item.key[0] == "group-scope" else (vault, prefix)
             separators = tuple(len(part.encode("utf-8")) + 1 for part in parts)
-            rows.append(("", "", label, "", item.permissions, "", "", "", "scope", None, None, True,
-                         (grant.id, *item.key), separators, ()))
+            rows.append(("", "", label, "", item.permissions, "", "", "", "", "", "scope",
+                         None, None, None, True, (grant.id, *item.key), separators, False, ()))
         return tuple(rows)
 
     def _open(self, *_):
@@ -765,13 +974,23 @@ class AccessView(Gtk.Box):
 
         if kind == "edit":
             return [[("Review Edit…", open_selected)]]
-        if kind == "grant-change":
+        if kind in ("grant-change", "grant-extend"):
             grant_id, _, _ = identifier.partition("/")
+            grant = self.app.grants.records.get(grant_id) if self.app.grants else None
+
             def current_permissions():
                 self.open_record(grant_id, "grant")
+
+            review_label = "Review Permission Change…" if kind == "grant-change" else "Review Extension Request…"
+            actions = [(review_label, open_selected), ("View Current Permissions…", current_permissions)]
+            if grant and grant.status in ("active", "disabled"):
+                actions.append(("Extend Life Span", lambda: self._extend_token(grant_id)))
+            active = not grant or grant.status == "active"
+            toggle_label = "Disable Token" if active else "Re-enable Token"
+            toggle_status = "disabled" if active else "active"
             return [
-                [("Review Permission Change…", open_selected), ("View Current Permissions…", current_permissions)],
-                [("Disable Token", lambda: self._update_token(grant_id, "disabled")),
+                actions,
+                [(toggle_label, lambda: self._update_token(grant_id, toggle_status)),
                  (self.REMOVE, lambda: self._update_token(grant_id, "removed"))],
             ]
         if state in ("Pending", "Usage Pending"):
@@ -781,6 +1000,8 @@ class AccessView(Gtk.Box):
         label = "Disable Token" if active else "Re-enable Token"
         grant = self.app.grants.records.get(identifier) if self.app.grants else None
         actions = [("View Permissions…", open_selected)]
+        if grant and grant.status in ("active", "disabled"):
+            actions.append(("Extend Life Span", lambda: self._extend_token(identifier)))
         if self._is_stale(grant):
             actions.append(("Re-approve Current Credential", lambda: self._reapprove_credentials(identifier)))
         actions.append((label, lambda: self._update_token(identifier, change)))
@@ -814,12 +1035,122 @@ class AccessView(Gtk.Box):
                 self.app.review_popups.mark_reviewed(kind, identifier)
                 self._review(grant, grant.pending_change, standalone=automatic)
             return
+        if kind == "grant-extend":
+            if grant and getattr(grant, "pending_extension", None) and grant.pending_extension.id == change_id:
+                self.app.review_popups.mark_reviewed(kind, identifier)
+                self._review_extension(grant, grant.pending_extension, standalone=automatic)
+            return
         if grant:
             if grant.status == "pending":
                 self.app.review_popups.mark_reviewed(kind, identifier)
                 self._review(grant, standalone=automatic)
             elif not automatic:
                 self._manage(grant)
+
+    def _review_extension(self, grant, extension, *, standalone=False):
+        dialog, body = _dialog(self.app, "Review Token Extension Request", 580, -1)
+        dialog.set_name("keeper-access-review")
+        dialog.set_position(Gtk.WindowPosition.CENTER_ON_PARENT)
+        dialog.set_modal(True)
+        dialog.add_buttons("Deny", Gtk.ResponseType.REJECT, "Approve", Gtk.ResponseType.ACCEPT)
+        _install_review_key_handler(dialog)
+        require_mouse_decisions(dialog)
+        approve = styled(dialog.get_widget_for_response(Gtk.ResponseType.ACCEPT), "keeper-access-approve")
+        styled(dialog.get_widget_for_response(Gtk.ResponseType.REJECT), "keeper-access-deny")
+        styled(dialog.get_action_area(), "keeper-access-footer")
+        resume_label = "Resume Access and Approve"
+
+        body.set_border_width(20)
+        body.set_spacing(14)
+        requester = Gtk.Box(spacing=12)
+        badge = Gtk.Image.new_from_icon_name("avatar-default-symbolic", Gtk.IconSize.LARGE_TOOLBAR)
+        badge.set_valign(Gtk.Align.CENTER)
+        requester.pack_start(styled(badge, "keeper-access-agent-icon"), False, False, 0)
+        identity = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=3)
+        requester.pack_start(identity, True, True, 0)
+        identity.pack_start(styled(_label("Requested by · agent-reported"), "keeper-event-caption"), False, False, 0)
+        identity.pack_start(styled(_label(grant.identity), "keeper-access-agent"), False, False, 0)
+        project = styled(_label(grant.project), "keeper-event-caption")
+        project.set_tooltip_text("Reported project")
+        identity.pack_start(project, False, False, 0)
+        context_text = _reported_context_text(extension.context)
+        if context_text:
+            context_label = styled(_label(context_text), "keeper-event-caption")
+            context_label.set_tooltip_text("Agent-reported context")
+            identity.pack_start(context_label, False, False, 0)
+        body.pack_start(requester, False, False, 0)
+        if extension.context.note:
+            note_box = styled(Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2), "keeper-event-section")
+            note_box.pack_start(styled(_label("Agent Note"), "keeper-access-caption"), False, False, 0)
+            note_box.pack_start(_label(extension.context.note), False, False, 0)
+            body.pack_start(note_box, False, False, 0)
+
+        current_text = (
+            f"{format_lifespan(grant.expires_at)} (expires {table_time(grant.expires_at)})"
+            if grant.expires_at is not None else "No expiration"
+        )
+        days = extension.days
+        days_text = "1 day" if days == 1 else f"{days} days"
+        new_expires = self.app.grants.extension_target(grant, days)
+        new_text = f"{format_lifespan(new_expires)} (expires {table_time(new_expires)})"
+        summary = styled(Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8), "keeper-event-section")
+        summary.pack_start(styled(_label("Life Span Extension"), "keeper-access-caption"), False, False, 0)
+        summary.pack_start(activity_facts((
+            ("Current Life Span", current_text),
+            ("Requested Extension", days_text),
+            ("New Expiration", new_text),
+        )), False, False, 0)
+        body.pack_start(summary, False, False, 0)
+
+        pause_notice, _pause_reason, resume_button = _pause_blocker(
+            self.app, "Approving also resumes access for all approved agents.",
+        )
+        body.pack_start(pause_notice, False, False, 0)
+
+        technical = Gtk.Expander(label="Technical Details")
+        technical.add(activity_facts((
+            ("Requested", table_time(extension.requested)),
+            ("Agent Account", f"UID {grant.uid} (verified)"),
+            ("Project", reported(grant.project)),
+            ("Model", reported(extension.context.model)),
+            ("Chat", reported(extension.context.chat)),
+            ("Token Record", grant.id),
+            ("Extension Request", extension.id),
+        )))
+        styled(technical, "keeper-access-technical")
+        body.pack_start(technical, False, False, 0)
+
+        def changed(*_):
+            paused = self.app.workspace.paused
+            can_resume = bool(self.app.broker and self.app.broker.enabled and not self.app.desktop.locked)
+            approve.set_label(resume_label if paused else "Approve")
+            pause_notice.set_visible(paused)
+            resume_button.set_sensitive(can_resume)
+            approve.set_sensitive(not paused or can_resume)
+            return GLib.SOURCE_CONTINUE
+
+        changed()
+        watch = GLib.timeout_add(250, changed)
+        try:
+            response = self.app.run_dialog(dialog, standalone=standalone)
+        finally:
+            GLib.source_remove(watch)
+        if response == Gtk.ResponseType.REJECT:
+            self.app.owner_operation(lambda: self.app.grants.decide_extension(grant.id, extension.id, False))
+        elif response == Gtk.ResponseType.ACCEPT:
+            resume = approve.get_label() == resume_label
+
+            def approve_extension():
+                if resume and not (self.app.broker and self.app.broker.enabled):
+                    raise ValueError("Agent access is unavailable. Reopen the request when the broker is running.")
+                with self.app.workspace.mutex:
+                    if self.app.workspace.paused and not resume:
+                        raise ValueError("Agent access was paused. Reopen the request to review your options.")
+                    self.app.grants.decide_extension(grant.id, extension.id, True)
+                    if resume:
+                        self.app.workspace.pause(False)
+
+            self.app.owner_operation(approve_extension)
 
     def _review_usage(self, ticket, *, standalone=False):
         queue = self.app.usage_approvals
@@ -1282,6 +1613,8 @@ class AccessView(Gtk.Box):
                 dialog.add_button("Disable", Gtk.ResponseType.APPLY)
             elif grant.status == "disabled":
                 dialog.add_button("Re-enable", Gtk.ResponseType.APPLY)
+            if grant.status in ("active", "disabled"):
+                dialog.add_button("Extend", self.EXTEND_RESPONSE)
             if stale:
                 dialog.add_button("Re-approve Current Credential", self.REAPPROVE_RESPONSE)
 
@@ -1290,11 +1623,16 @@ class AccessView(Gtk.Box):
                            else grant.status.capitalize())
             status = styled(_label(status_text), "keeper-event-title")
             body.pack_start(status, False, False, 0)
+            lifespan_value = (
+                f"{format_lifespan(grant.expires_at)} (expires {table_time(grant.expires_at)})"
+                if grant.expires_at is not None else None
+            )
             body.pack_start(activity_facts((
                 ("Identity", reported(grant.identity)), ("Project", reported(grant.project)),
                 ("Model", reported(grant.context.model)), ("Chat", reported(grant.context.chat)),
                 ("Requested", table_time(grant.requested)),
                 ("Last Used", table_time(grant.last_used) if grant.last_used is not None else "Never"),
+                ("Life Span", lifespan_value),
                 ("Workflow", grant.workflow[0] if grant.workflow else None),
             )), False, False, 0)
             body.pack_start(styled(Gtk.Label(label="Approved Entries", xalign=0), "keeper-event-section-title"),
@@ -1315,6 +1653,10 @@ class AccessView(Gtk.Box):
             body.pack_start(technical, False, False, 0)
 
             response = self.app.run_dialog(dialog)
+            if response == self.EXTEND_RESPONSE:
+                self._extend_token(grant.id)
+                grant = self.app.grants.records.get(grant.id) if self.app.grants else None
+                continue
             if response == self.REAPPROVE_RESPONSE:
                 self._reapprove_credentials(grant.id)
                 grant = self.app.grants.records.get(grant.id) if self.app.grants else None

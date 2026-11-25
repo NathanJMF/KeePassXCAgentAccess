@@ -7,9 +7,13 @@ from unittest import TestCase
 from unittest.mock import patch
 from uuid import uuid4
 
-from keepassxc_agent_access.access_settings import AccessMode, AccessStore, Action, ActionType, BrowserForm, Destination, VaultPolicy
+from keepassxc_agent_access.access_settings import (
+    DEFAULT_TOKEN_LIFESPAN_DAYS, MAX_TOKEN_LIFESPAN_DAYS, MIN_TOKEN_LIFESPAN_DAYS,
+    AccessMode, AccessStore, Action, ActionType, BrowserForm, Destination, VaultPolicy,
+)
 from keepassxc_agent_access.activity import ActivityError, ActivityStore, Attribution
 from keepassxc_agent_access.broker import BrokerConfig
+from keepassxc_agent_access.settings import SettingsError
 
 
 class AccessStorageTests(TestCase):
@@ -26,6 +30,8 @@ class AccessStorageTests(TestCase):
         self.assertTrue(default.agent_paused)
         self.assertFalse(default.auto_approve_token_credential_uses)
         self.assertFalse(default.auto_approve_token_rotations)
+        self.assertFalse(default.auto_approve_token_extensions)
+        self.assertEqual(default.token_lifespan_days, DEFAULT_TOKEN_LIFESPAN_DAYS)
         self.assertFalse(default.unlock_on_desktop_unlock)
         self.assertFalse(default.resume_on_desktop_unlock)
         self.assertFalse(default.review_usage)
@@ -39,7 +45,8 @@ class AccessStorageTests(TestCase):
         saved = replace(default, mode=AccessMode.SMART, endpoint=str(self.root / "broker.sock"),
                         uid=os.geteuid() + 1, vaults=((vault, policy),), start_unlocked=False,
                         agent_paused=False, auto_approve_token_credential_uses=True,
-                        auto_approve_token_rotations=True, unlock_on_desktop_unlock=True,
+                        auto_approve_token_rotations=True, auto_approve_token_extensions=True,
+                        token_lifespan_days=14, unlock_on_desktop_unlock=True,
                         resume_on_desktop_unlock=True,
                         auto_approve_scoped_actions=frozenset({"tls_first_pin", "tls_cert_repin"}),
                         review_actions=frozenset({"list_entries", "update_entry"}))
@@ -49,6 +56,30 @@ class AccessStorageTests(TestCase):
         self.assertEqual(reopened.for_vault(vault), policy)
         self.assertNotIn(stable_id, reopened.for_vault(other).automatic)
         self.assertEqual(store.path.stat().st_mode & 0o777, 0o600)
+
+    def test_token_lifespan_and_extension_auto_approval_validation(self):
+        store = AccessStore(self.root / "access.json")
+        store.write(store.read())
+        legacy = json.loads(store.path.read_text())
+        del legacy["auto_approve_token_extensions"]
+        del legacy["token_lifespan_days"]
+        store.path.write_text(json.dumps(legacy))
+        migrated = store.read()
+        self.assertFalse(migrated.auto_approve_token_extensions)
+        self.assertEqual(migrated.token_lifespan_days, DEFAULT_TOKEN_LIFESPAN_DAYS)
+
+        for field, bad_values in (
+            ("auto_approve_token_extensions", (1, 0, "true", None, [])),
+            ("token_lifespan_days", (MIN_TOKEN_LIFESPAN_DAYS - 1, MAX_TOKEN_LIFESPAN_DAYS + 1,
+                                     True, False, "3", 3.5, None)),
+        ):
+            for bad in bad_values:
+                with self.subTest(field=field, bad=bad):
+                    store.path.write_text(json.dumps({**legacy, field: bad}))
+                    with self.assertRaises(SettingsError):
+                        store.read()
+                    with self.assertRaises(ValueError):
+                        store.write(replace(migrated, **{field: bad}))
 
     def test_legacy_password_review_expands_to_all_transports(self):
         store = AccessStore(self.root / "access.json")

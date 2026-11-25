@@ -195,7 +195,7 @@ class WorkflowAccess:
         record = self.workspace.registrations.get(workflow.vault)
         return ((not self.workspace.paused or allow_paused) and monotonic() < workflow.deadline
                 and self.workspace.generation == workflow.workspace_generation
-                and token is not None and token.status == "active" and token.generation == workflow.token_generation
+                and self.broker.grants.is_active(token) and token.generation == workflow.token_generation
                 and record is not None and record.credential_revision(workflow.entry) == workflow.revision
                 and self.workspace.session(workflow.vault) is workflow.session
                 and (workflow.trusted_endpoint is None or self.broker.grants.result_certificate_trusted(
@@ -229,7 +229,7 @@ class WorkflowAccess:
                         or (label(enrollment["identity"]).strip(), label(enrollment["project"])) != (
                             token.identity, token.project)):
                     raise ListingError("ineligible")
-            if token.status != "active":
+            if not grants.is_active(token):
                 raise ListingError("ineligible")
             resume_access = self.workspace.paused and draft is not None
             if self.workspace.paused and not resume_access:

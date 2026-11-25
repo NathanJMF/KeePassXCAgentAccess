@@ -11,8 +11,12 @@ from shlex import join
 from urllib.parse import urlsplit, urlencode
 from uuid import UUID
 
-from .protocol import decode, validate_command
+from .protocol import MAX_TOKEN_LIFESPAN_DAYS, decode, validate_command
 from .settings import SettingsError, write_private_json
+
+
+DEFAULT_TOKEN_LIFESPAN_DAYS = 3
+MIN_TOKEN_LIFESPAN_DAYS = 1
 
 
 class AccessMode(str, Enum):
@@ -31,6 +35,7 @@ CREDENTIAL_REVIEW_ACTIONS = {
 TOKEN_AUTO_APPROVAL_OPTIONS = {
     "auto_approve_tokens": "Access Tokens - Create",
     "auto_approve_token_changes": "Access Tokens - Update Permissions",
+    "auto_approve_token_extensions": "Access Tokens - Extend Life Span",
     "auto_approve_token_credential_uses": "Access Tokens - Credential Uses",
     "auto_approve_token_rotations": "Access Tokens - Re-Approve Rotated Passwords",
 }
@@ -515,6 +520,8 @@ class AccessSettings:
     agent_paused: bool = True
     auto_approve_token_credential_uses: bool = False
     auto_approve_token_rotations: bool = False
+    auto_approve_token_extensions: bool = False
+    token_lifespan_days: int = DEFAULT_TOKEN_LIFESPAN_DAYS
     unlock_on_desktop_unlock: bool = False
     resume_on_desktop_unlock: bool = False
 
@@ -554,6 +561,8 @@ class AccessStore:
             agent_paused = data.get("agent_paused", True)
             auto_approve_token_credential_uses = data.get("auto_approve_token_credential_uses", False)
             auto_approve_token_rotations = data.get("auto_approve_token_rotations", False)
+            auto_approve_token_extensions = data.get("auto_approve_token_extensions", False)
+            token_lifespan_days = data.get("token_lifespan_days", DEFAULT_TOKEN_LIFESPAN_DAYS)
             unlock_on_desktop_unlock = data.get("unlock_on_desktop_unlock", False)
             resume_on_desktop_unlock = data.get("resume_on_desktop_unlock", False)
             if (type(retention) is not int or not 1 <= retention <= 365 or type(review_usage) is not bool or type(review_results) is not bool
@@ -561,6 +570,9 @@ class AccessStore:
                     or type(auto_approve_token_changes) is not bool or type(token_auto_approval_acknowledged) is not bool
                     or type(agent_paused) is not bool
                     or type(auto_approve_token_credential_uses) is not bool or type(auto_approve_token_rotations) is not bool
+                    or type(auto_approve_token_extensions) is not bool
+                    or type(token_lifespan_days) is not int
+                    or not MIN_TOKEN_LIFESPAN_DAYS <= token_lifespan_days <= MAX_TOKEN_LIFESPAN_DAYS
                     or type(unlock_on_desktop_unlock) is not bool or type(resume_on_desktop_unlock) is not bool
                     or not isinstance(review_actions, list)
                     or any(not isinstance(action, str) for action in review_actions)
@@ -582,6 +594,7 @@ class AccessStore:
                                   auto_approve_tokens, auto_approve_token_changes, token_auto_approval_acknowledged,
                                   review_results, frozenset(guest_actions), frozenset(scoped_actions),
                                   agent_paused, auto_approve_token_credential_uses, auto_approve_token_rotations,
+                                  auto_approve_token_extensions, token_lifespan_days,
                                   unlock_on_desktop_unlock, resume_on_desktop_unlock)
         except FileNotFoundError:
             return AccessSettings()
@@ -603,6 +616,11 @@ class AccessStore:
             raise ValueError("Choose a retention period between 1 and 365 days.")
         if type(settings.agent_paused) is not bool:
             raise ValueError("Choose whether agent access is paused.")
+        if type(settings.auto_approve_token_extensions) is not bool:
+            raise ValueError("Choose whether token life span extensions may be auto approved.")
+        if (type(settings.token_lifespan_days) is not int
+                or not MIN_TOKEN_LIFESPAN_DAYS <= settings.token_lifespan_days <= MAX_TOKEN_LIFESPAN_DAYS):
+            raise ValueError(f"Choose a token life span between {MIN_TOKEN_LIFESPAN_DAYS} and {MAX_TOKEN_LIFESPAN_DAYS} days.")
         write_private_json(self.path, {
             "mode": settings.mode.value,
             "review_usage": settings.review_usage,
@@ -614,9 +632,11 @@ class AccessStore:
             "agent_paused": settings.agent_paused,
             "auto_approve_tokens": settings.auto_approve_tokens,
             "auto_approve_token_changes": settings.auto_approve_token_changes,
+            "auto_approve_token_extensions": settings.auto_approve_token_extensions,
             "auto_approve_token_credential_uses": settings.auto_approve_token_credential_uses,
             "auto_approve_token_rotations": settings.auto_approve_token_rotations,
             "token_auto_approval_acknowledged": settings.token_auto_approval_acknowledged,
+            "token_lifespan_days": settings.token_lifespan_days,
             "unlock_on_desktop_unlock": settings.unlock_on_desktop_unlock,
             "resume_on_desktop_unlock": settings.resume_on_desktop_unlock,
             "endpoint": settings.endpoint,

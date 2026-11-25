@@ -195,7 +195,7 @@ class EditRequests:
 
     def _active(self, token):
         current = self.grants.records.get(token.id)
-        return current is not None and current.status == "active" and current.generation == token.generation
+        return self.grants.is_active(current) and current.generation == token.generation
 
     def _status(self, record, old, new, result=None):
         with self.activity.connection() as db:
@@ -246,7 +246,7 @@ class EditRequests:
                 "SELECT * FROM edit_requests WHERE status='pending'")]
         for record in rows:
             current = self.grants.records.get(record.token_id)
-            if (current is None or current.generation != record.token_generation or current.status != "active"
+            if (not self.grants.is_active(current) or current.generation != record.token_generation
                     or self._targets_root(record.request)):
                 self._stale(record, current, label="Cancel edit")
 
@@ -403,7 +403,7 @@ class EditRequests:
         with self.workspace.mutex:
             pending = self._pending(record.token_id, record.id)
             token = self.grants.records.get(record.token_id)
-            if token is None or token.status != "active" or token.generation != pending.token_generation:
+            if not self.grants.is_active(token) or token.generation != pending.token_generation:
                 self._stale(pending, token, preview)
                 raise VaultError("The requesting token changed. Ask the agent to submit a fresh request.")
             if self.workspace.paused:

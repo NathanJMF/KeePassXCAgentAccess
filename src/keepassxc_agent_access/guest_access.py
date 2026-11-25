@@ -54,7 +54,7 @@ class GuestAccess:
         registration = self.workspace.registrations.get(grant.vault)
         return (not self.workspace.paused and monotonic() < grant.expires
                 and self.workspace.generation == grant.generation
-                and token is not None and token.status == "active" and token.generation == grant.token_generation
+                and self.broker.grants.is_active(token) and token.generation == grant.token_generation
                 and self.workspace.session(grant.vault) is grant.session and registration is not None
                 and registration.credential_revision(grant.entry) == grant.revision
                 and (grant.trusted_endpoint is None or self.broker.grants.result_certificate_trusted(
@@ -84,8 +84,8 @@ class GuestAccess:
             if self.workspace.paused:
                 raise ListingError("paused")
             token = self.broker.grants.authenticate(credential, uid, allow_workflow=approved_step is not None or not starting)
-            self.broker._charge_request(token.verifier, uid, active=token.status == "active")
-            if token.status != "active":
+            self.broker._charge_request(token.verifier, uid, active=self.broker.grants.is_active(token))
+            if not self.broker.grants.is_active(token):
                 raise ListingError("ineligible")
             job_key = (token.id, receipt)
             self.jobs = {key: job for key, job in self.jobs.items() if self.current(job[0])}

@@ -69,13 +69,30 @@ class AgentCliTests(TestCase):
         extended = {
             **reply,
             "paused": False,
+            "expires_at": 1700000000,
+            "expires_in": 3600,
+            "pending_extension": {"id": "00000000-0000-0000-0000-000000000004", "days": 7},
+            "last_extension": {"id": "00000000-0000-0000-0000-000000000005", "status": "denied"},
             "last_change": {"id": "00000000-0000-0000-0000-000000000003", "status": "denied"},
             "scope": [{**item, "vault_locked": False, "stale": False,
                        "pinned_origins": ["https://api.example.test:443/"]}],
         }
         self.assertEqual(_validate(extended, request), extended)
+        self.assertEqual(_validate({**reply, "pending_extension": None, "last_extension": None}, request),
+                         {**reply, "pending_extension": None, "last_extension": None})
+        self.assertEqual(_validate({"status": "expired"}, {"operation": "access_status"}), {"status": "expired"})
+        self.assertEqual(_validate({"status": "expired"}, {"operation": "request_access"}), {"status": "expired"})
         for bad in (
             {**reply, "paused": "no"},
+            {**reply, "expires_at": "1700000000"},
+            {**reply, "expires_at": True},
+            {**reply, "expires_in": -1},
+            {**reply, "expires_in": False},
+            {**reply, "pending_extension": {"id": "bad", "days": 3}},
+            {**reply, "pending_extension": {"id": "00000000-0000-0000-0000-000000000004", "days": 0}},
+            {**reply, "pending_extension": {"id": "00000000-0000-0000-0000-000000000004", "days": 366}},
+            {**reply, "pending_extension": {"id": "00000000-0000-0000-0000-000000000004", "days": True}},
+            {**reply, "last_extension": {"id": "00000000-0000-0000-0000-000000000005", "status": "active"}},
             {**reply, "last_change": {"id": "00000000-0000-0000-0000-000000000003", "status": "pending"}},
             {**reply, "scope": [{**item, "vault_locked": "yes"}]},
             {**reply, "scope": [{**item, "pinned_origins": ["http://api.example.test/"]}]},
@@ -83,6 +100,66 @@ class AgentCliTests(TestCase):
         ):
             with self.subTest(bad=bad), self.assertRaises(ListingError):
                 _validate(bad, request)
+
+    def test_extend_access_cli_and_validation(self):
+        ext_id = "00000000-0000-0000-0000-000000000009"
+        for valid in (
+            {"status": "pending", "expires_at": 1700000000, "expires_in": 100},
+            {"status": "active", "expires_at": 1700500000, "expires_in": 500100},
+            {"status": "denied", "expires_at": 1700000000, "expires_in": 0},
+        ):
+            self.assertEqual(_validate(valid, {"operation": "extend_access"}), valid)
+        for bad in (
+            {"status": "expired", "expires_at": 1700000000, "expires_in": 0},
+            {"status": "active", "expires_at": 1700000000},
+            {"status": "active", "expires_at": 1700000000, "expires_in": 0, "extra": 1},
+            {"status": "active", "expires_at": True, "expires_in": 0},
+            {"status": "active", "expires_at": 1700000000, "expires_in": -1},
+        ):
+            with self.subTest(bad=bad), self.assertRaises(ListingError):
+                _validate(bad, {"operation": "extend_access"})
+
+        with TemporaryDirectory(dir="/tmp") as directory, socket.socket(socket.AF_UNIX) as listener:
+            root = Path(directory)
+            endpoint = root / "keeper.sock"
+            token_file = root / "token"
+            token = credential(token_file, create=True)
+            listener.bind(str(endpoint))
+            listener.listen()
+            listener.settimeout(7)
+            observed = []
+            replies = [
+                {"status": "pending", "expires_at": 1700000000, "expires_in": 1000},
+                {"status": "active", "expires_at": 1700604800, "expires_in": 604800},
+            ]
+
+            def serve():
+                for reply in replies:
+                    conn, _ = listener.accept()
+                    with conn, conn.makefile("rb") as stream:
+                        observed.append(decode(stream.readline()))
+                        conn.sendall(encode(reply))
+
+            server = Thread(target=serve, daemon=True)
+            server.start()
+            env = {"PATH": "/usr/bin:/bin", "KEEPASSXC_AGENT_SOCKET": str(endpoint),
+                   "KEEPASSXC_AGENT_TOKEN_FILE": str(token_file)}
+            first = subprocess.run([CLI, "access", "extend", "--json"], env=env,
+                                   capture_output=True, check=False, timeout=7)
+            second = subprocess.run([CLI, "access", "extend", "--days", "7", "--id", ext_id, "--json"], env=env,
+                                    capture_output=True, check=False, timeout=7)
+            server.join(7)
+            self.assertEqual(first.returncode, 0)
+            self.assertEqual(second.returncode, 0)
+            self.assertEqual(decode(first.stdout), replies[0])
+            self.assertEqual(decode(second.stdout), replies[1])
+            self.assertEqual(observed[0], {"version": 1, "operation": "extend_access", "credential": token})
+            self.assertEqual(observed[1], {"version": 1, "operation": "extend_access", "days": 7,
+                                           "extension_id": ext_id, "credential": token})
+            for invalid_days in ("0", "366"):
+                bad_proc = subprocess.run([CLI, "access", "extend", "--days", invalid_days, "--json"], env=env,
+                                          capture_output=True, check=False, timeout=7)
+                self.assertEqual(bad_proc.returncode, 2)
 
     def test_result_usage_allows_headers_on_basic_bearer_and_scalar_on_get(self):
         base = {
