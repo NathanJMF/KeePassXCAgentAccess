@@ -101,16 +101,41 @@ class UpdateTests(unittest.TestCase):
         target = self.commit("Clean update")
         (self.checkout / "untracked.tmp").write_text("harmless")
         checked = check_for_update(self.installation)
+        runner_needed = True
         with patch("keepassxc_agent_access.updates.external_broker_active", return_value=False), \
              patch.dict(self.state, desktop_unit="fixture"), \
              patch("keepassxc_agent_access.updates.systemctl") as manager, \
-             patch("keepassxc_agent_access.updates.present_application") as reopen:
-            self.installation.connection_update_needed = lambda: True
+             patch("keepassxc_agent_access.updates.present_application") as reopen, \
+             patch("keepassxc_agent_access.updates.administer_connection") as admin:
+            def finish_admin(action, broker=None, *, source=None):
+                nonlocal runner_needed
+                self.assertEqual((action, source), ("install", self.installation.app))
+                runner_needed = False
+
+            admin.side_effect = finish_admin
+            self.installation.connection_update_needed = lambda: runner_needed
             message = apply_update(self.installation, checked)
-            self.assertIn("Connect an Agent", message)
+            self.assertEqual(message, "Keeper and the local runner were updated.")
+            admin.assert_called_once()
             manager.assert_called_once_with("restart", DESKTOP_SERVICE)
             reopen.assert_called_once_with()
         self.assertEqual((self.checkout / "install-args").read_text().splitlines(), ["--no-launch", "--app-only"])
+
+    def test_cancelled_runner_update_keeps_keeper_updated_and_prompts_updates_retry(self):
+        self.commit("Runner retry")
+        checked = check_for_update(self.installation)
+        with patch("keepassxc_agent_access.updates.external_broker_active", return_value=False), \
+             patch.dict(self.state, desktop_unit="fixture"), \
+             patch("keepassxc_agent_access.updates.systemctl") as manager, \
+             patch("keepassxc_agent_access.updates.present_application") as reopen, \
+             patch("keepassxc_agent_access.updates.administer_connection",
+                   side_effect=ValueError("Keeper's administrator setup did not complete.")):
+            self.installation.connection_update_needed = lambda: True
+            message = apply_update(self.installation, checked)
+        self.assertIn("Settings → Updates", message)
+        self.assertIn("local runner", message)
+        manager.assert_called_once_with("restart", DESKTOP_SERVICE)
+        reopen.assert_called_once_with()
 
     def test_git_and_detached_preserve_user_config_and_session_id(self):
         with patch("keepassxc_agent_access.updates.subprocess.run") as run:

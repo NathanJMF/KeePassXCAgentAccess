@@ -12,7 +12,8 @@ from urllib.parse import urlsplit
 from gi.repository import GLib
 
 from .installation import (
-    DESKTOP_SERVICE, LEGACY_SERVICE, Installation, external_broker_active, present_application, systemctl,
+    DESKTOP_SERVICE, LEGACY_SERVICE, Installation, administer_connection, external_broker_active,
+    present_application, systemctl,
 )
 from .isolated_runner import owned
 from .settings import SettingsError, write_private_json
@@ -150,6 +151,17 @@ def apply_update(installation, checked):
         raise UpdateError(f"Installation could not finish. Run {command} from a trusted Keeper checkout "
                           "in a terminal to install any missing packages and see details.") from None
 
+    runner_updated = False
+    runner_failed = False
+    check_connection = getattr(installation, "connection_update_needed", None)
+    if callable(check_connection) and check_connection():
+        try:
+            administer_connection("install", source=installation.app)
+            runner_updated = not check_connection()
+            runner_failed = not runner_updated
+        except (OSError, ValueError):
+            runner_failed = True
+
     state = installation.installed()
     if external_broker_active():
         service = systemctl("show", "--property=ExecStart", "--value", LEGACY_SERVICE)
@@ -164,9 +176,10 @@ def apply_update(installation, checked):
         present_application()
     else:
         detached([str(installation.app / "run-tray"), "--show-window"])
-    check_connection = getattr(installation, "connection_update_needed", None)
-    if callable(check_connection) and check_connection():
-        return "Keeper was updated. Open Settings → Connect an Agent to update the local runner."
+    if runner_failed:
+        return "Keeper was updated, but the local runner was not updated. Open Settings → Updates to finish updating the local runner."
+    if runner_updated:
+        return "Keeper and the local runner were updated."
     return "Keeper was updated."
 
 

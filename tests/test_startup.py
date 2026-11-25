@@ -340,13 +340,30 @@ raise SystemExit(app.run([]))
             self.assertIn("keeper-connect", snippet_text)
             self.assertIn("mcpServers", snippet_text)
 
-            update_button = next(
-                widget
+            buttons = [
+                widget.get_label()
                 for card in cards
                 for widget in card.get_children()
-                if isinstance(widget, Gtk.Button) and widget.get_label() == "Update Local Runner…"
+                if isinstance(widget, Gtk.Button)
+            ]
+            self.assertNotIn("Update Local Runner…", buttons)
+
+    def test_updates_settings_page_runs_pending_local_runner_update(self):
+        from gi.repository import GLib
+        with TemporaryDirectory() as directory:
+            app_dir = Path(directory) / "app"
+            app_dir.mkdir()
+            app = WorkspaceApplication(directory=Path(directory), keyring=Mock())
+            config = BrokerConfig(Path(directory) / "broker.sock", os.geteuid() + 1)
+            app.broker = Mock(config=config, enabled=True)
+            app.desktop = Mock(locked=False)
+            app.busy = False
+            needed = True
+            installation = Mock(
+                base=Path(directory),
+                app=app_dir,
+                connection_update_needed=lambda: needed,
             )
-            idle_callbacks = []
 
             class SyncThread:
                 def __init__(self, target, daemon=True):
@@ -355,16 +372,40 @@ raise SystemExit(app.run([]))
                 def start(self):
                     self.target()
 
-            with patch("keepassxc_agent_access.workspace_app.administer_connection") as admin, \
+            idle_callbacks = []
+            card = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+            host = Gtk.Box()
+            host.add(card)
+            with patch("keepassxc_agent_access.workspace_app.Installation", return_value=installation):
+                app._updates_settings_page(card)
+
+            labels = [w for w in card.get_children() if isinstance(w, Gtk.Label)]
+            self.assertTrue(any(label.get_text() == "Local runner update available." for label in labels))
+            buttons = [
+                widget
+                for box in card.get_children()
+                if isinstance(box, Gtk.Box)
+                for widget in box.get_children()
+                if isinstance(widget, Gtk.Button)
+            ]
+            apply_button = next(btn for btn in buttons if btn.get_label() == "Apply Update")
+            self.assertTrue(apply_button.get_sensitive())
+
+            def finish_admin(action, broker=None, *, source=None):
+                nonlocal needed
+                self.assertEqual((action, broker, source), ("install", config, app_dir))
+                needed = False
+
+            with patch("keepassxc_agent_access.workspace_app.administer_connection", side_effect=finish_admin) as admin, \
                  patch("keepassxc_agent_access.workspace_app.Thread", SyncThread), \
-                 patch("keepassxc_agent_access.workspace_app.Installation", return_value=installation), \
                  patch.object(GLib, "idle_add", side_effect=lambda fn, *args: idle_callbacks.append((fn, args))):
-                update_button.clicked()
-                admin.assert_called_once_with("install", config)
+                apply_button.clicked()
+                admin.assert_called_once()
                 self.assertEqual(len(idle_callbacks), 1)
                 fn, args = idle_callbacks[0]
                 self.assertEqual(fn(*args), GLib.SOURCE_REMOVE)
-            self.assertFalse(update_button.get_sensitive())
+            self.assertFalse(apply_button.get_sensitive())
+            self.assertTrue(any(label.get_text() == "Local runner updated." for label in labels))
 
     def test_connect_agent_page_install_button_switches_to_copy_and_shows_codex_toml(self):
         with TemporaryDirectory() as directory:

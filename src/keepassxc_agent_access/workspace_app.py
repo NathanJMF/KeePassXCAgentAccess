@@ -1509,52 +1509,6 @@ class WorkspaceApplication(Gtk.Application):
                 codex_mcp_snippet(command),
                 "Copy TOML",
             )
-        if Installation().connection_update_needed():
-            card = self._settings_card(page)
-            description = styled(_label(
-                "A newer local runner is available. Update the system runner installation to match Keeper."
-            ), "keeper-settings-description")
-            card.pack_start(description, False, False, 0)
-            status = styled(_label(""), "keeper-settings-description")
-            status.set_no_show_all(True)
-
-            def run_update(*_):
-                update_button.set_sensitive(False)
-                status.set_text("Updating local runner…")
-                status.show()
-
-                def work():
-                    try:
-                        administer_connection("install", self.broker.config)
-                        error = None
-                    except (*OWNER_ERRORS, ValueError) as failure:
-                        error = str(failure) or "Could not update the local runner."
-                    GLib.idle_add(finish, error)
-
-                def finish(error):
-                    if card.get_parent() is not None:
-                        if error:
-                            status.set_text(error)
-                            status.show()
-                            update_button.set_sensitive(True)
-                        elif Installation().connection_update_needed():
-                            status.set_text("Local runner updated, though an update is still reported.")
-                            status.show()
-                            update_button.set_sensitive(True)
-                        else:
-                            description.set_text("The local runner is up to date.")
-                            status.set_text("Local runner updated.")
-                            status.show()
-                            update_button.set_sensitive(False)
-                    return GLib.SOURCE_REMOVE
-
-                Thread(target=work, daemon=True).start()
-
-            update_button = styled(Gtk.Button(label="Update Local Runner…", halign=Gtk.Align.START),
-                                   "keeper-settings-save")
-            update_button.connect("clicked", run_update)
-            card.pack_start(update_button, False, False, 0)
-            card.pack_start(status, False, False, 0)
         if self.workspace.paused:
             card = self._settings_card(page)
             card.pack_start(styled(_label("Agent Access is paused. Resume it in Keeper when you are ready."),
@@ -1638,9 +1592,15 @@ class WorkspaceApplication(Gtk.Application):
 
     def _updates_settings_page(self, card):
         installation = Installation()
+        runner_update_needed = lambda: bool(installation.connection_update_needed())
+        runner_needed = runner_update_needed()
         _, previous_result = update_result(installation)
-        status = styled(_label(previous_result or "Check the configured Git upstream for a newer Keeper version."),
-                        "keeper-settings-description")
+        status = styled(_label(
+            previous_result or (
+                "Local runner update available." if runner_needed
+                else "Check the configured Git upstream for a newer Keeper version."
+            )
+        ), "keeper-settings-description")
         card.pack_start(status, False, False, 0)
         controls = Gtk.Box(spacing=8)
         card.pack_start(controls, False, False, 0)
@@ -1665,10 +1625,17 @@ class WorkspaceApplication(Gtk.Application):
             nonlocal candidate
             candidate = result
             check.set_sensitive(True)
-            available = bool(result and result.target != result.installed)
-            apply.set_sensitive(available)
-            status.set_text(error or (f"Update available · {result.target[:12]}" if available
-                                      else "Keeper is up to date."))
+            git_available = bool(result and result.target != result.installed)
+            runner_available = runner_update_needed()
+            apply.set_sensitive(git_available or runner_available)
+            if git_available and runner_available:
+                status.set_text(f"Update available · {result.target[:12]} (includes local runner)")
+            elif git_available:
+                status.set_text(f"Update available · {result.target[:12]}")
+            elif runner_available:
+                status.set_text(f"{error} Local runner update available." if error else "Local runner update available.")
+            else:
+                status.set_text(error or "Keeper is up to date.")
 
         def check_updates(*_):
             check.set_sensitive(False)
@@ -1677,41 +1644,77 @@ class WorkspaceApplication(Gtk.Application):
             run(lambda: check_for_update(installation), checked)
 
         def install_update(*_):
-            if candidate is None or self.desktop.locked:
+            if self.desktop.locked:
                 return
             if self.busy:
                 status.set_text("Wait for Keeper to finish its current task, then try again.")
                 return
+            git_available = bool(candidate is not None and candidate.target != candidate.installed)
+            runner_available = runner_update_needed()
+            if not git_available and not runner_available:
+                return
+            if git_available:
+                check.set_sensitive(False)
+                apply.set_sensitive(False)
+                status.set_text("Applying update. Keeper will reopen when ready.")
+                attempt = str(uuid4())
+                deadline = monotonic() + 325
+
+                def poll():
+                    if card.get_parent() is None:
+                        return GLib.SOURCE_REMOVE
+                    identifier, message = update_result(installation)
+                    if identifier != attempt and monotonic() < deadline:
+                        return GLib.SOURCE_CONTINUE
+                    status.set_text(message if identifier == attempt else "Update status is unavailable. Check again.")
+                    check.set_sensitive(True)
+                    apply.set_sensitive(runner_update_needed())
+                    return GLib.SOURCE_REMOVE
+
+                def started(_, error):
+                    if error:
+                        status.set_text(error)
+                        check.set_sensitive(True)
+                        apply.set_sensitive(True)
+                    else:
+                        GLib.timeout_add_seconds(1, poll)
+
+                run(lambda: start_update(candidate, attempt), started)
+                return
+
             check.set_sensitive(False)
             apply.set_sensitive(False)
-            status.set_text("Applying update. Keeper will reopen when ready.")
-            attempt = str(uuid4())
-            deadline = monotonic() + 325
+            status.set_text("Updating local runner…")
 
-            def poll():
-                if card.get_parent() is None:
-                    return GLib.SOURCE_REMOVE
-                identifier, message = update_result(installation)
-                if identifier != attempt and monotonic() < deadline:
-                    return GLib.SOURCE_CONTINUE
-                status.set_text(message if identifier == attempt else "Update status is unavailable. Check again.")
-                check.set_sensitive(True)
+            def work():
+                try:
+                    administer_connection("install", self.broker.config if self.broker else None,
+                                          source=installation.app)
+                    error = None
+                except (*OWNER_ERRORS, ValueError) as failure:
+                    error = str(failure) or "Could not update the local runner."
+                GLib.idle_add(finish_runner, error)
+
+            def finish_runner(error):
+                if card.get_parent() is not None:
+                    check.set_sensitive(True)
+                    if error:
+                        status.set_text(error)
+                        apply.set_sensitive(True)
+                    elif runner_update_needed():
+                        status.set_text("Local runner updated, though an update is still reported.")
+                        apply.set_sensitive(True)
+                    else:
+                        status.set_text("Local runner updated.")
+                        apply.set_sensitive(False)
                 return GLib.SOURCE_REMOVE
 
-            def started(_, error):
-                if error:
-                    status.set_text(error)
-                    check.set_sensitive(True)
-                    apply.set_sensitive(True)
-                else:
-                    GLib.timeout_add_seconds(1, poll)
-
-            run(lambda: start_update(candidate, attempt), started)
+            Thread(target=work, daemon=True).start()
 
         check = Gtk.Button(label="Check for Updates")
         check.connect("clicked", check_updates)
         controls.pack_start(check, False, False, 0)
-        apply = styled(Gtk.Button(label="Apply Update", sensitive=False), "keeper-settings-save")
+        apply = styled(Gtk.Button(label="Apply Update", sensitive=runner_needed), "keeper-settings-save")
         apply.connect("clicked", install_update)
         controls.pack_start(apply, False, False, 0)
 

@@ -192,15 +192,16 @@ def stop_application():
         sleep(.1)
 
 
-def administer_connection(action, broker=None):
+def administer_connection(action, broker=None, *, source=None):
     owner = os.getuid()
     command = ["/usr/bin/pkexec", "/usr/bin/python3", "-I"]
     payload = None
     if action == "install":
         # Read and pin the release before authentication. The administrator process
         # never imports Python or opens payload files from the desktop checkout.
-        helper = regular_file(CHECKOUT / "src/keepassxc_agent_access/agent_setup.py")
-        files = {name: (helper if name == "agent-setup" else regular_file(CHECKOUT / name)) for name in RUNTIME}
+        root = source or CHECKOUT
+        helper = regular_file(root / "src/keepassxc_agent_access/agent_setup.py")
+        files = {name: (helper if name == "agent-setup" else regular_file(root / name)) for name in RUNTIME}
         if any(data is None for data in files.values()):
             raise ValueError("Keeper's runner source is incomplete.")
         payload = json.dumps({name: b64encode(data).decode("ascii") for name, data in files.items()}).encode()
