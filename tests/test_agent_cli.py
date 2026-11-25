@@ -407,3 +407,50 @@ class EditCliTests(TestCase):
         server.join(8)
         self.assertEqual(process.returncode, 1)
         self.assertEqual(process.stdout, b"")
+
+
+class SshCliTests(TestCase):
+    def test_ssh_exec_stdin_and_cli_command_and_sftp_subcommands(self):
+        from io import BytesIO
+        from types import SimpleNamespace
+        from unittest.mock import patch
+        from uuid import uuid4
+        from keepassxc_agent_access.agent_cli import main as cli_main
+
+        vault, entry = str(uuid4()), str(uuid4())
+        origin = "ssh://host.example.test:22"
+        seen = []
+
+        def fake_request(_endpoint, payload, *, input_data=None, deadline=None):
+            seen.append((payload, input_data, deadline))
+            if payload["operation"] == "ssh_exec":
+                return {"outcome": "succeeded", "exit_code": 0, "stdout": "ok\n", "stderr": ""}
+            if payload["operation"] == "ssh_upload":
+                return {"outcome": "succeeded", "remote_path": payload["remote_path"], "bytes_written": len(input_data or b"")}
+            return {"outcome": "succeeded", "remote_path": payload["remote_path"], "encoding": "text", "size": 2, "content": "hi"}
+
+        with patch("keepassxc_agent_access.agent_cli.request", side_effect=fake_request), \
+                patch("keepassxc_agent_access.agent_cli.credential", return_value="11" * 32), \
+                patch.dict(os.environ, {"KEEPASSXC_AGENT_SOCKET": "/tmp/fake.sock"}):
+            with patch("sys.stdin", SimpleNamespace(buffer=BytesIO(b'{"command":"uname -a"}\n'))), \
+                    patch("sys.stdout", SimpleNamespace(buffer=BytesIO())):
+                rc1 = cli_main(["ssh", "exec", "--vault", vault, "--entry", entry, "--origin", origin, "--timeout", "15", "--json"])
+            with patch("sys.stdout", SimpleNamespace(buffer=BytesIO())):
+                rc2 = cli_main(["ssh", "exec", "--vault", vault, "--entry", entry, "--origin", origin,
+                                "--command", "id && hostname", "--json"])
+            with patch("sys.stdin", SimpleNamespace(buffer=BytesIO(b"hello"))), \
+                    patch("sys.stdout", SimpleNamespace(buffer=BytesIO())):
+                rc3 = cli_main(["ssh", "upload", "--vault", vault, "--entry", entry, "--origin", origin,
+                                "--remote-path", "/tmp/test.txt", "--input", "--json"])
+            with patch("sys.stdout", SimpleNamespace(buffer=BytesIO())):
+                rc4 = cli_main(["ssh", "download", "--vault", vault, "--entry", entry, "--origin", origin,
+                                "--remote-path", "/tmp/test.txt", "--json"])
+
+        self.assertEqual((rc1, rc2, rc3, rc4), (0, 0, 0, 0))
+        self.assertEqual(seen[0][0]["operation"], "ssh_exec")
+        self.assertEqual(seen[0][0]["command"], "uname -a")
+        self.assertIsNotNone(seen[0][2])
+        self.assertEqual(seen[1][0]["command"], "id && hostname")
+        self.assertEqual(seen[2][0]["operation"], "ssh_upload")
+        self.assertEqual(seen[2][1], b"hello")
+        self.assertEqual(seen[3][0]["operation"], "ssh_download")

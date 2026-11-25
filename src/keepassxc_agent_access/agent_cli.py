@@ -1023,7 +1023,7 @@ def main(argv=None):
                         raise ValueError
                 except (ValueError, RecursionError):
                     parser.error("Provide a result field and one JSON scalar.")
-    if hasattr(options, "command"):
+    if options.operation == "use_password" and hasattr(options, "command"):
         try:
             args = options.command[1:] if options.command[:1] == ["--"] else options.command
             options.command = validate_command(args)
@@ -1040,7 +1040,7 @@ def main(argv=None):
                 parser.error("--certificate-sha256 applies only to usage descriptors.")
         if options.action:
             payload["action"] = options.action
-        if hasattr(options, "command"):
+        if options.operation == "use_password" and hasattr(options, "command"):
             if options.action:
                 if options.origin or options.prompt_variable or options.environment_json or options.prompt_contains:
                     parser.error("Use either a legacy action ID or a supplied network destination.")
@@ -1273,6 +1273,9 @@ def main(argv=None):
         endpoint = os.environ.get("KEEPASSXC_AGENT_SOCKET")
         if timeout is not None and options.operation not in SSH_OPERATIONS:
             result = wait_status(endpoint, payload, timeout, field=getattr(options, "until", None), expected=expected)
+        elif options.operation in SSH_OPERATIONS:
+            result = request(endpoint, payload, input_data=input_data,
+                             deadline=monotonic() + CLIENT_TIMEOUT + (timeout or 30))
         else:
             result = request(endpoint, payload, input_data=input_data)
         sys.stdout.buffer.write(b64decode(result["png_base64"]) if getattr(options, "png", False) else encode(result))
