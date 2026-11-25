@@ -5,7 +5,7 @@ import re
 from time import monotonic
 
 
-REQUEST_LIMIT = 32 * 1024
+REQUEST_LIMIT = 131072
 UPLOAD_LIMIT = 8 * 1024**2
 RESPONSE_LIMIT = 1024 * 1024
 CONSOLE_OPERATIONS = frozenset({"console_open", "console_view", "console_input", "console_close"})

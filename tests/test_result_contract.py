@@ -102,7 +102,7 @@ class ResultContractTests(TestCase):
             {**response, "headers": {"Set-Cookie": "private"}},
             {**response, "data": [{"node": "worker-a", "status": "running", "capacity": {"token": "private"}}]},
             {**response, "data": [{"node": "worker-a", "status": "running", "capacity": 8, "ticket": "private"}]},
-            {**response, "data": [{"node": "x" * 513, "status": "running", "capacity": 8}]},
+            {**response, "data": [{"node": "x" * 4097, "status": "running", "capacity": 8}]},
             {**response, "outcome": "failed"},
         ]
         for reply in malformed:

@@ -366,6 +366,8 @@ class ScopedBroker:
                     # their reviewed action revision; dynamic uses need scope trust.
                     certificate_pin = decode(binding.action.result_request.encode("utf-8")).get("certificate_sha256")
                     write_once = usage.get("approve_write_once") is True
+                elif binding.action.kind in (ActionType.BASIC, ActionType.BEARER, ActionType.TEMPLATE):
+                    certificate_pin = binding.action.certificate_sha256 or None
 
                 def scope_matches(active_token):
                     matched = tuple(s for s in active_token.scope
@@ -401,6 +403,10 @@ class ScopedBroker:
                             token, chosen, entry, credential_revision, origin, certificate_pin)
                         certificate_committed = certificate_trusted
                     review_policy = review_usage or self.workspace.requires_review("use_https")
+                elif certificate_pin:
+                    certificate_expected, certificate_trusted, auto_pin_initial = self.grants.result_certificate_auto_pin(
+                        token, chosen, entry, credential_revision, origin, certificate_pin)
+                    certificate_committed = certificate_trusted
                 standing_write = (write_once and write_required and any(
                     "https" in s.uses and s.use_revision == credential_revision for s in matching))
                 if standing_write:
@@ -424,7 +430,7 @@ class ScopedBroker:
                         for s in token.scope)
                 )
             remember_certificate = bool(
-                approved_step is None and certificate_pin and not certificate_trusted
+                approved_step is None and certificate_pin and not certificate_trusted and bool(certificate_expected)
                 and (not write_once or (auto_pin_initial and (automatic_write or automatic_provision))))
             review_policy = review_policy or write_once and not (automatic_write or automatic_provision)
             review_usage = review_policy or bool(certificate_pin and not certificate_trusted and not auto_pin_initial)
@@ -445,10 +451,10 @@ class ScopedBroker:
                     if provision:
                         scope_summary += f" · Account entry {provision['entry']}"
                     scope_summary += " · Fields: " + ", ".join(result_fields(workflow["result"]))
-                    if certificate_pin:
-                        previous_pins = sorted({pin for pin in certificate_expected if pin})
-                        scope_summary += (" · Certificate SHA-256: " + certificate_pin
-                                          + " · Previously trusted: " + (", ".join(previous_pins) or "None"))
+                if certificate_pin:
+                    previous_pins = sorted({pin for pin in certificate_expected if pin})
+                    scope_summary += (" · Certificate SHA-256: " + certificate_pin
+                                      + " · Previously trusted: " + (", ".join(previous_pins) or "None"))
             elif permitted and binding.action.request_summary:
                 scope_summary = binding.action.request_summary
             if input_info is not None:
@@ -562,7 +568,7 @@ class ScopedBroker:
                         usage_origin(binding.action.url), certificate_pin)
                     certificate_committed = certificate_trusted
                     review_usage = not certificate_trusted and not auto_pin
-                    remember_certificate = not certificate_trusted and (not write_once or auto_pin)
+                    remember_certificate = not certificate_trusted and bool(certificate_expected) and (not write_once or auto_pin)
                     if review_usage or remember_certificate:
                         key = (token.id, token.generation, chosen, entry, credential_revision,
                                usage_origin(binding.action.url), certificate_pin)
@@ -604,11 +610,12 @@ class ScopedBroker:
                             scope += ("Requested operation · " + encode(usage).decode("ascii").strip(),)
                         if input_info is not None:
                             scope += (artifact_summary,)
-                        if binding.action.kind == ActionType.RESULTS:
+                        if certificate_pin and not certificate_trusted:
                             if remember_certificate:
                                 scope += ("Verify this certificate fingerprint. Approving also trusts this certificate for this token, entry and destination. Future requests follow your Auto Approve settings. A changed certificate requires review again.",)
-                            elif write_once and certificate_pin and not certificate_trusted:
-                                scope += ("Verify this certificate fingerprint before approving this write. Trust applies only to this operation.",)
+                            else:
+                                scope += ("Verify this certificate fingerprint before approving this operation. Trust applies only to this operation.",)
+                        if binding.action.kind == ActionType.RESULTS:
                             scope += ("Release only the selected fields from this approved endpoint. Login responses, passwords and session tickets stay private.",
                                       "Trust this endpoint to supply these fields. Filters cannot guarantee secrecy if a service deliberately encodes credentials in its results.")
                         if binding.action.opaque:

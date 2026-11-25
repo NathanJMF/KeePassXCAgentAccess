@@ -2,30 +2,124 @@
 
 from base64 import b64encode
 from contextlib import contextmanager
+from hashlib import sha256
 from http.client import HTTPException, HTTPSConnection
 import json
-from urllib.parse import urlencode
 import re
+import ssl
+from urllib.parse import urlencode
+import zlib
 
 from .access_settings import ActionType, Destination, HTTPS_WRITE_METHODS, credential_headers, request_query
+from .protocol import sanitize_error_detail
 
 
-SOCKET_TIMEOUT = 4
-# RFC 6750 section 2.1 permits these characters in a Bearer authorization token.
-BEARER_TOKEN = re.compile(r"[A-Za-z0-9._~+/-]+=*")
+SOCKET_TIMEOUT = 15
+BEARER_TOKEN = re.compile(r"[!-~]{1,8192}")
+ERROR_BODY_LIMIT = 4096
+ERROR_DETAIL_LIMIT = 512
+_CERT_SHA256 = re.compile(r"[0-9a-f]{64}")
+_ANSI_ESCAPE = re.compile(r"\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07\x1b]*(?:\x07|\x1b\\)|[@-Z\\-_])")
 
 
 def failure():
     return {"outcome": "failed"}
 
 
+def scrub_text(text, secrets=(), *, limit=ERROR_DETAIL_LIMIT):
+    """Strip ANSI/control characters, redact secret strings, and bound length."""
+    if not isinstance(text, str) or not text:
+        return ""
+    cleaned = _ANSI_ESCAPE.sub("", text)
+    ordered = sorted({s for s in secrets if isinstance(s, str) and s}, key=len, reverse=True)
+    for secret in ordered:
+        cleaned = cleaned.replace(secret, "[REDACTED]")
+    cleaned = " ".join("".join(char if char.isprintable() else " " for char in cleaned).split())
+    for secret in ordered:
+        normalized = " ".join("".join(char if char.isprintable() else " " for char in secret).split())
+        if normalized:
+            cleaned = cleaned.replace(normalized, "[REDACTED]")
+    return cleaned[:limit]
+
+
+def _decompress_error(raw, encoding):
+    if encoding in ("", "identity"):
+        return bytes(raw)
+    if encoding == "gzip":
+        wbits_options = (16 + zlib.MAX_WBITS,)
+    elif encoding == "deflate":
+        wbits_options = (zlib.MAX_WBITS, -zlib.MAX_WBITS)
+    else:
+        return b""
+    for wbits in wbits_options:
+        try:
+            decompressor = zlib.decompressobj(wbits)
+            out = decompressor.decompress(bytes(raw), ERROR_BODY_LIMIT)
+            if len(out) < ERROR_BODY_LIMIT:
+                out += decompressor.flush(ERROR_BODY_LIMIT - len(out))
+            return out
+        except zlib.error:
+            continue
+    return b""
+
+
+def _read_error_body(response, secrets):
+    try:
+        raw = response.read(ERROR_BODY_LIMIT)
+        if not isinstance(raw, (bytes, bytearray)) or not raw:
+            return ""
+        headers = getattr(response, "headers", None)
+        raw_encoding = headers.get("Content-Encoding") if headers is not None and hasattr(headers, "get") else ""
+        encoding = raw_encoding.strip().lower() if isinstance(raw_encoding, str) else ""
+        data = _decompress_error(raw, encoding)
+        if not data:
+            return ""
+        return scrub_text(data.decode("utf-8", errors="ignore"), secrets, limit=ERROR_DETAIL_LIMIT)
+    except (OSError, HTTPException, ValueError):
+        return ""
+
+
+def _send_request(connection, method, path, body, request_headers, secrets):
+    write = method in HTTPS_WRITE_METHODS
+    detail = ""
+    try:
+        connection.request(method, path, body=body, headers=request_headers)
+        with connection.getresponse() as response:
+            status = response.status
+            if (200 if write else 100) <= status <= 599 and not 200 <= status < 300:
+                detail = _read_error_body(response, secrets)
+    except (OSError, HTTPException, ValueError, TypeError) as error:
+        status = None
+        detail = sanitize_error_detail(scrub_text(str(error) or type(error).__name__, secrets, limit=240)) or ""
+    if status is not None and (200 if write else 100) <= status <= 599:
+        result = {"outcome": "succeeded" if 200 <= status < 300 else "failed", "http_status": status}
+        if result["outcome"] == "failed" and detail:
+            result["error_detail"] = detail
+        return result
+    result = {"outcome": "uncertain"} if write else failure()
+    if detail:
+        result["error_detail"] = detail
+    return result
+
+
 @contextmanager
-def prepare_https(url, *, query=()):
+def prepare_https(url, *, query=(), certificate_sha256: str | None = None):
     destination = Destination.parse(url)
-    connection = HTTPSConnection(destination.host, destination.port, timeout=SOCKET_TIMEOUT)
+    context = None
+    if certificate_sha256 is not None:
+        if not isinstance(certificate_sha256, str) or not _CERT_SHA256.fullmatch(certificate_sha256):
+            raise ValueError("Use a lowercase SHA-256 certificate fingerprint.")
+        context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+        context.check_hostname = False
+        context.verify_mode = ssl.CERT_NONE
+    connection = HTTPSConnection(destination.host, destination.port, context=context, timeout=SOCKET_TIMEOUT)
     try:
         connection.connect()
         connection.auto_open = False
+        if certificate_sha256 is not None:
+            peer = connection.sock.getpeercert(binary_form=True) if connection.sock is not None else None
+            if not peer or sha256(peer).hexdigest() != certificate_sha256:
+                raise ValueError("The approved certificate changed.")
         yield connection, destination.path + ("?" + urlencode(request_query(query)) if query else "")
     finally:
         connection.close()
@@ -35,16 +129,19 @@ def authenticate(connection, path, entry, kind=ActionType.BASIC, *, method="GET"
     password = entry.password
     if kind == ActionType.TEMPLATE:
         return authenticate_template(connection, path, entry, method=method, request_json=request_json, headers=headers)
+    secrets = []
     if kind == ActionType.BEARER:
         if not isinstance(password, str) or not BEARER_TOKEN.fullmatch(password):
             return failure()
         authorization = f"Bearer {password}"
+        secrets.extend((password, authorization))
     elif kind == ActionType.BASIC:
         username = entry.username or ""
         if not password or ":" in username or any(ord(c) < 32 or ord(c) == 127 for c in username + password):
             return failure()
         credential = b64encode(f"{username}:{password}".encode("utf-8")).decode("ascii")
         authorization = f"Basic {credential}"
+        secrets.extend((password, f"{username}:{password}" if username else "", credential, authorization))
     else:
         return failure()
 
@@ -58,16 +155,7 @@ def authenticate(connection, path, entry, kind=ActionType.BASIC, *, method="GET"
         request_headers = {key: value for key, value in request_headers.items() if key.lower() != "content-type"}
         request_headers["Content-Type"] = "application/json"
 
-    try:
-        connection.request(method, path, body=body, headers=request_headers)
-        with connection.getresponse() as response:
-            status = response.status
-    except (OSError, HTTPException, ValueError):
-        status = None
-    write = method in HTTPS_WRITE_METHODS
-    if status is not None and (200 if write else 100) <= status <= 599:
-        return {"outcome": "succeeded" if 200 <= status < 300 else "failed", "http_status": status}
-    return {"outcome": "uncertain"} if write else failure()
+    return _send_request(connection, method, path, body, request_headers, secrets)
 
 
 def authenticate_template(connection, path, entry, *, method="GET", request_json="", headers=()):
@@ -86,8 +174,15 @@ def authenticate_template(connection, path, entry, *, method="GET", request_json
             return [render(item) for item in value]
         return value
 
+    secrets = [password]
+    if username:
+        secrets.append(f"{username}:{password}")
     try:
-        result_headers = {key: render(value) for key, value in credential_headers(headers)}
+        raw_headers = credential_headers(headers)
+        result_headers = {key: render(value) for key, value in raw_headers}
+        for (key, template), (_, rendered) in zip(raw_headers, result_headers.items()):
+            if key.lower() == "authorization" or "{{password}}" in template or "{{username}}" in template:
+                secrets.append(rendered)
         if any(any(ord(char) < 32 or ord(char) == 127 for char in value) or len(value.encode("utf-8")) > 65536
                for value in result_headers.values()):
             return failure()
@@ -101,12 +196,6 @@ def authenticate_template(connection, path, entry, *, method="GET", request_json
                 return failure()
             result_headers = {key: value for key, value in result_headers.items() if key.lower() != "content-type"}
             result_headers["Content-Type"] = "application/json"
-        connection.request(method, path, body=body, headers=result_headers)
-        with connection.getresponse() as response:
-            status = response.status
-    except (OSError, HTTPException, ValueError, TypeError):
-        status = None
-    write = method in HTTPS_WRITE_METHODS
-    if status is not None and (200 if write else 100) <= status <= 599:
-        return {"outcome": "succeeded" if 200 <= status < 300 else "failed", "http_status": status}
-    return {"outcome": "uncertain"} if write else failure()
+    except (ValueError, TypeError):
+        return failure()
+    return _send_request(connection, method, path, body, result_headers, secrets)

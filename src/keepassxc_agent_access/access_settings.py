@@ -78,7 +78,7 @@ REVIEW_ACTIONS = {
 
 HTTPS_METHODS = ("GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS")
 HTTPS_WRITE_METHODS = frozenset(("POST", "PUT", "PATCH", "DELETE"))
-HTTPS_BODY_LIMIT = 2048
+HTTPS_BODY_LIMIT = 65536
 HTTPS_JSON_DEPTH = 16
 
 
@@ -94,7 +94,7 @@ def valid_json_depth(value, depth=1):
 
 def canonical_request_json(body):
     if not isinstance(body, str) or len(body) > HTTPS_BODY_LIMIT:
-        raise ValueError("Enter a fixed JSON object up to 2,048 UTF-8 bytes.")
+        raise ValueError(f"Enter a fixed JSON object up to {HTTPS_BODY_LIMIT:,} UTF-8 bytes.")
     if not body:
         return ""
     try:
@@ -105,7 +105,7 @@ def canonical_request_json(body):
                 return canonical
     except (ValueError, RecursionError):
         pass
-    raise ValueError("Enter a valid, fixed JSON object up to 2,048 UTF-8 bytes.")
+    raise ValueError(f"Enter a valid, fixed JSON object up to {HTTPS_BODY_LIMIT:,} UTF-8 bytes.")
 
 
 def command_environment(values):
@@ -361,6 +361,7 @@ class Action:
     environment: tuple[tuple[str, str], ...] = ()
     prompt_contains: str = ""
     result_request: str = ""
+    certificate_sha256: str = ""
 
     @property
     def is_command(self):
@@ -407,7 +408,7 @@ class Action:
     @property
     def scope(self):
         return (self.kind, self.url, self.id, self.command, self.executable_sha256,
-                self.prompt_variable, self.accepts_input, self.method, self.request_json, self.browser, self.opaque, self.headers, self.query, self.environment, self.prompt_contains, self.result_request)
+                self.prompt_variable, self.accepts_input, self.method, self.request_json, self.browser, self.opaque, self.headers, self.query, self.environment, self.prompt_contains, self.result_request, self.certificate_sha256)
 
     def __post_init__(self):
         action_id(self.id)
@@ -416,6 +417,9 @@ class Action:
             raise ValueError("Invalid credential output policy.")
         if type(self.enabled) is not bool:
             raise ValueError("Invalid action setting.")
+        if not isinstance(self.certificate_sha256, str) or (
+                self.certificate_sha256 and not re.fullmatch(r"[0-9a-f]{64}", self.certificate_sha256)):
+            raise ValueError("Use a lowercase SHA-256 certificate fingerprint.")
         try:
             kind = ActionType(self.kind)
         except ValueError:
@@ -427,7 +431,8 @@ class Action:
             if (not self.result_request
                     or self.opaque or self.command or self.executable_sha256 or self.prompt_variable
                     or self.accepts_input or self.request_json or self.browser or self.headers
-                    or self.query or self.environment or self.prompt_contains or self.method != "GET"):
+                    or self.query or self.environment or self.prompt_contains or self.method != "GET"
+                    or self.certificate_sha256):
                 raise ValueError("A protected result read contains only its declared workflow.")
             from .result_delivery import parse_result_usage
             request = parse_result_usage(decode(self.result_request.encode("utf-8")))
@@ -465,6 +470,8 @@ class Action:
             raise ValueError("Use a short literal credential prompt match for a dynamic networked command.")
         if type(self.accepts_input) is not bool:
             raise ValueError("Invalid input file setting.")
+        if kind in (ActionType.STDIN, ActionType.NETWORK_PROMPT, ActionType.BROWSER) and self.certificate_sha256:
+            raise ValueError("Certificate pinning applies to HTTPS actions.")
         if kind == ActionType.BROWSER:
             profile = BrowserForm(**self.browser) if isinstance(self.browser, dict) else self.browser
             if not isinstance(profile, BrowserForm):

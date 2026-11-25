@@ -51,7 +51,7 @@ def tls_service(root, *, authorization=AUTHORIZATION, extra_authorization=(), ha
 
         def respond(self, header):
             if self.path == "/slow":
-                sleep(5)
+                sleep(16)
             accepted = header in (authorization, *extra_authorization)
             status = 302 if self.path == "/redirect" else 200 if accepted else 401
             try:

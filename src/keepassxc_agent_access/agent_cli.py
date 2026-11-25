@@ -136,14 +136,35 @@ def result_pointer(value):
 RESULT_PRIVATE_COLUMNS = frozenset(("password", "passwd", "secret", "token", "ticket", "csrfpreventiontoken",
                                     "authorization", "cookie", "setcookie", "session", "apikey", "privatekey",
                                     "accesstoken", "refreshtoken", "csrftoken", "credential", "credentials"))
+PRIVATE_RESPONSE_HEADERS = frozenset(("set-cookie", "authorization", "authentication-info", "x-auth-token",
+                                      "x-csrf-token", "proxy-authenticate", "www-authenticate", "cookie"))
+
+
+def _result_capture(value):
+    if not isinstance(value, str):
+        raise ValueError
+    if value.startswith("header:"):
+        if not re.fullmatch(r"header:[A-Za-z0-9-]{1,64}", value):
+            raise ValueError
+        return value
+    if value.startswith("cookie:"):
+        if not re.fullmatch(r"cookie:[!#$%&'*+.^_`|~0-9A-Za-z-]{1,64}", value):
+            raise ValueError
+        return value
+    return result_pointer(value)
 
 
 def result_columns(value):
-    if (not isinstance(value, list) or not 0 < len(value) <= 16
-            or any(not isinstance(column, str) or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_.-]{0,79}", column)
-                   or re.sub(r"[_-]", "", column).lower() in RESULT_PRIVATE_COLUMNS
-                   for column in value) or len(set(value)) != len(value)):
+    if not isinstance(value, list) or not 0 < len(value) <= 32 or len(set(value)) != len(value):
         raise ValueError
+    for column in value:
+        if (not isinstance(column, str)
+                or not re.fullmatch(r"[A-Za-z0-9_.-]{1,128}", column)
+                or column.startswith(".") or column.endswith(".") or ".." in column):
+            raise ValueError
+        for segment in column.split("."):
+            if not segment or re.sub(r"[_-]", "", segment).lower() in RESULT_PRIVATE_COLUMNS:
+                raise ValueError
     return value
 
 
@@ -172,8 +193,10 @@ def result_usage_request(data):
     captures = set()
     login = data.get("login")
     if "login" in data:
-        if (not isinstance(login, dict) or not {"path", "capture"} <= login.keys() <= {"path", "capture", "method", "form", "json"}
-                or login.get("method", "POST") != "POST" or ("form" in login) == ("json" in login)):
+        if (not isinstance(login, dict) or not {"path", "capture"} <= login.keys() <= {"path", "capture", "method", "form", "json", "headers"}
+                or login.get("method", "POST") != "POST"
+                or ("form" in login and "json" in login)
+                or not ({"form", "json", "headers"} & login.keys())):
             raise ValueError
         _result_path(login["path"])
         capture = login["capture"]
@@ -182,11 +205,13 @@ def result_usage_request(data):
                        for key in capture)):
             raise ValueError
         for pointer in capture.values():
-            result_pointer(pointer)
+            _result_capture(pointer)
         captures = set(capture)
+        if "headers" in login:
+            _result_map(login["headers"], 16)
         if "form" in login:
-            _result_map(login["form"], 16)
-        elif not isinstance(login["json"], (dict, str)):
+            _result_map(login["form"], 64)
+        elif "json" in login and not isinstance(login["json"], (dict, str)):
             raise ValueError
     request = data["request"]
     if (not isinstance(request, dict) or not {"path", "auth"} <= request.keys() <=
@@ -219,11 +244,18 @@ def result_usage_request(data):
             if "{{" in encode(request[key]).decode("ascii"):
                 raise ValueError
     result = data["result"]
-    if (not isinstance(result, dict) or set(result) - {"path", "columns", "scalar"}
+    if (not isinstance(result, dict) or set(result) - {"path", "columns", "scalar", "headers"}
             or ("columns" in result) == ("scalar" in result)):
         raise ValueError
     result_pointer(result.get("path", ""))
     result_columns([result["scalar"]] if "scalar" in result else result["columns"])
+    if "headers" in result:
+        resp_headers = result["headers"]
+        if (not isinstance(resp_headers, list) or not 1 <= len(resp_headers) <= 8
+                or any(not isinstance(h, str) or not re.fullmatch(r"[A-Za-z0-9-]{1,64}", h)
+                       or h.casefold() in PRIVATE_RESPONSE_HEADERS for h in resp_headers)
+                or len({h.casefold() for h in resp_headers}) != len(resp_headers)):
+            raise ValueError
     if len(encode(data)) >= REQUEST_LIMIT:
         raise ValueError
     return data
@@ -262,12 +294,15 @@ def usage_request(data):
                 raise ValueError
         return {**data, "command": list(command)}
     if kind == "https":
-        if not {"type", "url", "auth"} <= data.keys() <= {"type", "url", "auth", "method", "json", "headers", "query"}:
+        if not {"type", "url", "auth"} <= data.keys() <= {"type", "url", "auth", "method", "json", "headers", "query", "certificate_sha256"}:
             raise ValueError
         if (data["auth"] not in ("basic", "bearer", "template")
                 or data.get("method", "GET") not in ("GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS")):
             raise ValueError
         https_target(data["url"])
+        if "certificate_sha256" in data and (not isinstance(data["certificate_sha256"], str)
+                                               or not re.fullmatch(r"[0-9a-f]{64}", data["certificate_sha256"])):
+            raise ValueError
         if "json" in data and not isinstance(data["json"], (dict, str)):
             raise ValueError
         for key in ("headers", "query"):
@@ -389,8 +424,15 @@ def _validate_access_details(reply):
         items(pending["items"], requested=True)
 
 
-def _validate_result_rows(rows, columns=None, *, scalar=False, text_limit=512):
-    if not isinstance(rows, list) or len(rows) > 256 or scalar and len(rows) != 1:
+def _scalar_value_ok(value, text_limit):
+    return (value is None
+            or (type(value) in (str, bool, int, float)
+                and (not isinstance(value, str) or len(value) <= text_limit)
+                and (type(value) is not float or math.isfinite(value))))
+
+
+def _validate_result_rows(rows, columns=None, *, scalar=False, text_limit=4096, allow_empty=False):
+    if not isinstance(rows, list) or len(rows) > 512 or (scalar and len(rows) != 1 and not (allow_empty and len(rows) == 0)):
         raise ListingError("invalid_response")
     for row in rows:
         if not isinstance(row, dict) or (columns is not None and set(row) != set(columns)):
@@ -398,10 +440,75 @@ def _validate_result_rows(rows, columns=None, *, scalar=False, text_limit=512):
         if columns is None and row:
             result_columns(list(row))
         for value in row.values():
-            if (value is not None and type(value) not in (str, bool, int, float)
-                    or isinstance(value, str) and len(value) > text_limit
-                    or type(value) is float and not math.isfinite(value)):
+            if isinstance(value, list):
+                if len(value) > 64 or not all(_scalar_value_ok(item, text_limit) for item in value):
+                    raise ListingError("invalid_response")
+            elif not _scalar_value_ok(value, text_limit):
                 raise ListingError("invalid_response")
+
+
+def _validate_https_extras(reply, *, allow_error_detail=False, allow_headers=False, requested_headers=None):
+    if "error_detail" in reply:
+        detail = reply["error_detail"]
+        if (not allow_error_detail or not isinstance(detail, str) or not detail or len(detail) > 1024
+                or not all(c.isprintable() or c in "\n\t\r" for c in detail)):
+            raise ListingError("invalid_response")
+    if "headers" in reply:
+        headers = reply["headers"]
+        allowed_names = {h.casefold() for h in requested_headers} if requested_headers is not None else None
+        if (not allow_headers or not isinstance(headers, dict) or len(headers) > 8
+                or any(not isinstance(k, str) or not isinstance(v, str)
+                       or not re.fullmatch(r"[A-Za-z0-9-]{1,64}", k)
+                       or k.casefold() in PRIVATE_RESPONSE_HEADERS
+                       or (allowed_names is not None and k.casefold() not in allowed_names)
+                       or len(v) > 1024
+                       or not all(c.isprintable() or c in "\n\t\r" for c in v)
+                       for k, v in headers.items())):
+            raise ListingError("invalid_response")
+
+
+def _validate_https_outcome(reply, *, allow_data=False, allow_acknowledged=False, projection=None):
+    outcome = reply.get("outcome")
+    status = reply.get("http_status")
+    keys = set(reply)
+    if outcome == "succeeded":
+        allow_headers = allow_data and (projection is None or "headers" in projection)
+        required = {"outcome", "http_status", "data"} if allow_data else {"outcome", "http_status"}
+        allowed = required | {"headers"} if allow_headers else required
+        if (not required <= keys <= allowed
+                or type(status) is not int or not 200 <= status < 300):
+            raise ListingError("invalid_response")
+        _validate_https_extras(
+            reply,
+            allow_error_detail=False,
+            allow_headers=allow_headers,
+            requested_headers=projection.get("headers") if isinstance(projection, dict) else None,
+        )
+        if allow_data:
+            if projection is not None:
+                scalar = "scalar" in projection
+                columns = result_columns([projection["scalar"]] if scalar else projection["columns"])
+                _validate_result_rows(reply["data"], columns, scalar=scalar, text_limit=4096, allow_empty=True)
+            else:
+                _validate_result_rows(reply["data"], text_limit=4096, allow_empty=True)
+        return reply
+    if outcome == "acknowledged" and allow_acknowledged:
+        if (keys != {"outcome", "http_status"}
+                or type(status) is not int or not 200 <= status < 300):
+            raise ListingError("invalid_response")
+        return reply
+    if outcome == "failed":
+        if (not {"outcome"} <= keys <= {"outcome", "http_status", "error_detail"}
+                or ("http_status" in reply and (type(status) is not int or not 100 <= status <= 599))):
+            raise ListingError("invalid_response")
+        _validate_https_extras(reply, allow_error_detail=True)
+        return reply
+    if outcome == "uncertain":
+        if not {"outcome"} <= keys <= {"outcome", "error_detail"}:
+            raise ListingError("invalid_response")
+        _validate_https_extras(reply, allow_error_detail=True)
+        return reply
+    raise ListingError("invalid_response")
 
 
 def _validate(reply, payload):
@@ -468,20 +575,7 @@ def _validate(reply, payload):
         if "id" in reply:
             receipt = str(uuid5(UUID(payload["workflow"]), payload["step"]))
             return _validate(reply, {"operation": "guest_run", "receipt": receipt})
-        outcome = reply.get("outcome")
-        status = reply.get("http_status")
-        if outcome == "succeeded":
-            if set(reply) != {"outcome", "http_status", "data"} or type(status) is not int or not 200 <= status < 300:
-                raise ListingError("invalid_response")
-            _validate_result_rows(reply["data"])
-        elif outcome == "acknowledged":
-            if set(reply) != {"outcome", "http_status"} or type(status) is not int or not 200 <= status < 300:
-                raise ListingError("invalid_response")
-        elif (reply not in ({"outcome": "failed"}, {"outcome": "uncertain"})
-              and not (set(reply) == {"outcome", "http_status"} and outcome == "failed"
-                       and type(status) is int and 100 <= status <= 599)):
-            raise ListingError("invalid_response")
-        return reply
+        return _validate_https_outcome(reply, allow_data=True, allow_acknowledged=True)
     if operation == "guest_release":
         if reply != {"id": payload["receipt"], "outcome": "released"}:
             raise ListingError("invalid_response")
@@ -625,23 +719,9 @@ def _validate(reply, payload):
         return reply
     if operation == "use_password":
         if payload.get("usage", {}).get("type") == "https_results":
-            if reply.get("outcome") == "succeeded":
-                if set(reply) != {"outcome", "http_status", "data"} or type(reply["http_status"]) is not int or not 200 <= reply["http_status"] < 300:
-                    raise ListingError("invalid_response")
-                projection = payload["usage"]["result"]
-                scalar = "scalar" in projection
-                columns = result_columns([projection["scalar"]] if scalar else projection["columns"])
-                _validate_result_rows(reply["data"], columns, scalar=scalar)
-                return reply
-            if (reply.get("outcome") == "acknowledged" and set(reply) == {"outcome", "http_status"}
-                    and type(reply["http_status"]) is int and 200 <= reply["http_status"] < 300
-                    and payload["usage"]["request"].get("method") in ("POST", "PUT", "PATCH", "DELETE")):
-                return reply
-            if (reply not in ({"outcome": "failed"}, {"outcome": "uncertain"})
-                    and not (set(reply) == {"outcome", "http_status"} and reply["outcome"] == "failed"
-                             and type(reply["http_status"]) is int and 100 <= reply["http_status"] <= 599)):
-                raise ListingError("invalid_response")
-            return reply
+            write = payload["usage"]["request"].get("method") in ("POST", "PUT", "PATCH", "DELETE")
+            return _validate_https_outcome(reply, allow_data=True, allow_acknowledged=write,
+                                           projection=payload["usage"]["result"])
         if payload.get("usage", {}).get("type") in ("local_command", "networked_command"):
             if reply != {"outcome": "dispatched"}:
                 raise ListingError("invalid_response")
@@ -650,16 +730,7 @@ def _validate(reply, payload):
             if set(reply) != {"outcome"} or reply["outcome"] not in ("succeeded", "failed", "uncertain"):
                 raise ListingError("invalid_response")
             return reply
-        status = reply.get("http_status")
-        if (
-            "outcome" not in reply or set(reply) - {"outcome", "http_status"}
-            or reply["outcome"] not in ("succeeded", "failed", "uncertain")
-            or ("http_status" in reply and (type(status) is not int or not 100 <= status <= 599))
-            or (reply["outcome"] == "succeeded" and (status is None or not 200 <= status < 300))
-            or (reply["outcome"] == "uncertain" and status is not None)
-        ):
-            raise ListingError("invalid_response")
-        return reply
+        return _validate_https_outcome(reply)
     if set(reply) != {"entries"} or not isinstance(reply["entries"], list):
         raise ListingError("invalid_response")
     required = {"id", "title", "group_path"}
@@ -823,6 +894,7 @@ def main(argv=None):
     use.add_argument("--entry", required=True, help="Entry UUID")
     use.add_argument("--action", help="Legacy owner-configured action ID; omit to read a usage descriptor")
     use.add_argument("--receipt", type=_request_id, help="Track a protected HTTPS write under this UUID")
+    use.add_argument("--certificate-sha256", help="Optional lowercase hex SHA-256 certificate pin for HTTPS usage")
     use.add_argument("--json", action="store_true", required=True, help="Emit JSON")
     use.set_defaults(operation="use_password")
     accounts = topics.add_parser("accounts", help="Privately provision an account from a Keeper entry")
@@ -946,6 +1018,12 @@ def main(argv=None):
     payload = {"version": 1, "operation": options.operation}
     if options.operation == "use_password":
         payload["entry"] = options.entry
+        cert_pin = getattr(options, "certificate_sha256", None)
+        if cert_pin is not None:
+            if not re.fullmatch(r"[0-9a-f]{64}", cert_pin):
+                parser.error("--certificate-sha256 must be 64 lowercase hex characters.")
+            if options.action:
+                parser.error("--certificate-sha256 applies only to usage descriptors.")
         if options.action:
             payload["action"] = options.action
         if hasattr(options, "command"):
@@ -1073,6 +1151,13 @@ def main(argv=None):
                     payload["provision"] = {"entry": options.account, "body_type": descriptor["body_type"],
                                             "fields": descriptor["fields"]}
                     descriptor = descriptor["workflow"]
+                cert_pin = getattr(options, "certificate_sha256", None)
+                if cert_pin is not None:
+                    if not isinstance(descriptor, dict) or descriptor.get("type") not in ("https", "https_results"):
+                        raise ValueError("--certificate-sha256 applies only to https or https_results usage.")
+                    if "certificate_sha256" in descriptor and descriptor["certificate_sha256"] != cert_pin:
+                        raise ValueError("Conflicting certificate_sha256 values.")
+                    descriptor = {**descriptor, "certificate_sha256": cert_pin}
                 payload["usage"] = usage_request(descriptor)
             except (ValueError, TypeError, RecursionError) as error:
                 detail = sanitize_error_detail(str(error)) or "Supply a valid JSON credential-use descriptor on stdin."

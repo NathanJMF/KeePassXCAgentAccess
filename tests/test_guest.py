@@ -242,8 +242,11 @@ class GuestTests(TestCase):
             for field in ("private", "private_text"):
                 leak = {**descriptor["poll"], "result": {"path": "/data", "columns": [field]}}
                 request = parse_guest_request({**descriptor, "poll": leak}).status(remote_id)
-                self.assertEqual(deliver_results(request, SimpleNamespace(username="", password=secret), lambda: True,
-                                                private_result=remote_id), {"outcome": "failed"})
+                leak_result = deliver_results(request, SimpleNamespace(username="", password=secret), lambda: True,
+                                              private_result=remote_id)
+                self.assertEqual(leak_result["outcome"], "failed")
+                self.assertNotIn(secret, repr(leak_result))
+                self.assertNotIn(str(remote_id), repr(leak_result))
 
     def test_only_the_command_and_typed_job_value_can_be_substituted(self):
         request = parse_guest_request(workflow())

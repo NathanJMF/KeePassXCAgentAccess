@@ -17,7 +17,7 @@ from .command_action import deliver_credential, deliver_prompt, prepare_command
 from .console_request import open_console
 from .console_transport import ConsoleTimeoutError
 from .entry_projection import active_entry, entry_listing, owner_snapshot
-from .https_action import authenticate, failure, prepare_https
+from .https_action import authenticate, failure, prepare_https, scrub_text
 from .protocol import RESPONSE_LIMIT, decode, encode, sanitize_error_detail
 from .result_delivery import GuestLoginCache, deliver_results, parse_result_usage
 from .vault_edits import EDIT_LIMIT, EditError, database_file, file_stamp, stage_edit
@@ -116,7 +116,8 @@ def load_vault():
                 use_browser(entry, data["url"], BrowserForm(**data["browser"]))
             else:
                 use(entry, data["url"], ActionType(data["kind"]), data["method"], data["request_json"],
-                    headers=data.get("headers", ()), query=data.get("query", ()))
+                    headers=data.get("headers", ()), query=data.get("query", ()),
+                    certificate_sha256=data.get("certificate_sha256") or None)
         else:
             return
 
@@ -220,20 +221,27 @@ def reply(data):
     sys.stdout.buffer.flush()
 
 
-def use(entry, url, kind, method, request_json, *, headers=(), query=()):
+def use(entry, url, kind, method, request_json, *, headers=(), query=(), certificate_sha256=None):
     if entry is None:
         reply(encode(failure()))
         return
     try:
-        with prepare_https(url, query=query) as (connection, path):
+        with prepare_https(url, query=query, certificate_sha256=certificate_sha256) as (connection, path):
             reply(encode({"ready": True}))
             decision = sys.stdin.buffer.readline(16)
             result = failure()
             if decision == b"dispatch\n":
                 result = authenticate(connection, path, entry, kind, method=method, request_json=request_json, headers=headers)
             reply(encode(result))
-    except (OSError, HTTPException, ValueError):
-        reply(encode(failure()))
+    except (OSError, HTTPException, ValueError) as error:
+        result = failure()
+        password = getattr(entry, "password", None) or ""
+        username = getattr(entry, "username", None) or ""
+        secrets = (password, f"{username}:{password}" if username and password else "")
+        detail = sanitize_error_detail(scrub_text(str(error) or type(error).__name__, secrets, limit=240))
+        if detail:
+            result["error_detail"] = detail
+        reply(encode(result))
 
 
 def use_results(entry, descriptor, origin, *, allow_username=False, private_result=None, login_context=None,

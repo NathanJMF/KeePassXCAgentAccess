@@ -152,6 +152,8 @@ USAGE = {
                 "json": {"type": ["object", "string"]},
                 "headers": {"type": "object", "additionalProperties": {"type": "string"}},
                 "query": {"type": "object", "additionalProperties": {"type": "string"}},
+                "certificate_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$",
+                                       "description": "Optional lowercase hex SHA-256 certificate pin for private-CA or self-signed endpoints."},
             },
             "required": ["type", "url", "auth"],
             "additionalProperties": False,
@@ -165,10 +167,11 @@ USAGE = {
                                        "description": "Optional lowercase hex SHA-256 certificate pin for private-CA or self-signed endpoints."},
                 "login": {
                     "type": "object",
-                    "description": "Optional private POST authentication and named JSON-pointer captures.",
+                    "description": "Optional private POST authentication and named captures (JSON pointers, header:<Name>, or cookie:<Name>).",
                     "properties": {
                         "path": {"type": "string"},
                         "method": {"enum": ["POST"]},
+                        "headers": {"type": "object", "additionalProperties": {"type": "string"}},
                         "form": {"type": "object", "additionalProperties": {"type": "string"}},
                         "json": {"type": ["object", "string"]},
                         "capture": {"type": "object", "additionalProperties": {"type": "string"},
@@ -195,11 +198,12 @@ USAGE = {
                 "approve_write_once": {"type": "boolean", "description": "Ask the owner to approve this exact protected HTTPS write once."},
                 "result": {
                     "type": "object",
-                    "description": "JSON pointer and either named result columns or a scalar alias (allowed on both GET reads and writes).",
+                    "description": "JSON pointer, scalar columns or dot-paths, and optional safe response headers list.",
                     "properties": {
                         "path": {"type": "string"},
-                        "columns": {"type": "array", "items": {"type": "string"}, "minItems": 1, "maxItems": 16},
+                        "columns": {"type": "array", "items": {"type": "string"}, "minItems": 1, "maxItems": 32},
                         "scalar": {"type": "string"},
+                        "headers": {"type": "array", "items": {"type": "string"}, "minItems": 1, "maxItems": 8},
                     },
                     "additionalProperties": False,
                 },

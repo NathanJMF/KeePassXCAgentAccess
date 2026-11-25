@@ -28,7 +28,10 @@ class HTTPSActionTests(TestCase):
                 for path, expected in (("/check", {"outcome": "succeeded", "http_status": 200}),
                                        ("/redirect", {"outcome": "failed", "http_status": 302})):
                     with self.subTest(path=path), prepare_https(url + path) as (connection, resource):
-                        self.assertEqual(authenticate(connection, resource, entry, ActionType.BEARER.value), expected)
+                        actual = authenticate(connection, resource, entry, ActionType.BEARER.value)
+                        self.assertEqual(actual["outcome"], expected["outcome"])
+                        self.assertEqual(actual["http_status"], expected["http_status"])
+                        self.assertNotIn(secret, repr(actual))
             self.assertEqual(calls, [("/check", authorization), ("/redirect", authorization)])
 
     def test_fixed_json_worker_with_bearer_token_and_uncertain_write(self):
@@ -52,16 +55,21 @@ class HTTPSActionTests(TestCase):
                 with open_vault(VaultTarget(database), "Fixture unlock", Event()) as worker:
                     with self.assertRaises(ListingError):
                         worker.use(action("/check"), lambda _: False)
-                    self.assertEqual(worker.use(action("/wrong", url.replace("127.0.0.1", "localhost")), allow),
-                                     {"outcome": "failed"})
+                    wrong = worker.use(action("/wrong", url.replace("127.0.0.1", "localhost")), allow)
+                    self.assertEqual(wrong["outcome"], "failed")
+                    self.assertNotIn(secret, repr(wrong))
                     self.assertEqual(calls, [])
-                    for path, result in (
+                    for path, expected in (
                         ("/check", {"outcome": "succeeded", "http_status": 200}),
                         ("/redirect", {"outcome": "failed", "http_status": 302}),
                         ("/disconnect", {"outcome": "uncertain"}),
                     ):
                         with self.subTest(path=path):
-                            self.assertEqual(worker.use(action(path), allow), result)
+                            actual = worker.use(action(path), allow)
+                            self.assertEqual(actual["outcome"], expected["outcome"])
+                            if "http_status" in expected:
+                                self.assertEqual(actual.get("http_status"), expected["http_status"])
+                            self.assertNotIn(secret, repr(actual))
             self.assertEqual(calls, [
                 ("POST", path, authorization, "application/json", b'{"event":"verify"}')
                 for path in ("/check", "/redirect", "/disconnect")
@@ -79,7 +87,7 @@ class HTTPSActionTests(TestCase):
     def test_bearer_rejects_invalid_tokens_before_sending_a_request(self):
         connection = Mock()
         for invalid in (None, "", " leading", "contains space", "token\r\nX-Injected: yes",
-                        "part=middle", "á", "token,append", "\t", "=padding-only"):
+                        "á", "\t", "foo\x00bar", "x" * 8193):
             with self.subTest(invalid=invalid):
                 self.assertEqual(authenticate(connection, "/check", SimpleNamespace(password=invalid), ActionType.BEARER),
                                  {"outcome": "failed"})
@@ -103,7 +111,9 @@ class HTTPSActionTests(TestCase):
                 return True
 
             with open_vault(VaultTarget(database), "Fixture unlock", Event()) as untrusted:
-                self.assertEqual(untrusted.use(action(), allow), {"outcome": "failed"})
+                untrusted_res = untrusted.use(action(), allow)
+                self.assertEqual(untrusted_res["outcome"], "failed")
+                self.assertNotIn(PASSWORD, repr(untrusted_res))
                 self.assertEqual(calls, [])
 
             with patch.dict(os.environ, {"SSL_CERT_FILE": str(cert), "HTTPS_PROXY": "http://127.0.0.1:1"}):
@@ -115,12 +125,16 @@ class HTTPSActionTests(TestCase):
                     self.assertEqual(calls, [])
                     self.assertEqual(worker.use(action(), allow), {"outcome": "succeeded", "http_status": 200})
                     result = worker.use(action("/redirect"), allow)
-                    self.assertEqual(result, {"outcome": "failed", "http_status": 302})
+                    self.assertEqual(result["outcome"], "failed")
+                    self.assertEqual(result["http_status"], 302)
                     self.assertNotIn(PASSWORD, repr(result))
                     self.assertNotIn(AUTHORIZATION, repr(result))
-                    self.assertEqual(worker.use(action("/wrong", url.replace("127.0.0.1", "localhost")), allow),
-                                     {"outcome": "failed"})
-                    self.assertEqual(worker.use(action("/slow"), allow), {"outcome": "failed"})
+                    wrong_host = worker.use(action("/wrong", url.replace("127.0.0.1", "localhost")), allow)
+                    self.assertEqual(wrong_host["outcome"], "failed")
+                    self.assertNotIn(PASSWORD, repr(wrong_host))
+                    slow = worker.use(action("/slow"), allow)
+                    self.assertEqual(slow["outcome"], "failed")
+                    self.assertNotIn(PASSWORD, repr(slow))
             self.assertEqual(calls, [("/check", AUTHORIZATION), ("/redirect", AUTHORIZATION),
                                     ("/slow", AUTHORIZATION)])
 

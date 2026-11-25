@@ -223,12 +223,13 @@ class VaultSession:
                           "login_context": login_context,
                           "provision": provision,
                           "headers": action.headers, "query": action.query, "opaque": action.opaque, "environment": action.environment, "prompt_contains": action.prompt_contains,
+                          "certificate_sha256": action.certificate_sha256,
                           "browser": asdict(action.browser) if action.browser else None,
                           "executable_sha256": action.executable_sha256, "prompt_variable": action.prompt_variable,
                           "input_path": str(input_path) if input_path is not None else None})
         if action.result_request:
             return self._result_exchange(request, gate, 2 if "login" in json.loads(action.result_request) else 1)
-        timeout = 33 if action.browser else 25 if action.prompt_variable else 12
+        timeout = 33 if action.browser else 25 if action.prompt_variable else 22
         window = (DYNAMIC_NETWORK_WINDOW if action.prompt_variable else DYNAMIC_LOCAL_WINDOW) if action.opaque else 0
         with self._exchange(request, timeout) as read:
             deadline = monotonic() + window

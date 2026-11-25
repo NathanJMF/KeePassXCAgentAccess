@@ -138,7 +138,7 @@ class AccessStorageTests(TestCase):
         store.write(replace(store.read(), vaults=((vault, policy),)))
         self.assertEqual(AccessStore(store.path).read().for_vault(vault), policy)
         for body in ('["value"]', '{"a":1,"a":2}', '{"x":NaN}', '{"x":1e999}',
-                     '{"x":"\\ud800"}', '{"x":"' + 'é' * 1024 + '"}',
+                     '{"x":"\\ud800"}', '{"x":"' + 'é' * 33000 + '"}',
                      '{"x":' + '[' * 1000 + '0' + ']' * 1000 + '}'):
             with self.subTest(body=body[:30]), self.assertRaises(ValueError):
                 replace(action, request_json=body)

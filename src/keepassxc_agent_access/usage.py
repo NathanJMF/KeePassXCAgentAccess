@@ -1,6 +1,7 @@
 """Strict agent-supplied credential operations, compiled inside the owner broker."""
 
 import json
+import re
 
 from .access_settings import Action, ActionType, BrowserForm, Destination, HTTPS_WRITE_METHODS, template_body_references
 from .command_action import executable_digest
@@ -46,8 +47,12 @@ def usage_action(entry, data, *, accepts_input=False, pin_executable=True):
         return Action("agent-request", name, entry, request.origin, kind=ActionType.RESULTS,
                       result_request=request.canonical_json)
     if kind == "https":
-        if not {"type", "url", "auth"} <= data.keys() <= {"type", "url", "auth", "method", "json", "headers", "query"}:
+        if not {"type", "url", "auth"} <= data.keys() <= {"type", "url", "auth", "method", "json", "headers", "query", "certificate_sha256"}:
             raise ValueError("Use an HTTPS URL, authentication type, method and optional JSON.")
+        if "certificate_sha256" in data:
+            pin = data["certificate_sha256"]
+            if not isinstance(pin, str) or not re.fullmatch(r"[0-9a-f]{64}", pin):
+                raise ValueError("Use a lowercase SHA-256 certificate fingerprint.")
         auth = {"basic": ActionType.BASIC, "bearer": ActionType.BEARER, "template": ActionType.TEMPLATE}.get(data["auth"])
         if auth is None:
             raise ValueError("Choose basic, bearer, or template authentication.")
@@ -55,7 +60,8 @@ def usage_action(entry, data, *, accepts_input=False, pin_executable=True):
         if isinstance(body, dict):
             body = json.dumps(body, ensure_ascii=False, allow_nan=False, separators=(",", ":"), sort_keys=True)
         return Action("agent-request", "HTTPS Request", entry, data["url"], kind=auth,
-                      method=data.get("method", "GET"), request_json=body, headers=data.get("headers", ()), query=data.get("query", ()))
+                      method=data.get("method", "GET"), request_json=body, headers=data.get("headers", ()),
+                      query=data.get("query", ()), certificate_sha256=data.get("certificate_sha256", ""))
     required = {"type", "url", "submit_url", "form_id", "username_field", "password_field", "success_id"}
     if not required <= data.keys() <= required | {"success_url"}:
         raise ValueError("Use the login URL and explicit form and success selectors.")
