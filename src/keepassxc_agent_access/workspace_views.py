@@ -637,7 +637,7 @@ class ExtendButtonRenderer(Gtk.CellRenderer):
         layout = self._layout(widget)
         text_w, text_h = layout.get_pixel_size()
         xpad, ypad = self.get_padding()
-        btn_w = min(max(1, cell_area.width - 8), text_w + 2 * xpad)
+        btn_w = min(max(1, cell_area.width - 4), text_w + 2 * xpad)
         btn_h = min(max(1, cell_area.height - 6), text_h + 2 * ypad)
         bx = cell_area.x + (cell_area.width - btn_w) / 2.0
         by = cell_area.y + (cell_area.height - btn_h) / 2.0
@@ -728,7 +728,7 @@ class AccessView(Gtk.Box):
         self.pack_start(header, False, False, 0)
         self.table, scroll = pane_table(
             Gtk.TreeStore(*([str] * 9), object, object, object, object, object, bool, object, object, bool, object),
-            self.TITLES, (138, 138, 122, 106, 109, 106, 92, 119, 82),
+            self.TITLES, (138, 138, 122, 106, 109, 106, 92, 119, 104),
             status=(self.STATUS, ACCESS_STATES), muted_columns=(0, 1, self.LIFESPAN),
             expand_columns=(2, 3, 4, 5),
             time_columns={0: self.REQUESTED_TIME, 1: self.LAST_USED_TIME, self.LIFESPAN: self.EXPIRES_TIME},
@@ -746,11 +746,11 @@ class AccessView(Gtk.Box):
         extend_col.get_area().remove(extend_col.get_cells()[1])
         self.extend_renderer = ExtendButtonRenderer()
         self.extend_renderer.connect("activate", self._on_extend_activated)
-        extend_col.pack_start(self.extend_renderer, False)
+        extend_col.pack_start(self.extend_renderer, True)
         extend_col.set_cell_data_func(self.extend_renderer, self._extend_button_data)
         extend_col.set_clickable(False)
         extend_col.set_resizable(False)
-        extend_col.set_min_width(82)
+        extend_col.set_min_width(104)
         self.table.connect("button-press-event", self._on_table_button_press)
         self.table.connect_after("draw", self._draw_scope_labels)
         self.table.connect("row-activated", self._open)

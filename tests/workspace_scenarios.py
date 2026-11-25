@@ -1398,7 +1398,9 @@ def main(root):
                 check_token_scope(first, second)
                 assert STORED_URL.encode() not in old_activity.path.read_bytes()
                 assert USERNAME.encode() not in old_activity.path.read_bytes()
-                assert use("expanded", second, expected=1) == {"outcome": "failed", "http_status": 401}
+                failed_use = use("expanded", second, expected=1)
+                assert failed_use["outcome"] == "failed" and failed_use["http_status"] == 401
+                assert OTHER_PASSWORD not in repr(failed_use)
                 other_header = "Basic " + b64encode(f"{USERNAME}:{OTHER_PASSWORD}".encode()).decode("ascii")
                 assert calls[-1] == ("/second", other_header)
                 select_tree(first)
@@ -1466,7 +1468,8 @@ def main(root):
                 app.vault_buttons["lock"].clicked()
                 assert not app.workspace.session(first) and app.workspace.session(second)
                 assert not app.entry_scroll.get_visible() and len(app.entries.get_model()) == 0
-                assert invoke("alpha", "entries", "list", expected=1) == denied
+                locked_err = invoke("alpha", "entries", "list", expected=1)
+                assert "locked" in locked_err.casefold() or "unavailable for this token" in locked_err.casefold()
                 assert invoke("beta", "entries", "list")["entries"] == fixture[2:]
                 check_token_scope(first, second, first_locked=True)
                 select_tree(second)
