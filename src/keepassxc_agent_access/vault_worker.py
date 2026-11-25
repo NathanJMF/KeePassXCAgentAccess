@@ -84,6 +84,9 @@ def load_vault():
         if data["operation"] == "scoped_entries":
             reply(entry_listing(vault, frozenset(data["entries"])))
             continue
+        if data["operation"] == "ssh_credentials":
+            reply(encode(ssh_credentials_payload(vault, data)))
+            continue
         entry, metadata = active_entry(vault, data["entry"])
         if data["operation"] == "entry":
             reply(encode({"entry": metadata}))
@@ -127,6 +130,89 @@ def entry_text_frame(entry, field):
         if len(frame) <= RESPONSE_LIMIT:
             return frame
     return encode({"error": "too_large"})
+
+
+def _safe_active_entry(vault, identifier):
+    if not isinstance(identifier, str):
+        return None
+    try:
+        return active_entry(vault, identifier)[0]
+    except ValueError:
+        return None
+
+
+def _looks_like_private_key(text):
+    return isinstance(text, str) and "-----BEGIN" in text and "PRIVATE KEY-----" in text
+
+
+def _decode_private_key_bytes(raw):
+    if not isinstance(raw, (bytes, bytearray)):
+        return None
+    try:
+        text = bytes(raw).decode("utf-8")
+    except UnicodeDecodeError:
+        return None
+    return text if _looks_like_private_key(text) else None
+
+
+def _read_attachment_key(attachment):
+    from pykeepass.exceptions import BinaryError
+
+    try:
+        return _decode_private_key_bytes(attachment.data)
+    except BinaryError:
+        return None
+
+
+def ssh_credentials_payload(vault, data):
+    entry = _safe_active_entry(vault, data.get("entry"))
+    if entry is None:
+        return {"error": "unavailable"}
+
+    username = entry.username or ""
+    password = entry.password or ""
+    props = entry.custom_properties or {}
+    private_key = None
+    attachment_name = data.get("attachment")
+    attachments = entry.attachments or ()
+
+    if attachment_name is not None:
+        if not isinstance(attachment_name, str) or not attachment_name:
+            return {"error": "unavailable"}
+        for attachment in attachments:
+            if attachment.filename == attachment_name:
+                private_key = _read_attachment_key(attachment)
+                if private_key is not None:
+                    break
+        if private_key is None:
+            return {"error": "unavailable"}
+    else:
+        for attachment in attachments:
+            private_key = _read_attachment_key(attachment)
+            if private_key is not None:
+                break
+        if private_key is None:
+            prop_key = props.get("ssh_private_key")
+            if _looks_like_private_key(prop_key):
+                private_key = prop_key
+            elif _looks_like_private_key(password):
+                private_key = password
+                password = props.get("ssh_passphrase") or ""
+
+    sudo_password = None
+    sudo_entry_id = data.get("sudo_entry")
+    if sudo_entry_id is not None:
+        sudo_entry = _safe_active_entry(vault, sudo_entry_id)
+        if sudo_entry is None:
+            return {"error": "unavailable"}
+        sudo_password = sudo_entry.password or ""
+
+    return {
+        "username": username,
+        "password": password,
+        "private_key": private_key,
+        "sudo_password": sudo_password,
+    }
 
 
 def reply(data):

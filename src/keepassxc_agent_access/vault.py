@@ -196,6 +196,23 @@ class VaultSession:
         with self._exchange(request, WORKER_TIMEOUT) as read:
             return decode(read())["entry"]
 
+    def ssh_credentials(self, entry_id, sudo_entry_id=None, attachment_name=None):
+        """Extract SSH credentials once from the unlocked worker and release the vault lock immediately."""
+        request = encode({
+            "operation": "ssh_credentials",
+            "entry": entry_id,
+            "sudo_entry": sudo_entry_id,
+            "attachment": attachment_name,
+        })
+        with self._exchange(request, WORKER_TIMEOUT) as read:
+            response = decode(read())
+        if not isinstance(response, dict) or "error" in response:
+            raise ListingError(
+                "ineligible",
+                detail="The entry or requested SSH key attachment is unavailable in the unlocked vault.",
+            )
+        return response
+
     def use(self, action, gate, *, input_path=None, allow_username=False, private_result=None, login_context=None,
             provision=None):
         request = encode({"operation": "use_password", "entry": action.entry,

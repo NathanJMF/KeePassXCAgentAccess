@@ -13,9 +13,11 @@ import sys
 from tempfile import TemporaryDirectory
 from uuid import UUID
 
-from .agent_cli import EDIT_OPERATIONS, ENTRY_FIELDS, CREDENTIAL_USE_TYPES, USE_TYPES, edit_request, edit_uuid, usage_request
+from .agent_cli import (EDIT_OPERATIONS, ENTRY_FIELDS, CREDENTIAL_USE_TYPES, USE_TYPES,
+                        edit_request, edit_uuid, endpoint_target, usage_request)
 from .protocol import (CLIENT_TIMEOUT, ERRORS, ListingError, MAX_CONSOLE_REUSE_MINUTES, MAX_GUEST_REUSE_MINUTES,
-                       MAX_GUEST_TEXT, MAX_TOKEN_LIFESPAN_DAYS, MAX_WAIT_SECONDS, REQUEST_LIMIT, UPLOAD_LIMIT,
+                       MAX_GUEST_TEXT, MAX_SSH_REUSE_MINUTES, MAX_SSH_TIMEOUT, MAX_TOKEN_LIFESPAN_DAYS,
+                       MAX_WAIT_SECONDS, REQUEST_LIMIT, SSH_OPERATIONS, UPLOAD_LIMIT,
                        decode, encode, sanitize_error_detail, validate_command)
 from .runner_token import UninitializedProfile, open_profile
 
@@ -67,7 +69,7 @@ ENROLLMENT = {
         "identity": {"type": "string", "description": "Required when creating a token; optional when updating with change_id."},
         "project": {"type": "string", "description": "Required when creating a token; optional when updating with change_id."},
         "change_id": {**REFERENCE, "description": "A new UUID to replace this active token’s scope. Reuse it to check the change."},
-        "items": {"type": "array", "minItems": 1, "items": {
+        "items": {"type": "array", "minItems": 1, "maxItems": 32, "items": {
             "type": "object",
             "properties": {
                 "vault": REFERENCE,
@@ -81,8 +83,8 @@ ENROLLMENT = {
                 "url": {"type": "boolean"},
                 "action": {"type": "string", "description": "Optional legacy configured action ID."},
                 "uses": {"type": "array", "items": {"enum": sorted(CREDENTIAL_USE_TYPES)}, "minItems": 1, "uniqueItems": True},
-                "origins": {"type": "array", "items": {"type": "string"}, "maxItems": 8, "uniqueItems": True,
-                            "description": "Explicit HTTPS origins the owner must approve for network use."},
+                "origins": {"type": "array", "items": {"type": "string"}, "maxItems": 16, "uniqueItems": True,
+                            "description": "Explicit destinations the owner must approve (https://, ssh://, or tcp://host:port)."},
             },
             "additionalProperties": False,
         }},
@@ -130,7 +132,7 @@ USAGE = {
                 "type": {"enum": ["networked_command"]},
                 "command": {"type": "array", "items": {"type": "string"}, "minItems": 1, "maxItems": 33,
                             "description": "Executable in /usr/bin and literal arguments."},
-                "origin": {"type": "string", "description": "Approved HTTPS origin (for example https://host/)."},
+                "origin": {"type": "string", "description": "Approved origin (for example https://host/ or tcp://host:port)."},
                 "prompt_variable": {"type": "string", "description": "Prompt variable name ending in _ASKPASS."},
                 "prompt_contains": {"type": "string", "minLength": 1, "maxLength": 80,
                                     "description": "Literal substring identifying the prompt; defaults to password."},
@@ -432,6 +434,47 @@ OPERATIONS = {
          "input_base64": {"type": "string", "description": "Optional base64 input file for a command that permits it."}},
         required=("entry",), read_only=False,
     )),
+    "ssh_exec": (("ssh", "exec"), tool(
+        "ssh_exec", "Run a command on an approved ssh:// host using stored credentials without exposing secrets.",
+        {"vault": REFERENCE, "entry": REFERENCE,
+         "origin": {"type": "string", "description": "Approved SSH origin (for example ssh://host:22)."},
+         "command": {"type": "string", "minLength": 1, "maxLength": 8192, "description": "Remote shell command to execute."},
+         "sudo": {"type": "boolean", "description": "Run command with sudo."},
+         "sudo_entry": {**REFERENCE, "description": "Optional separate entry UUID for the sudo password."},
+         "attachment": {"type": "string", "minLength": 1, "maxLength": 160, "description": "Optional entry attachment filename for an SSH private key."},
+         "host_key_sha256": {"type": "string", "description": "Optional expected SSH host key fingerprint (64-hex or SHA256:<b64>)."},
+         "timeout": {"type": "integer", "minimum": 1, "maximum": MAX_SSH_TIMEOUT},
+         "reuse_minutes": {"type": "integer", "minimum": 1, "maximum": MAX_SSH_REUSE_MINUTES}},
+        required=("vault", "entry", "origin", "command"), read_only=False,
+    )),
+    "ssh_upload": (("ssh", "upload"), tool(
+        "ssh_upload", "Upload a file to an approved ssh:// host over SFTP without exposing credentials.",
+        {"vault": REFERENCE, "entry": REFERENCE,
+         "origin": {"type": "string", "description": "Approved SSH origin (for example ssh://host:22)."},
+         "remote_path": {"type": "string", "minLength": 1, "maxLength": 1024, "description": "Destination file path on the remote host."},
+         "mode": {"type": "string", "pattern": "^[0-7]{3,4}$", "description": "Optional POSIX file mode (default 0600)."},
+         "attachment": {"type": "string", "minLength": 1, "maxLength": 160},
+         "host_key_sha256": {"type": "string", "description": "Optional expected SSH host key fingerprint (64-hex or SHA256:<b64>)."},
+         "timeout": {"type": "integer", "minimum": 1, "maximum": MAX_SSH_TIMEOUT},
+         "reuse_minutes": {"type": "integer", "minimum": 1, "maximum": MAX_SSH_REUSE_MINUTES},
+         "input_path": {"type": "string", "description": "Optional local file path read and base64-encoded by keeper-connect (mutually exclusive with input_base64 and content_base64)."},
+         "input_base64": {"type": "string", "description": "Base64 file content (up to 8 MiB decoded)."},
+         "content_base64": {"type": "string", "description": "Base64 file content (up to 8 MiB decoded; mutually exclusive with input_path and input_base64)."}},
+        required=("vault", "entry", "origin", "remote_path"), read_only=False,
+    )),
+    "ssh_download": (("ssh", "download"), tool(
+        "ssh_download", "Download a bounded file from an approved ssh:// host over SFTP without exposing credentials.",
+        {"vault": REFERENCE, "entry": REFERENCE,
+         "origin": {"type": "string", "description": "Approved SSH origin (for example ssh://host:22)."},
+         "remote_path": {"type": "string", "minLength": 1, "maxLength": 1024, "description": "Source file path on the remote host."},
+         "encoding": {"enum": ["text", "base64"], "description": "Output encoding: text (default) or base64."},
+         "max_bytes": {"type": "integer", "minimum": 1, "maximum": 1048576},
+         "attachment": {"type": "string", "minLength": 1, "maxLength": 160},
+         "host_key_sha256": {"type": "string", "description": "Optional expected SSH host key fingerprint (64-hex or SHA256:<b64>)."},
+         "timeout": {"type": "integer", "minimum": 1, "maximum": MAX_SSH_TIMEOUT},
+         "reuse_minutes": {"type": "integer", "minimum": 1, "maximum": MAX_SSH_REUSE_MINUTES}},
+        required=("vault", "entry", "origin", "remote_path"),
+    )),
 }
 
 
@@ -456,7 +499,7 @@ def invocation(name, arguments):
     extra = arguments.keys() - schema["properties"].keys()
     if extra:
         raise ValueError("Unexpected tool arguments.")
-    if name == "use_password" and "input_path" in arguments:
+    if name in ("use_password", "ssh_upload") and "input_path" in arguments:
         raise ValueError("input_path requires connecting through keeper-connect; pass input_base64 when calling keeper-agent-runner directly.")
     if "note" in arguments:
         note = arguments["note"]
@@ -479,7 +522,7 @@ def invocation(name, arguments):
                 raise ValueError(str(error) or "Invalid usage descriptor.") from None
             if "input_base64" in arguments and usage["type"] != "networked_command":
                 raise ValueError("input_base64 is only valid with a networked_command usage.")
-    local_command = validate_command(arguments["command"]) if "command" in arguments else None
+    local_command = validate_command(arguments["command"]) if name == "use_password" and "command" in arguments else None
     if usage is not None and "input_base64" in arguments:
         local_command = validate_command(usage["command"])
     command = [CLI, "run" if local_command is not None else tokens[0], *tokens[1:], "--json"]
@@ -488,8 +531,9 @@ def invocation(name, arguments):
             command.append(f"--{key}={_require_uuid(arguments[key], key)}")
     if "timeout" in arguments:
         timeout = arguments["timeout"]
-        if type(timeout) is not int or not 1 <= timeout <= MAX_WAIT_SECONDS:
-            raise ValueError(f"timeout must be an integer between 1 and {MAX_WAIT_SECONDS}.")
+        max_timeout = MAX_SSH_TIMEOUT if name in SSH_OPERATIONS else MAX_WAIT_SECONDS
+        if type(timeout) is not int or not 1 <= timeout <= max_timeout:
+            raise ValueError(f"timeout must be an integer between 1 and {max_timeout}.")
         command.append(f"--timeout={timeout}")
     if name == "guest_wait":
         until, expected = arguments["until"], arguments["equals"]
@@ -506,7 +550,9 @@ def invocation(name, arguments):
             command[command.index("--json")] = "--status"
     if "reuse_minutes" in arguments:
         minutes = arguments["reuse_minutes"]
-        maximum = MAX_CONSOLE_REUSE_MINUTES if name == "console_open" else MAX_GUEST_REUSE_MINUTES
+        maximum = (MAX_CONSOLE_REUSE_MINUTES if name == "console_open"
+                   else MAX_SSH_REUSE_MINUTES if name in SSH_OPERATIONS
+                   else MAX_GUEST_REUSE_MINUTES)
         if type(minutes) is not int or not 1 <= minutes <= maximum:
             raise ValueError(f"reuse_minutes must be an integer between 1 and {maximum}.")
         command.append(f"--reuse-for={minutes}")
@@ -583,6 +629,85 @@ def invocation(name, arguments):
         if not isinstance(arguments["events"], list):
             raise ValueError("events must be a list of console input events.")
         request = arguments["events"]
+    ssh_upload_bytes = None
+    if name in SSH_OPERATIONS:
+        try:
+            origin = endpoint_target(arguments["origin"], allowed_schemes=("ssh",), origin=True)
+        except ValueError:
+            raise ValueError("origin must be a valid ssh:// origin.") from None
+        command.append(f"--origin={origin}")
+        if "attachment" in arguments:
+            attachment = arguments["attachment"]
+            if (not isinstance(attachment, str) or not attachment or len(attachment) > 160
+                    or not attachment.isprintable() or attachment in (".", "..")
+                    or "/" in attachment or "\\" in attachment):
+                raise ValueError("attachment must be a short printable filename.")
+            command.append(f"--attachment={attachment}")
+        if "host_key_sha256" in arguments:
+            fp = arguments["host_key_sha256"]
+            if not isinstance(fp, str) or not fp or len(fp) > 128 or not fp.isprintable():
+                raise ValueError("host_key_sha256 must be a valid SSH host key fingerprint.")
+            command.append(f"--host-key-sha256={fp}")
+        if name == "ssh_exec":
+            cmd_text = arguments["command"]
+            if not isinstance(cmd_text, str) or not 1 <= len(cmd_text) <= 8192 or "\0" in cmd_text:
+                raise ValueError("command must be a non-empty string of at most 8192 characters.")
+            sudo = arguments.get("sudo", False)
+            if type(sudo) is not bool:
+                raise ValueError("sudo must be a boolean.")
+            if sudo:
+                command.append("--sudo")
+            if "sudo_entry" in arguments:
+                if not sudo:
+                    raise ValueError("sudo_entry requires sudo=true.")
+                command.append(f"--sudo-entry={_require_uuid(arguments['sudo_entry'], 'sudo_entry')}")
+            request = {"command": cmd_text}
+        elif name == "ssh_upload":
+            remote_path = arguments["remote_path"]
+            if (not isinstance(remote_path, str) or not 1 <= len(remote_path) <= 1024
+                    or "\0" in remote_path or any(ord(c) < 32 or ord(c) == 127 for c in remote_path)):
+                raise ValueError("remote_path must be a printable path up to 1024 characters.")
+            command.append(f"--remote-path={remote_path}")
+            if "mode" in arguments:
+                mode = arguments["mode"]
+                if not isinstance(mode, str) or not re.fullmatch(r"[0-7]{3,4}", mode):
+                    raise ValueError("mode must be a 3- or 4-digit octal string.")
+                command.append(f"--mode={mode}")
+            if ("input_base64" in arguments) == ("content_base64" in arguments):
+                raise ValueError("Provide either input_base64 or content_base64 for ssh_upload.")
+            raw_b64 = arguments.get("input_base64", arguments.get("content_base64"))
+            if not isinstance(raw_b64, str):
+                raise ValueError("Upload content must be a base64 string.")
+            try:
+                decoded = b64decode(raw_b64, validate=True)
+            except ValueError:
+                raise ValueError("Upload content must be valid base64.") from None
+            if len(decoded) > UPLOAD_LIMIT:
+                raise ValueError("Decoded upload exceeds the 8 MiB limit.")
+            if decoded:
+                ssh_upload_bytes = decoded
+                command.append("--input")
+            elif "input_base64" in arguments:
+                raise ValueError("Decoded input_base64 must be between 1 byte and 8 MiB.")
+            else:
+                command.append("--content-base64=")
+        else:
+            remote_path = arguments["remote_path"]
+            if (not isinstance(remote_path, str) or not 1 <= len(remote_path) <= 1024
+                    or "\0" in remote_path or any(ord(c) < 32 or ord(c) == 127 for c in remote_path)):
+                raise ValueError("remote_path must be a printable path up to 1024 characters.")
+            command.append(f"--remote-path={remote_path}")
+            encoding = arguments.get("encoding", "text")
+            if encoding not in ("text", "base64"):
+                raise ValueError("encoding must be 'text' or 'base64'.")
+            if "encoding" in arguments:
+                command.append(f"--encoding={encoding}")
+            if "max_bytes" in arguments:
+                max_bytes = arguments["max_bytes"]
+                limit = 524288 if encoding == "base64" else 1048576
+                if type(max_bytes) is not int or not 1 <= max_bytes <= limit:
+                    raise ValueError(f"max_bytes must be an integer between 1 and {limit}.")
+                command.append(f"--max-bytes={max_bytes}")
     data = encode(request) if request is not None else encode(usage) if usage is not None else b""
     if usage is not None and "input_base64" in arguments:
         command.extend((f"--origin={usage['origin']}", f"--prompt-variable={usage['prompt_variable']}"))
@@ -590,7 +715,9 @@ def invocation(name, arguments):
             command.append("--prompt-contains=" + usage["prompt_contains"])
         if "environment" in usage:
             command.append("--environment-json=" + json.dumps(usage["environment"], separators=(",", ":")))
-    if "input_base64" in arguments:
+    if ssh_upload_bytes is not None:
+        data = ssh_upload_bytes
+    elif "input_base64" in arguments:
         if local_command is None or not isinstance(arguments["input_base64"], str):
             raise ValueError("input_base64 must be a base64 string for a networked command.")
         try:
@@ -660,9 +787,10 @@ class AgentRunner:
             environment = self.environment
             if "note" in arguments:
                 environment = {**environment, "KEEPASSXC_AGENT_NOTE": arguments["note"]}
+            run_timeout = (MAX_SSH_TIMEOUT + CLIENT_TIMEOUT) if params.get("name") in SSH_OPERATIONS else (CLIENT_TIMEOUT + 2)
             result = subprocess.run(command, input=data, capture_output=True, cwd="/",
                                     env=environment, pass_fds=self.pass_fds,
-                                    timeout=CLIENT_TIMEOUT + 2, check=False)
+                                    timeout=run_timeout, check=False)
         except (OSError, subprocess.TimeoutExpired):
             return tool_result("Could not run the Keeper CLI.", True)
         if result.stdout:

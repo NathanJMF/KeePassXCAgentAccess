@@ -30,6 +30,7 @@ class Approval:
     workflow_enrollment: bool = False
     resume_access: bool = False
     provision_account: bool = False
+    ssh_operation: bool = False
     ready: Event = field(default_factory=Event)
 
 

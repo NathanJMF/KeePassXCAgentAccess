@@ -52,6 +52,14 @@ def usage_approval_caption(ticket):
         return "The command approval also covers its status checks and the listed result fields."
     if ticket.workflow_review:
         return "The agent can run the listed operations after approval."
+    if ticket.ssh_operation:
+        if ticket.reuse_minutes and ticket.trusts_certificate:
+            return "Allows SSH reuse for this window and remembers its verified host key for this token and destination."
+        if ticket.reuse_minutes:
+            return "Allows reusing this SSH destination during the approved window."
+        if ticket.trusts_certificate:
+            return "Approves this operation and remembers its verified SSH host key for this token and destination."
+        return "Approval applies to this SSH operation only."
     if ticket.trusts_certificate:
         return "Approves this operation and remembers its verified certificate for this token and resource."
     return "Approval applies to this operation only."
@@ -302,6 +310,9 @@ ACTIVITY_ACTION_ICONS = {
     "Run Guest Command": "utilities-terminal-symbolic",
     "Check Guest Command": "utilities-terminal-symbolic",
     "Release Guest Command": "changes-prevent-symbolic",
+    "Run SSH Command": "utilities-terminal-symbolic",
+    "Upload SSH File": "document-send-symbolic",
+    "Download SSH File": "document-save-symbolic",
     "Open Guest Console": "video-display-symbolic",
     "View Guest Console": "video-display-symbolic",
     "Send Guest Console Input": "input-keyboard-symbolic",
@@ -426,6 +437,15 @@ def credential_use_labels(permission):
                       + "\n".join(permission.origins))
         elif use == "networked_command":
             detail = ("Can send the credential to these approved TCP peers and ports. The command controls protocol and TLS verification. Shared addresses can host multiple services or tenants. Command output and exit status stay private.\n"
+                      + "\n".join(permission.origins))
+        elif use == "ssh_exec":
+            detail = ("Can run SSH commands on these approved ssh:// destinations using this entry’s credentials.\n"
+                      + "\n".join(permission.origins))
+        elif use == "ssh_sftp":
+            detail = ("Can upload and download bounded files over SFTP at these approved ssh:// destinations.\n"
+                      + "\n".join(permission.origins))
+        elif use == "ssh_sudo":
+            detail = ("Can supply a sudo password for elevated SSH commands on these approved ssh:// destinations.\n"
                       + "\n".join(permission.origins))
         else:
             detail = "Approved Destinations:\n" + "\n".join(permission.origins)
@@ -1161,6 +1181,8 @@ class AccessView(Gtk.Box):
             title = "Register and Review Workflow" if ticket.workflow_enrollment else "Review Workflow"
         elif ticket.provision_account:
             title = "Review Account Provisioning"
+        elif ticket.ssh_operation:
+            title = "Review SSH Operation"
         else:
             title = "Review HTTPS Write" if ticket.write_once else "Review Agent Usage"
         dialog, body = _dialog(self.app, title, 620, -1)
@@ -1177,6 +1199,8 @@ class AccessView(Gtk.Box):
             base_label = "Register and Approve" if ticket.workflow_enrollment else "Approve Workflow"
         elif ticket.provision_account:
             base_label = "Provision Once"
+        elif ticket.ssh_operation:
+            base_label = "Approve and Trust Host Key" if ticket.trusts_certificate else "Approve Once"
         else:
             base_label = "Approve Write Once" if ticket.write_once else (
                 "Approve and Trust Certificate" if ticket.trusts_certificate else "Approve Once")

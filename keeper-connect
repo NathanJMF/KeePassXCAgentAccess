@@ -17,10 +17,11 @@ PROFILE_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]*")
 INPUT_PATH_SCHEMA = {
     "type": "string",
     "description": (
-        "Optional local file path read and base64-encoded by keeper-connect for a "
-        "networked command (mutually exclusive with input_base64)."
+        "Optional local file path read and base64-encoded by keeper-connect "
+        "(mutually exclusive with input_base64)."
     ),
 }
+INPUT_PATH_TOOLS = frozenset(("use_password", "ssh_upload"))
 
 
 def encode_message(message):
@@ -74,7 +75,7 @@ def process_outgoing_line(line):
     if not isinstance(req, dict) or req.get("method") != "tools/call":
         return line, None
     params = req.get("params")
-    if not isinstance(params, dict) or params.get("name") != "use_password":
+    if not isinstance(params, dict) or params.get("name") not in INPUT_PATH_TOOLS:
         return line, None
     args = params.get("arguments")
     if not isinstance(args, dict) or "input_path" not in args:
@@ -85,8 +86,8 @@ def process_outgoing_line(line):
             return None, _local_tool_error(req["id"], message)
         return None, None
 
-    if "input_base64" in args:
-        return error_reply("Pass either input_path or input_base64, not both.")
+    if "input_base64" in args or "content_base64" in args:
+        return error_reply("Pass only one of input_path, input_base64, or content_base64, not both.")
     try:
         data = _read_regular_file(args["input_path"])
     except ValueError as error:
@@ -110,7 +111,7 @@ def process_incoming_line(line):
         return line
     changed = False
     for item in result["tools"]:
-        if isinstance(item, dict) and item.get("name") == "use_password":
+        if isinstance(item, dict) and item.get("name") in INPUT_PATH_TOOLS:
             schema = item.get("inputSchema")
             props = schema.get("properties") if isinstance(schema, dict) else None
             if isinstance(props, dict) and "input_path" not in props:

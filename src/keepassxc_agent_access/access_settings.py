@@ -30,6 +30,8 @@ CREDENTIAL_REVIEW_ACTIONS = {
     "use_local_command": "Passwords - Local Commands",
     "use_networked_command": "Passwords - Networked Commands",
     "use_browser": "Passwords - Browser Sign-ins",
+    "use_ssh": "Passwords - SSH Commands",
+    "use_ssh_sftp": "Passwords - SSH File Transfers",
 }
 
 TOKEN_AUTO_APPROVAL_OPTIONS = {
@@ -48,6 +50,9 @@ GUEST_AUTO_APPROVAL_OPTIONS = {
 SCOPED_AUTO_APPROVAL_OPTIONS = {
     "tls_first_pin": ("TLS Certificates - First Use", "Accept the agent’s first fingerprint for an approved destination when the server presents it."),
     "tls_cert_repin": ("TLS Certificates - Accept Changed Fingerprint", "Replace a previously trusted fingerprint when an approved destination presents a new certificate."),
+    "ssh_first_pin": ("SSH Host Keys - First Use", "Accept the first verified SSH host key fingerprint for an approved destination."),
+    "ssh_key_repin": ("SSH Host Keys - Accept Changed Key", "Replace a previously trusted SSH host key when an approved host presents a new key."),
+    "ssh_reuse": ("SSH Connections - Reuse Window", "Allow reusing an approved SSH destination within the requested window without prompting on each command."),
     "https_write_once": ("HTTPS - One-Time Writes", "Allow writes already covered by the token’s HTTPS permission."),
     "workflow": ("Workflows - Run", "Allow exact workflows whose steps and pinned destination are already covered."),
     "guest_first_use": ("Guest Connections - First Use", "Start a scoped guest command or console at a trusted endpoint when its switch is on."),
@@ -258,35 +263,56 @@ class Destination:
     host: str
     port: int
     path: str
+    scheme: str = "https"
 
     @property
     def url(self):
         host = f"[{self.host}]" if ":" in self.host else self.host
-        return f"https://{host}:{self.port}{self.path}"
+        if self.scheme in ("ssh", "tcp"):
+            return f"{self.scheme}://{host}:{self.port}"
+        return f"{self.scheme}://{host}:{self.port}{self.path}"
 
     @classmethod
-    def parse(cls, url):
-        error = ValueError("Enter an HTTPS endpoint with a host and path and without query, fragment, or credentials.")
+    def parse(cls, url, *, allowed_schemes=("https",)):
+        https_only = tuple(allowed_schemes) == ("https",)
+        error = ValueError(
+            "Enter an HTTPS endpoint with a host and path and without query, fragment, or credentials."
+            if https_only else
+            f"Enter a valid {', '.join(scheme.upper() for scheme in allowed_schemes)} endpoint without query, fragment, or credentials."
+        )
         if not isinstance(url, str) or not re.fullmatch(r"[!-~]{1,2048}", url) or any(c in url for c in "?#\\"):
             raise error
         parts = urlsplit(url)
-        if parts.scheme != "https" or not parts.hostname or "@" in parts.netloc or "%" in parts.netloc:
+        if parts.scheme not in allowed_schemes or not parts.hostname or "@" in parts.netloc or "%" in parts.netloc:
             raise error
         host = parts.hostname
         authority = r"\[[0-9a-fA-F:.]+\](?::[0-9]+)?" if ":" in host else r"[A-Za-z0-9.-]+(?::[0-9]+)?"
         if not re.fullmatch(authority, parts.netloc):
             raise error
-        port = 443 if parts.port is None else parts.port
+        if parts.port is None:
+            if parts.scheme == "https":
+                port = 443
+            elif parts.scheme == "ssh":
+                port = 22
+            else:
+                raise ValueError("Enter an explicit port for a TCP endpoint.")
+        else:
+            port = parts.port
         if not 0 < port <= 65535:
             raise error
         if ":" not in host and not re.fullmatch(r"[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?", host):
             raise error
         if ":" in host:
             host = str(ipaddress.IPv6Address(host))
-        path = parts.path or "/"
-        if path.startswith("//"):
-            raise error
-        return cls(host, port, path)
+        if parts.scheme in ("ssh", "tcp"):
+            if parts.path not in ("", "/"):
+                raise ValueError(f"{parts.scheme.upper()} destinations cannot include a path.")
+            path = ""
+        else:
+            path = parts.path or "/"
+            if path.startswith("//"):
+                raise error
+        return cls(host, port, path, parts.scheme)
 
 
 @dataclass(frozen=True)
@@ -465,8 +491,8 @@ class Action:
                     r"[A-Z][A-Z0-9_]{0,39}_ASKPASS", self.prompt_variable
                 ):
                     raise ValueError("Choose a credential prompt variable ending in _ASKPASS.")
-                destination = Destination.parse(self.url)
-                if destination.path != "/":
+                destination = Destination.parse(self.url, allowed_schemes=("https", "tcp"))
+                if destination.scheme == "https" and destination.path != "/":
                     raise ValueError("Enter the approved HTTPS origin. Put the exact resource in the command.")
                 object.__setattr__(self, "url", destination.url)
             elif self.url or self.prompt_variable or self.accepts_input:

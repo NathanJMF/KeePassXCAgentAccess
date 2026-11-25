@@ -163,7 +163,8 @@ class RunnerTests(TestCase):
                           "request_edit", "edit_status", "list_vaults", "list_entries", "use_password",
                           "write_status", "guest_run", "guest_status", "guest_release", "guest_wait",
                           "console_open", "console_view", "console_wait", "console_input", "console_close",
-                          "workflow_request", "workflow_status", "workflow_run", "provision_account"})
+                          "workflow_request", "workflow_status", "workflow_run", "provision_account",
+                          "ssh_exec", "ssh_upload", "ssh_download"})
         self.assertEqual(payload(replies[2]), MISSING)
         self.assertEqual(stat.S_IMODE(self.profile.stat().st_mode), 0o700)
         self.assertEqual(list(self.profile.iterdir()), [])

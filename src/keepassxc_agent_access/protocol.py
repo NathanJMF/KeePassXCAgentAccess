@@ -14,6 +14,9 @@ MAX_CONSOLE_REUSE_MINUTES = 60
 GUEST_OPERATIONS = frozenset({"guest_run", "guest_status", "guest_release"})
 MAX_GUEST_REUSE_MINUTES = 60
 MAX_GUEST_TEXT = 2048
+SSH_OPERATIONS = frozenset({"ssh_exec", "ssh_upload", "ssh_download"})
+MAX_SSH_TIMEOUT = 120
+MAX_SSH_REUSE_MINUTES = 60
 MAX_WAIT_SECONDS = 60
 MAX_TOKEN_LIFESPAN_DAYS = 365
 WORKFLOW_OPERATIONS = frozenset({"workflow_request", "workflow_run", "workflow_status"})
@@ -55,6 +58,8 @@ ERRORS = {
     "token_storage": "The runner token file is unavailable or unsafe.",
     "audit_unavailable": "The broker could not verify settings or record the decision.",
     "too_large": "The request or response exceeds the size limit.",
+    "host_key_mismatch": "The SSH server presented a host key that does not match the expected fingerprint.",
+    "ssh_failed": "The SSH operation could not be completed.",
 }
 
 

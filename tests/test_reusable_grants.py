@@ -78,7 +78,7 @@ class ReusableGrantTests(TestCase):
             self.request(origins=("https://service.example.test/?query=yes",)),
             self.request(origins=("https://user@service.example.test/",)),
             self.request(origins=("https://service.example.test/", "https://service.example.test:443/")),
-            self.request(origins=tuple(f"https://host-{index}.example.test/" for index in range(9))),
+            self.request(origins=tuple(f"https://host-{index}.example.test/" for index in range(17))),
             self.request(uses=(), origins=("https://service.example.test/",)),
             self.request(uses=("https_body",)),
             self.request(uses=("local_command",)),
@@ -175,7 +175,10 @@ class ReusableGrantTests(TestCase):
             )
 
     def test_permission_text_exposes_transports_and_pinned_recipients(self):
-        item = Item.parse(self.request(uses=tuple(CREDENTIAL_USES)))
+        item = Item.parse(self.request(
+            uses=tuple(CREDENTIAL_USES),
+            origins=("https://service.example.test/", "ssh://host.example.test/"),
+        ))
         labels = dict(credential_use_labels(item))
         self.assertEqual(set(labels), set(CREDENTIAL_USES.values()))
         self.assertIn("Command output and exit status stay private", labels[CREDENTIAL_USES["local_command"]])
@@ -186,7 +189,8 @@ class ReusableGrantTests(TestCase):
         text = token_permissions(self.workspace.registrations[self.vault], [scope])
         for caption in CREDENTIAL_USES.values():
             self.assertIn(caption, text)
-        self.assertIn("Approved Destinations: https://service.example.test:443/", text)
+        self.assertIn("https://service.example.test:443/", text)
+        self.assertIn("ssh://host.example.test:22", text)
         self.assertNotIn("Entry Metadata", text)
 
     def test_denied_and_removed_profiles_can_re_enroll_and_preserve_unrelated_pins(self):

@@ -15,10 +15,11 @@ from .activity import ActivityError, Attribution, entry_label, entry_target_labe
 from .console_access import ConsoleAccess
 from .grants import LIVE_GRANT_STATES, OPTIONAL_METADATA_FIELDS, verifier
 from .guest_access import GuestAccess
-from .protocol import (CONSOLE_OPERATIONS, ERRORS, GUEST_OPERATIONS, RESPONSE_LIMIT, WORKFLOW_OPERATIONS, ListingError,
-                       decode, encode, validate_command, validate_upload)
+from .protocol import (CONSOLE_OPERATIONS, ERRORS, GUEST_OPERATIONS, RESPONSE_LIMIT, SSH_OPERATIONS, WORKFLOW_OPERATIONS,
+                       ListingError, decode, encode, validate_command, validate_upload)
 from .result_delivery import result_fields
 from .settings import SettingsError
+from .ssh_access import SshAccess
 from .usage import requires_body_permission, requires_write_permission, usage_action, usage_origin
 from .workflow import WorkflowAccess
 
@@ -45,6 +46,8 @@ def access_details(token, workspace=None):
             result["stale"] = bool(value.uses and (reg is None or value.use_revision != reg.credential_revision(value.entry)))
             if value.result_certificates:
                 result["pinned_origins"] = sorted(origin for origin, _ in value.result_certificates)
+            if value.ssh_host_keys:
+                result["pinned_ssh_hosts"] = sorted(origin for origin, _ in value.ssh_host_keys)
         return result
 
     pending = token.pending_change
@@ -89,6 +92,7 @@ class ScopedBroker:
         self.certificate_reviews = set()
         self.console_access = ConsoleAccess(self)
         self.guest_access = GuestAccess(self)
+        self.ssh_access = SshAccess(self)
         self.workflows = WorkflowAccess(self)
 
     @contextmanager
@@ -163,6 +167,13 @@ class ScopedBroker:
                         raise ValueError
             elif operation in GUEST_OPERATIONS and upload is None:
                 pass
+            elif operation in SSH_OPERATIONS:
+                if operation != "ssh_upload" and upload is not None:
+                    raise ValueError
+                if operation == "ssh_upload" and "upload" in keys:
+                    if upload is None:
+                        raise ValueError
+                    input_info = validate_upload(payload["upload"])
             elif operation == "edit_status" and keys == {"id"}:
                 pass
             elif operation == "write_status" and keys == {"receipt"}:
@@ -244,6 +255,12 @@ class ScopedBroker:
                                                 approved_step=approved_step)
             except (ValueError, TypeError, KeyError, AttributeError, RecursionError):
                 raise ListingError("invalid_request", detail="Invalid guest command request.") from None
+        if operation in SSH_OPERATIONS:
+            try:
+                return self.ssh_access.handle(operation, keys, payload, uid, context, live, dispatch, deliver,
+                                              upload=upload, input_info=input_info)
+            except (ValueError, TypeError, KeyError, AttributeError, RecursionError):
+                raise ListingError("invalid_request", detail="Invalid SSH request.") from None
         if operation in WORKFLOW_OPERATIONS:
             if operation == "workflow_request":
                 try:
@@ -780,7 +797,7 @@ class ScopedBroker:
         if action.kind == ActionType.STDIN:
             return "Isolated local command"
         if action.kind == ActionType.NETWORK_PROMPT:
-            target = Destination.parse(action.url)
+            target = Destination.parse(action.url, allowed_schemes=("https", "tcp"))
             return f"TCP peer {target.host}:{target.port}"
         operation = "Browser form POST" if action.browser else action.method
         return f"{operation} {usage_origin(action.url)}"

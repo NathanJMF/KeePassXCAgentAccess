@@ -92,7 +92,8 @@ class AccessStorageTests(TestCase):
 
         migrated = store.read()
         self.assertEqual(migrated, replace(default, review_actions=frozenset({
-            "use_https", "use_local_command", "use_networked_command", "use_browser", "list_entries",
+            "use_https", "use_local_command", "use_networked_command", "use_browser",
+            "use_ssh", "use_ssh_sftp", "list_entries",
         })))
         updated = replace(migrated, review_actions=frozenset({"use_local_command", "list_entries"}))
         store.write(updated)

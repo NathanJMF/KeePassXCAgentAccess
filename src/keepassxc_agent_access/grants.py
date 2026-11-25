@@ -16,7 +16,7 @@ from .settings import SettingsError, write_private_json
 from .workspace import new_id, ordered_groups
 
 
-MAX_ITEMS = 16
+MAX_ITEMS = 32
 MAX_PENDING = 64
 LIVE_GRANT_STATES = frozenset(("pending", "active", "disabled"))
 OPTIONAL_METADATA_FIELDS = ("username", "url")
@@ -27,9 +27,15 @@ CREDENTIAL_USES = {
     "https_body": "API Request Bodies (Credential Disclosure)",
     "https_results": "Read Selected HTTPS Results",
     "browser": "Use Password in Browser Sign-ins",
+    "ssh_exec": "Run SSH Commands",
+    "ssh_sftp": "Transfer Files Over SSH",
+    "ssh_sudo": "Run Elevated SSH Commands (sudo)",
 }
-NETWORK_CREDENTIAL_USES = frozenset(("networked_command", "https", "https_body", "https_results", "browser"))
-MAX_ORIGINS = 8
+NETWORK_CREDENTIAL_USES = frozenset((
+    "networked_command", "https", "https_body", "https_results", "browser",
+    "ssh_exec", "ssh_sftp", "ssh_sudo",
+))
+MAX_ORIGINS = 16
 ENTRY_EDITS = {
     "update_entry": "Update Entry Details",
     "move_entry": "Move Entry",
@@ -58,22 +64,45 @@ def _edit_permissions(values, allowed):
 def credential_permissions(uses, origins, *, group=None):
     """Freeze transport permissions and the destinations explicitly reviewed by the owner."""
     uses = _edit_permissions(uses, CREDENTIAL_USES)
-    if "https_body" in uses and not {"https", "https_results"} & set(uses):
+    use_set = set(uses)
+    if "https_body" in use_set and not {"https", "https_results"} & use_set:
         raise ValueError("Credential request bodies also require HTTPS use permission.")
+    if "ssh_sudo" in use_set and "ssh_exec" not in use_set:
+        raise ValueError("Elevated SSH commands also require SSH command execution permission.")
     if not isinstance(origins, (tuple, list)) or len(origins) > MAX_ORIGINS:
-        raise ValueError("Choose at most eight approved destinations.")
+        raise ValueError(f"Choose at most {MAX_ORIGINS} approved destinations.")
+    if group is not None and (uses or origins):
+        raise ValueError("Credential use permissions belong to individual entries.")
+    needs_ssh = bool(use_set & {"ssh_exec", "ssh_sftp", "ssh_sudo"})
+    needs_https = bool(use_set & {"https", "https_body", "https_results", "browser"})
+    needs_network_cmd = "networked_command" in use_set
+    allowed = tuple(
+        scheme for scheme, enabled in (
+            ("https", needs_https or needs_network_cmd),
+            ("ssh", needs_ssh),
+            ("tcp", needs_network_cmd),
+        ) if enabled
+    )
+    if not allowed and origins:
+        raise ValueError("Network credential use requires explicit approved destinations.")
     normalized = []
+    seen_schemes = set()
     for value in origins:
-        destination = Destination.parse(value)
-        if destination.path != "/":
+        destination = Destination.parse(value, allowed_schemes=allowed)
+        if destination.scheme == "https" and destination.path != "/":
             raise ValueError("Credential destinations must be HTTPS origins without a path.")
         normalized.append(destination.url)
+        seen_schemes.add(destination.scheme)
     if len(set(normalized)) != len(normalized):
         raise ValueError("Approved destinations must be unique.")
-    if group is not None and (uses or normalized):
-        raise ValueError("Credential use permissions belong to individual entries.")
-    if bool(set(uses) & NETWORK_CREDENTIAL_USES) != bool(normalized):
+    if bool(use_set & NETWORK_CREDENTIAL_USES) != bool(normalized):
         raise ValueError("Network credential use requires explicit approved destinations.")
+    if needs_ssh and "ssh" not in seen_schemes:
+        raise ValueError("SSH credential uses require at least one ssh:// destination.")
+    if needs_https and "https" not in seen_schemes:
+        raise ValueError("HTTPS and browser credential uses require at least one https:// destination.")
+    if needs_network_cmd and not (seen_schemes & {"https", "tcp"}):
+        raise ValueError("Networked command use requires an https:// or tcp:// destination.")
     return uses, tuple(sorted(normalized))
 
 
@@ -141,6 +170,19 @@ class Item:
                    group=uuid_text(group) if group is not None else None, edits=edits, uses=uses, origins=origins)
 
 
+def _validate_origin_pins(pins, *, origins, uses, use_revision, required_uses, error_message, required_scheme=None):
+    if (not isinstance(pins, (list, tuple)) or len(pins) > MAX_ORIGINS
+            or any(not isinstance(pair, (list, tuple)) or len(pair) != 2
+                   or not isinstance(pair[0], str) or pair[0] not in origins
+                   or (required_scheme is not None and not pair[0].startswith(f"{required_scheme}://"))
+                   or not isinstance(pair[1], str) or not re.fullmatch(r"[0-9a-f]{64}", pair[1])
+                   for pair in pins)
+            or len({pair[0] for pair in pins}) != len(pins)
+            or pins and (not (set(uses) & required_uses) or use_revision is None)):
+        raise ValueError(error_message)
+    return tuple(sorted(tuple(pair) for pair in pins))
+
+
 @dataclass(frozen=True)
 class Scope:
     vault: str
@@ -156,6 +198,7 @@ class Scope:
     origins: tuple[str, ...] = ()
     use_revision: str | None = None
     result_certificates: tuple[tuple[str, str], ...] = ()
+    ssh_host_keys: tuple[tuple[str, str], ...] = ()
 
     def __post_init__(self):
         if self.use_revision is not None and (not isinstance(self.use_revision, str)
@@ -166,16 +209,15 @@ class Scope:
         uses, origins = credential_permissions(self.uses, self.origins, group=self.group)
         object.__setattr__(self, "uses", uses)
         object.__setattr__(self, "origins", origins)
-        certificates = self.result_certificates
-        if (not isinstance(certificates, (list, tuple)) or len(certificates) > MAX_ORIGINS
-                or any(not isinstance(pair, (list, tuple)) or len(pair) != 2
-                       or not isinstance(pair[0], str) or pair[0] not in origins
-                       or not isinstance(pair[1], str) or not re.fullmatch(r"[0-9a-f]{64}", pair[1])
-                       for pair in certificates)
-                or len({pair[0] for pair in certificates}) != len(certificates)
-                or certificates and ("https_results" not in uses or self.use_revision is None)):
-            raise ValueError("Invalid owner-approved result certificates.")
-        object.__setattr__(self, "result_certificates", tuple(sorted(tuple(pair) for pair in certificates)))
+        object.__setattr__(self, "result_certificates", _validate_origin_pins(
+            self.result_certificates, origins=origins, uses=uses, use_revision=self.use_revision,
+            required_uses={"https_results"}, error_message="Invalid owner-approved result certificates.",
+        ))
+        object.__setattr__(self, "ssh_host_keys", _validate_origin_pins(
+            self.ssh_host_keys, origins=origins, uses=uses, use_revision=self.use_revision,
+            required_uses={"ssh_exec", "ssh_sftp"}, required_scheme="ssh",
+            error_message="Invalid owner-approved SSH host keys.",
+        ))
 
     def audit_summary(self):
         operations = [name for name in ("metadata", *OPTIONAL_METADATA_FIELDS) if getattr(self, name)]
@@ -406,26 +448,91 @@ class Grants:
         self._put(draft)
 
     @staticmethod
-    def result_certificate_pins(record, vault, entry, revision, origin):
-        return tuple(dict(scope.result_certificates).get(origin) for scope in record.scope
+    def _origin_pins(record, vault, entry, revision, origin, *, field, required_uses):
+        return tuple(dict(getattr(scope, field)).get(origin) for scope in record.scope
                      if (scope.vault, scope.entry, scope.use_revision) == (vault, entry, revision)
-                     and "https_results" in scope.uses and origin in scope.origins)
+                     and (required_uses & set(scope.uses)) and origin in scope.origins)
 
-    def result_certificate_status(self, record, vault, entry, revision, origin, fingerprint):
-        pins = self.result_certificate_pins(record, vault, entry, revision, origin)
+    def _pin_status(self, record, vault, entry, revision, origin, fingerprint, *, field, required_uses):
+        pins = self._origin_pins(record, vault, entry, revision, origin, field=field, required_uses=required_uses)
         trusted = bool(pins) and all(pin == fingerprint for pin in pins)
         first_pin = bool(pins) and not any(pins)
         changed_pin = bool(pins) and any(pins) and not trusted
         return pins, trusted, first_pin, changed_pin
 
-    def result_certificate_auto_pin(self, record, vault, entry, revision, origin, fingerprint):
-        pins, trusted, first_pin, changed_pin = self.result_certificate_status(
-            record, vault, entry, revision, origin, fingerprint)
+    def _pin_auto_pin(self, record, vault, entry, revision, origin, fingerprint, *,
+                      field, required_uses, first_option, repin_option):
+        pins, trusted, first_pin, changed_pin = self._pin_status(
+            record, vault, entry, revision, origin, fingerprint, field=field, required_uses=required_uses)
         auto_pin = (
-            (first_pin and self.workspace.scoped_auto_approval_enabled("tls_first_pin"))
-            or (changed_pin and self.workspace.scoped_auto_approval_enabled("tls_cert_repin"))
+            (first_pin and self.workspace.scoped_auto_approval_enabled(first_option))
+            or (changed_pin and self.workspace.scoped_auto_approval_enabled(repin_option))
         )
         return pins, trusted, auto_pin
+
+    def _trust_origin_pin(self, identifier, generation, vault, entry, revision, origin, fingerprint, expected, *,
+                          field, required_uses):
+        with self.workspace.mutex:
+            record = self.records[identifier]
+            if not self.is_active(record) or record.generation != generation:
+                raise ListingError("revoked")
+            pins = self._origin_pins(record, vault, entry, revision, origin, field=field, required_uses=required_uses)
+            if not pins or (pins != expected and any(pin != fingerprint for pin in pins)):
+                # Another owner decision replaced the pin while this dialog
+                # was open. A stale approval must not restore old trust.
+                raise ListingError("revoked")
+            scopes = []
+            matched = False
+            for scope in record.scope:
+                if ((scope.vault, scope.entry, scope.use_revision) == (vault, entry, revision)
+                        and (required_uses & set(scope.uses)) and origin in scope.origins):
+                    entries = dict(getattr(scope, field))
+                    entries[origin] = fingerprint
+                    scope = replace(scope, **{field: tuple(entries.items())})
+                    matched = True
+                scopes.append(scope)
+            if not matched:
+                raise ListingError("revoked")
+            self._put(replace(record, scope=tuple(scopes)))
+
+    @classmethod
+    def result_certificate_pins(cls, record, vault, entry, revision, origin):
+        return cls._origin_pins(record, vault, entry, revision, origin,
+                                field="result_certificates", required_uses=frozenset({"https_results"}))
+
+    def result_certificate_status(self, record, vault, entry, revision, origin, fingerprint):
+        return self._pin_status(record, vault, entry, revision, origin, fingerprint,
+                                field="result_certificates", required_uses=frozenset({"https_results"}))
+
+    def result_certificate_auto_pin(self, record, vault, entry, revision, origin, fingerprint):
+        return self._pin_auto_pin(record, vault, entry, revision, origin, fingerprint,
+                                  field="result_certificates", required_uses=frozenset({"https_results"}),
+                                  first_option="tls_first_pin", repin_option="tls_cert_repin")
+
+    @classmethod
+    def ssh_host_key_pins(cls, record, vault, entry, revision, origin):
+        return cls._origin_pins(record, vault, entry, revision, origin,
+                                field="ssh_host_keys", required_uses=frozenset({"ssh_exec", "ssh_sftp"}))
+
+    def ssh_host_key_status(self, record, vault, entry, revision, origin, fingerprint):
+        return self._pin_status(record, vault, entry, revision, origin, fingerprint,
+                                field="ssh_host_keys", required_uses=frozenset({"ssh_exec", "ssh_sftp"}))
+
+    def ssh_host_key_auto_pin(self, record, vault, entry, revision, origin, fingerprint):
+        return self._pin_auto_pin(record, vault, entry, revision, origin, fingerprint,
+                                  field="ssh_host_keys", required_uses=frozenset({"ssh_exec", "ssh_sftp"}),
+                                  first_option="ssh_first_pin", repin_option="ssh_key_repin")
+
+    def ssh_host_key_trusted(self, record, vault, entry, revision, origin, fingerprint):
+        pins = self.ssh_host_key_pins(record, vault, entry, revision, origin)
+        return bool(pins) and all(pin == fingerprint for pin in pins)
+
+    def trust_ssh_host_key(self, identifier, generation, vault, entry, revision, origin, fingerprint, expected):
+        """Pin an owner-approved or first-use SSH host key fingerprint onto this scope."""
+        return self._trust_origin_pin(
+            identifier, generation, vault, entry, revision, origin, fingerprint, expected,
+            field="ssh_host_keys", required_uses=frozenset({"ssh_exec", "ssh_sftp"}),
+        )
 
     @staticmethod
     def _scope_without_revision(scope):
@@ -433,20 +540,29 @@ class Grants:
                 scope.username, scope.url, scope.edits, scope.uses, scope.origins)
 
     @staticmethod
-    def _preserve_result_certificates(previous_scope, new_scopes):
-        known = {(item.vault, item.entry, origin): pin
-                 for item in previous_scope for origin, pin in item.result_certificates}
-        if not known:
+    def _preserve_trusted_pins(previous_scope, new_scopes):
+        known_certs = {(item.vault, item.entry, origin): pin
+                       for item in previous_scope for origin, pin in item.result_certificates}
+        known_ssh = {(item.vault, item.entry, origin): pin
+                     for item in previous_scope for origin, pin in item.ssh_host_keys}
+        if not known_certs and not known_ssh:
             return new_scopes
         preserved = []
         for scope in new_scopes:
             if "https_results" in scope.uses and scope.use_revision is not None and not scope.result_certificates:
-                certs = tuple((origin, known[(scope.vault, scope.entry, origin)])
-                              for origin in scope.origins if (scope.vault, scope.entry, origin) in known)
+                certs = tuple((origin, known_certs[(scope.vault, scope.entry, origin)])
+                              for origin in scope.origins if (scope.vault, scope.entry, origin) in known_certs)
                 if certs:
                     scope = replace(scope, result_certificates=certs)
+            if ({"ssh_exec", "ssh_sftp"} & set(scope.uses)) and scope.use_revision is not None and not scope.ssh_host_keys:
+                keys = tuple((origin, known_ssh[(scope.vault, scope.entry, origin)])
+                             for origin in scope.origins if (scope.vault, scope.entry, origin) in known_ssh)
+                if keys:
+                    scope = replace(scope, ssh_host_keys=keys)
             preserved.append(scope)
         return tuple(preserved)
+
+    _preserve_result_certificates = _preserve_trusted_pins
 
     def refresh_rotated_credential(self, token_id, vault, entry, revision):
         if revision is None or self.workspace.paused or not self.workspace.token_auto_approval_enabled("auto_approve_token_rotations"):
@@ -521,28 +637,10 @@ class Grants:
         This is never an enrollment field. The broker records trust at verified
         dispatch after an owner review or the owner's explicit first-pin policy.
         """
-        with self.workspace.mutex:
-            record = self.records[identifier]
-            if not self.is_active(record) or record.generation != generation:
-                raise ListingError("revoked")
-            pins = self.result_certificate_pins(record, vault, entry, revision, origin)
-            if not pins or (pins != expected and any(pin != fingerprint for pin in pins)):
-                # Another owner decision replaced the certificate while this
-                # dialog was open. A stale approval must not restore old trust.
-                raise ListingError("revoked")
-            scopes = []
-            matched = False
-            for scope in record.scope:
-                if ((scope.vault, scope.entry, scope.use_revision) == (vault, entry, revision)
-                        and "https_results" in scope.uses and origin in scope.origins):
-                    certificates = dict(scope.result_certificates)
-                    certificates[origin] = fingerprint
-                    scope = replace(scope, result_certificates=tuple(certificates.items()))
-                    matched = True
-                scopes.append(scope)
-            if not matched:
-                raise ListingError("revoked")
-            self._put(replace(record, scope=tuple(scopes)))
+        return self._trust_origin_pin(
+            identifier, generation, vault, entry, revision, origin, fingerprint, expected,
+            field="result_certificates", required_uses=frozenset({"https_results"}),
+        )
 
     def enroll(self, credential, uid, payload, attribution):
         try:
@@ -745,7 +843,7 @@ class Grants:
         released = tuple(entry for entry in record.released_entries if entry not in granted)
         action = "Approve token permissions" if change_id else "Approve token"
         if change_id:
-            scope = self._preserve_result_certificates(record.scope, scope)
+            scope = self._preserve_trusted_pins(record.scope, scope)
         row = replace(record, status="active", scope=scope, released_entries=released)
         if change_id:
             row = replace(row, change=replace(change, status="active"), generation=record.generation + 1)

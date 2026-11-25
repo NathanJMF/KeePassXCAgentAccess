@@ -16,15 +16,16 @@ from urllib.parse import urlsplit
 from .runner_token import UninitializedProfile, credential
 from .protocol import (
     CLIENT_TIMEOUT, CONSOLE_OPERATIONS, CONSOLE_SECONDS, ERRORS, GUEST_OPERATIONS, LIST_REQUEST, ListingError,
-    MAX_CONSOLE_REUSE_MINUTES, MAX_GUEST_REUSE_MINUTES, MAX_GUEST_TEXT, MAX_TOKEN_LIFESPAN_DAYS, MAX_WAIT_SECONDS,
-    REQUEST_LIMIT, REQUEST_TIMEOUT, RESPONSE_LIMIT, UPLOAD_LIMIT, WORKFLOW_OPERATIONS,
+    MAX_CONSOLE_REUSE_MINUTES, MAX_GUEST_REUSE_MINUTES, MAX_GUEST_TEXT, MAX_SSH_REUSE_MINUTES, MAX_SSH_TIMEOUT,
+    MAX_TOKEN_LIFESPAN_DAYS, MAX_WAIT_SECONDS, REQUEST_LIMIT, REQUEST_TIMEOUT, RESPONSE_LIMIT, SSH_OPERATIONS,
+    UPLOAD_LIMIT, WORKFLOW_OPERATIONS,
     decode, encode, receive, remaining, sanitize_error_detail, validate_command,
 )
 
 
 ENTRY_FIELDS = ("username", "url")
 USE_TYPES = frozenset(("local_command", "networked_command", "https", "https_results", "browser"))
-CREDENTIAL_USE_TYPES = USE_TYPES | {"https_body"}
+CREDENTIAL_USE_TYPES = USE_TYPES | {"https_body", "ssh_exec", "ssh_sftp", "ssh_sudo"}
 EDIT_STATUSES = ("pending", "applying", "applied", "denied", "stale", "interrupted", "failed")
 EDIT_OPERATIONS = {
     "create_entry": (("parent",), {"title"}, {"username", "url"}),
@@ -81,30 +82,47 @@ def edit_request(data):
     return {**data, **normalized}
 
 
-def https_target(value, *, origin=False):
-    """Validate agent-side HTTPS syntax without importing owner-side modules."""
+def endpoint_target(value, *, allowed_schemes=("https",), origin=False):
+    """Validate agent-side endpoint syntax without importing owner-side modules."""
     if (not isinstance(value, str) or not re.fullmatch(r"[!-~]{1,2048}", value)
             or any(char in value for char in "?#\\")):
         raise ValueError
     parts = urlsplit(value)
-    if parts.scheme != "https" or not parts.hostname or "@" in parts.netloc or "%" in parts.netloc:
+    if parts.scheme not in allowed_schemes or not parts.hostname or "@" in parts.netloc or "%" in parts.netloc:
         raise ValueError
     host = parts.hostname
     authority = r"\[[0-9a-fA-F:.]+\](?::[0-9]+)?" if ":" in host else r"[A-Za-z0-9.-]+(?::[0-9]+)?"
     if not re.fullmatch(authority, parts.netloc):
         raise ValueError
-    port = 443 if parts.port is None else parts.port
+    if parts.port is None:
+        if parts.scheme == "https":
+            port = 443
+        elif parts.scheme == "ssh":
+            port = 22
+        else:
+            raise ValueError
+    else:
+        port = parts.port
     if not 0 < port <= 65535:
         raise ValueError
     if ":" in host:
         host = str(ipaddress.IPv6Address(host))
     elif not re.fullmatch(r"[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?", host):
         raise ValueError
+    authority = f"[{host}]" if ":" in host else host
+    if parts.scheme in ("ssh", "tcp"):
+        if parts.path not in ("", "/"):
+            raise ValueError
+        return f"{parts.scheme}://{authority}:{port}"
     path = parts.path or "/"
     if path.startswith("//") or origin and path != "/":
         raise ValueError
-    authority = f"[{host}]" if ":" in host else host
     return f"https://{authority}:{port}{path}"
+
+
+def https_target(value, *, origin=False):
+    """Validate agent-side HTTPS syntax without importing owner-side modules."""
+    return endpoint_target(value, allowed_schemes=("https",), origin=origin)
 
 
 def result_pointer(value):
@@ -227,7 +245,7 @@ def usage_request(data):
             raise ValueError
         command = validate_command(data["command"])
         if kind == "networked_command":
-            https_target(data["origin"], origin=True)
+            endpoint_target(data["origin"], allowed_schemes=("https", "tcp"), origin=True)
             expected_prompt = data.get("prompt_contains", "password")
             if (not isinstance(expected_prompt, str) or not expected_prompt.strip()
                     or not expected_prompt.isprintable() or len(expected_prompt) > 80):
@@ -310,8 +328,8 @@ def _validate_access_details(reply):
         fields = {"vault", "entry", "group", "metadata", "username", "url", "action", "edits"}
         if requested:
             fields.add("label")
-        scope_optional = set() if requested else {"vault_locked", "stale", "pinned_origins"}
-        if not isinstance(values, list) or len(values) > 16:
+        scope_optional = set() if requested else {"vault_locked", "stale", "pinned_origins", "pinned_ssh_hosts"}
+        if not isinstance(values, list) or len(values) > 32:
             raise ValueError
         for value in values:
             if (not isinstance(value, dict) or not fields <= value.keys() <= fields | {"uses", "origins"} | scope_optional
@@ -321,17 +339,22 @@ def _validate_access_details(reply):
                 for flag in ("vault_locked", "stale"):
                     if flag in value and type(value[flag]) is not bool:
                         raise ValueError
-                if "pinned_origins" in value:
-                    pinned = value["pinned_origins"]
-                    if (not isinstance(pinned, list) or not 1 <= len(pinned) <= 8
-                            or any(https_target(origin, origin=True) != origin for origin in pinned)
-                            or len(set(pinned)) != len(pinned)):
-                        raise ValueError
+                for pin_field, schemes in (("pinned_origins", ("https",)), ("pinned_ssh_hosts", ("ssh",))):
+                    if pin_field in value:
+                        pinned = value[pin_field]
+                        if (not isinstance(pinned, list) or not 1 <= len(pinned) <= 16
+                                or any(endpoint_target(origin, allowed_schemes=schemes, origin=True) != origin
+                                       for origin in pinned)
+                                or len(set(pinned)) != len(pinned)):
+                            raise ValueError
             uses, origins = value.get("uses", []), value.get("origins", [])
             if (not isinstance(uses, list) or any(not isinstance(use, str) or use not in CREDENTIAL_USE_TYPES for use in uses)
-                    or len(set(uses)) != len(uses) or "https_body" in uses and not {"https", "https_results"} & set(uses)
-                    or not isinstance(origins, list) or len(origins) > 8
-                    or any(https_target(origin, origin=True) != origin for origin in origins)
+                    or len(set(uses)) != len(uses)
+                    or "https_body" in uses and not {"https", "https_results"} & set(uses)
+                    or "ssh_sudo" in uses and "ssh_exec" not in uses
+                    or not isinstance(origins, list) or len(origins) > 16
+                    or any(endpoint_target(origin, allowed_schemes=("https", "ssh", "tcp"), origin=True) != origin
+                           for origin in origins)
                     or len(set(origins)) != len(origins)
                     or bool(set(uses) - {"local_command"}) != bool(origins)
                     or value.get("group") is not None and uses):
@@ -485,6 +508,40 @@ def _validate(reply, payload):
                 or (outcome == "uncertain" and code is not None)
                 or (operation == "guest_status" and outcome not in ("succeeded", "failed"))):
             raise ListingError("invalid_response")
+        return reply
+    if operation in SSH_OPERATIONS:
+        outcome = reply.get("outcome")
+        if outcome not in ("succeeded", "failed"):
+            raise ListingError("invalid_response")
+        has_reuse = bool(payload.get("reuse_minutes"))
+        if has_reuse:
+            reuse = reply.get("reuse_expires_in")
+            if type(reuse) is not int or not 0 <= reuse <= MAX_SSH_REUSE_MINUTES * 60:
+                raise ListingError("invalid_response")
+        elif "reuse_expires_in" in reply:
+            raise ListingError("invalid_response")
+        if operation == "ssh_exec":
+            required = {"outcome", "exit_code", "stdout", "stderr"} | ({"reuse_expires_in"} if has_reuse else set())
+            if (not required <= reply.keys() <= required | {"truncated"}
+                    or type(reply["exit_code"]) is not int
+                    or not isinstance(reply["stdout"], str) or not isinstance(reply["stderr"], str)
+                    or ("truncated" in reply and type(reply["truncated"]) is not bool)):
+                raise ListingError("invalid_response")
+        elif operation == "ssh_upload":
+            expected = {"outcome", "remote_path", "bytes_written"} | ({"reuse_expires_in"} if has_reuse else set())
+            if (set(reply) != expected
+                    or not isinstance(reply["remote_path"], str)
+                    or type(reply["bytes_written"]) is not int or reply["bytes_written"] < 0):
+                raise ListingError("invalid_response")
+        else:
+            required = {"outcome", "remote_path", "encoding", "size", "content"} | ({"reuse_expires_in"} if has_reuse else set())
+            if (not required <= reply.keys() <= required | {"truncated"}
+                    or not isinstance(reply["remote_path"], str)
+                    or reply["encoding"] not in ("text", "base64")
+                    or type(reply["size"]) is not int or reply["size"] < 0
+                    or not isinstance(reply["content"], str)
+                    or ("truncated" in reply and type(reply["truncated"]) is not bool)):
+                raise ListingError("invalid_response")
         return reply
     if operation in CONSOLE_OPERATIONS:
         if operation == "console_open":
@@ -832,23 +889,54 @@ def main(argv=None):
     run.add_argument("--json", action="store_true", required=True, help="Emit JSON")
     run.add_argument("command", nargs=argparse.REMAINDER, help="The exact approved executable and arguments")
     run.set_defaults(operation="use_password")
+    ssh = topics.add_parser("ssh", help="Run commands or transfer files over an approved SSH connection")
+    ssh_commands = ssh.add_subparsers(required=True)
+    ssh_exec_parser = ssh_commands.add_parser("exec", help="Run a command on an approved SSH host")
+    ssh_exec_parser.add_argument("--command", help="Remote shell command (omit to read {\"command\": ...} JSON from stdin)")
+    ssh_exec_parser.add_argument("--sudo", action="store_true", help="Run command with sudo")
+    ssh_exec_parser.add_argument("--sudo-entry", type=_request_id, help="Optional separate vault entry UUID for sudo")
+    ssh_exec_parser.set_defaults(operation="ssh_exec")
+    ssh_upload_parser = ssh_commands.add_parser("upload", help="Upload a file over SFTP")
+    ssh_upload_parser.add_argument("--remote-path", required=True)
+    ssh_upload_parser.add_argument("--mode", default="0600")
+    ssh_upload_parser.add_argument("--input", action="store_true", help="Read upload bytes from stdin")
+    ssh_upload_parser.add_argument("--content-base64", help="Base64 upload content (mutually exclusive with --input)")
+    ssh_upload_parser.set_defaults(operation="ssh_upload")
+    ssh_download_parser = ssh_commands.add_parser("download", help="Download a file over SFTP")
+    ssh_download_parser.add_argument("--remote-path", required=True)
+    ssh_download_parser.add_argument("--encoding", choices=("text", "base64"), default="text")
+    ssh_download_parser.add_argument("--max-bytes", type=int)
+    ssh_download_parser.set_defaults(operation="ssh_download")
+    for subcommand in (ssh_exec_parser, ssh_upload_parser, ssh_download_parser):
+        subcommand.add_argument("--vault", required=True, type=_request_id)
+        subcommand.add_argument("--entry", required=True, type=_request_id)
+        subcommand.add_argument("--origin", required=True)
+        subcommand.add_argument("--attachment")
+        subcommand.add_argument("--host-key-sha256")
+        subcommand.add_argument("--timeout", type=int, metavar="SECONDS")
+        subcommand.add_argument("--reuse-for", type=int, metavar="MINUTES")
+        subcommand.add_argument("--json", action="store_true", required=True)
     options = parser.parse_args(argv)
     timeout = getattr(options, "timeout", None)
     expected = None
     if timeout is not None:
-        if not 1 <= timeout <= MAX_WAIT_SECONDS:
-            parser.error(f"--timeout needs a duration from 1 to {MAX_WAIT_SECONDS} seconds")
-        if options.operation == "guest_status":
-            try:
-                result_columns([options.until])
-                if len(options.equals_json) > MAX_GUEST_TEXT:
-                    raise ValueError
-                expected = decode(options.equals_json.encode("utf-8"))
-                if expected is not None and (type(expected) not in (str, int, float, bool)
-                        or type(expected) is float and not math.isfinite(expected)):
-                    raise ValueError
-            except (ValueError, RecursionError):
-                parser.error("Provide a result field and one JSON scalar.")
+        if options.operation in SSH_OPERATIONS:
+            if not 1 <= timeout <= MAX_SSH_TIMEOUT:
+                parser.error(f"--timeout needs a duration from 1 to {MAX_SSH_TIMEOUT} seconds")
+        else:
+            if not 1 <= timeout <= MAX_WAIT_SECONDS:
+                parser.error(f"--timeout needs a duration from 1 to {MAX_WAIT_SECONDS} seconds")
+            if options.operation == "guest_status":
+                try:
+                    result_columns([options.until])
+                    if len(options.equals_json) > MAX_GUEST_TEXT:
+                        raise ValueError
+                    expected = decode(options.equals_json.encode("utf-8"))
+                    if expected is not None and (type(expected) not in (str, int, float, bool)
+                            or type(expected) is float and not math.isfinite(expected)):
+                        raise ValueError
+                except (ValueError, RecursionError):
+                    parser.error("Provide a result field and one JSON scalar.")
     if hasattr(options, "command"):
         try:
             args = options.command[1:] if options.command[:1] == ["--"] else options.command
@@ -912,6 +1000,43 @@ def main(argv=None):
         payload["console"] = options.console
         if options.operation == "console_view" and options.status:
             payload["status_only"] = True
+    if options.operation in SSH_OPERATIONS:
+        payload["entry"] = options.entry
+        try:
+            payload["origin"] = endpoint_target(options.origin, allowed_schemes=("ssh",), origin=True)
+        except ValueError:
+            parser.error("Provide a valid ssh:// origin.")
+        if options.attachment is not None:
+            payload["attachment"] = options.attachment
+        if options.host_key_sha256 is not None:
+            payload["host_key_sha256"] = options.host_key_sha256
+        if options.timeout is not None:
+            payload["timeout"] = options.timeout
+        if options.reuse_for is not None:
+            if not 1 <= options.reuse_for <= MAX_SSH_REUSE_MINUTES:
+                parser.error(f"--reuse-for needs a duration from 1 to {MAX_SSH_REUSE_MINUTES} minutes")
+            payload["reuse_minutes"] = options.reuse_for
+        if options.operation == "ssh_exec":
+            if options.command is not None:
+                payload["command"] = options.command
+            if options.sudo:
+                payload["sudo"] = True
+            if options.sudo_entry is not None:
+                if not options.sudo:
+                    parser.error("--sudo-entry requires --sudo")
+                payload["sudo_entry"] = options.sudo_entry
+        elif options.operation == "ssh_upload":
+            payload["remote_path"] = options.remote_path
+            payload["mode"] = options.mode
+            if bool(options.input) == (options.content_base64 is not None):
+                parser.error("Provide either --input or --content-base64 for ssh upload.")
+            if options.content_base64 is not None:
+                payload["content_base64"] = options.content_base64
+        else:
+            payload["remote_path"] = options.remote_path
+            payload["encoding"] = options.encoding
+            if options.max_bytes is not None:
+                payload["max_bytes"] = options.max_bytes
     if getattr(options, "vault", None):
         payload["vault"] = options.vault
     if getattr(options, "field", None):
@@ -1015,7 +1140,18 @@ def main(argv=None):
                     "workflow_request": "Supply a valid workflow manifest JSON object on stdin.",
                 }[options.operation]
                 raise ListingError("invalid_request", detail=detail) from None
-        if options.operation != "discover" and (token_file or options.operation in GUEST_OPERATIONS | WORKFLOW_OPERATIONS
+        if options.operation == "ssh_exec" and "command" not in payload:
+            try:
+                raw = sys.stdin.buffer.read(REQUEST_LIMIT)
+                if not raw or len(raw) >= REQUEST_LIMIT:
+                    raise ValueError
+                body = decode(raw)
+                if not isinstance(body, dict) or set(body) != {"command"} or not isinstance(body["command"], str):
+                    raise ValueError
+                payload["command"] = body["command"]
+            except (ValueError, RecursionError):
+                raise ListingError("invalid_request", detail="Supply a JSON object with command on stdin.") from None
+        if options.operation != "discover" and (token_file or options.operation in GUEST_OPERATIONS | WORKFLOW_OPERATIONS | SSH_OPERATIONS
                 or options.operation in (
             "request_access", "access_status", "extend_access", "release_entry", "list_vaults", "request_edit", "edit_status", "write_status",
         )):
@@ -1026,7 +1162,7 @@ def main(argv=None):
         if len(encode(payload)) > REQUEST_LIMIT:
             raise ListingError("too_large")
         endpoint = os.environ.get("KEEPASSXC_AGENT_SOCKET")
-        if timeout is not None:
+        if timeout is not None and options.operation not in SSH_OPERATIONS:
             result = wait_status(endpoint, payload, timeout, field=getattr(options, "until", None), expected=expected)
         else:
             result = request(endpoint, payload, input_data=input_data)

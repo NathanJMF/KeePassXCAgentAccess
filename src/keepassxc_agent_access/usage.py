@@ -11,8 +11,8 @@ USE_TYPES = frozenset(("local_command", "networked_command", "https", "https_res
 
 def usage_origin(url):
     """Normalize the HTTPS authority used by API/forms or a routed TCP peer."""
-    target = Destination.parse(url)
-    return Destination(target.host, target.port, "/").url
+    target = Destination.parse(url, allowed_schemes=("https", "tcp"))
+    return Destination(target.host, target.port, "/" if target.scheme == "https" else "", target.scheme).url
 
 
 def usage_action(entry, data, *, accepts_input=False, pin_executable=True):
@@ -30,8 +30,8 @@ def usage_action(entry, data, *, accepts_input=False, pin_executable=True):
         if not {"type", "command", "origin", "prompt_variable"} <= data.keys() <= {"type", "command", "origin", "prompt_variable", "environment", "prompt_contains"}:
             raise ValueError("Networked requests need a command, destination and prompt variable.")
         command = data["command"]
-        origin = Destination.parse(data["origin"])
-        if origin.path != "/":
+        origin = Destination.parse(data["origin"], allowed_schemes=("https", "tcp"))
+        if origin.scheme == "https" and origin.path != "/":
             raise ValueError("Choose a network destination without a resource path.")
         return Action("agent-request", "Networked Command", entry, origin.url, kind=ActionType.NETWORK_PROMPT,
                       command=command, executable_sha256=executable_digest(command) if pin_executable else "0" * 64,

@@ -75,9 +75,16 @@ class AgentCliTests(TestCase):
             "last_extension": {"id": "00000000-0000-0000-0000-000000000005", "status": "denied"},
             "last_change": {"id": "00000000-0000-0000-0000-000000000003", "status": "denied"},
             "scope": [{**item, "vault_locked": False, "stale": False,
-                       "pinned_origins": ["https://api.example.test:443/"]}],
+                       "pinned_origins": ["https://api.example.test:443/"],
+                       "pinned_ssh_hosts": ["ssh://bastion.example.test:22"]}],
         }
         self.assertEqual(_validate(extended, request), extended)
+        ssh_details = {
+            **reply,
+            "scope": [{**item, "uses": ["ssh_exec", "ssh_sftp"], "origins": ["ssh://bastion.example.test:22"],
+                       "pinned_ssh_hosts": ["ssh://bastion.example.test:22"]}],
+        }
+        self.assertEqual(_validate(ssh_details, request), ssh_details)
         self.assertEqual(_validate({**reply, "pending_extension": None, "last_extension": None}, request),
                          {**reply, "pending_extension": None, "last_extension": None})
         self.assertEqual(_validate({"status": "expired"}, {"operation": "access_status"}), {"status": "expired"})
@@ -96,6 +103,7 @@ class AgentCliTests(TestCase):
             {**reply, "last_change": {"id": "00000000-0000-0000-0000-000000000003", "status": "pending"}},
             {**reply, "scope": [{**item, "vault_locked": "yes"}]},
             {**reply, "scope": [{**item, "pinned_origins": ["http://api.example.test/"]}]},
+            {**reply, "scope": [{**item, "pinned_ssh_hosts": ["https://bastion.example.test:443/"]}]},
             {**reply, "requested_items": [{**item, "label": None, "stale": False}]},
         ):
             with self.subTest(bad=bad), self.assertRaises(ListingError):
