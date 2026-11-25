@@ -816,7 +816,7 @@ class Grants:
             self._change(row, action, status.capitalize(), target_scope=record.scope)
 
     def extend(self, identifier, days=None, *, decision="Extended in Access"):
-        """Extend an active or disabled non-expired token directly for the owner."""
+        """Reset an active or disabled non-expired token's life span directly for the owner."""
         if days is not None and (type(days) is not int or not 1 <= days <= MAX_TOKEN_LIFESPAN_DAYS):
             raise ValueError(f"Choose an extension between 1 and {MAX_TOKEN_LIFESPAN_DAYS} days.")
         with self.workspace.mutex:
@@ -829,8 +829,8 @@ class Grants:
             if record.status not in ("active", "disabled"):
                 raise ListingError("revoked")
             now = time()
-            add_days = self.workspace.token_lifespan_days if days is None else days
-            new_exp = min(now + MAX_TOKEN_LIFESPAN_DAYS * 86400, max(now, record.expires_at or now) + add_days * 86400)
+            target_days = self.workspace.token_lifespan_days if days is None else days
+            new_exp = now + target_days * 86400
             ext = replace(record.pending_extension, status="active") if record.pending_extension else record.extension
             updated = replace(record, expires_at=new_exp, extension=ext)
             self._change(updated, "Extend token", "Approved", decision=decision)

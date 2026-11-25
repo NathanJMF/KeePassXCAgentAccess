@@ -17,8 +17,8 @@ from keepassxc_agent_access.access_settings import Action, ActionType, Destinati
 from keepassxc_agent_access.command_action import (
     _TASK_LIMIT, deliver_credential, executable_digest, prepare_command, sandbox_arguments, verify_scope_limits,
 )
-from keepassxc_agent_access.command_network import Relay, approved_address, approved_addresses
-from keepassxc_agent_access.command_prompt import askpass
+from keepassxc_agent_access.command_network import Relay, approved_address, approved_addresses, connection_target
+from keepassxc_agent_access.command_prompt import askpass, launch, proxy_stdio
 from keepassxc_agent_access.protocol import ListingError, UPLOAD_LIMIT, encode, validate_command, validate_upload
 from keepassxc_agent_access.vault import VaultSession, VaultTarget, open_vault
 from keepassxc_agent_access import vault_worker
@@ -245,3 +245,33 @@ class LocalCommandTests(TestCase):
             fake_stdin.buffer.readline.return_value = b"dispatch\n"
             vault_worker.use_command(entry, ("/usr/bin/true",), "0" * 64, opaque=True)
         self.assertEqual(frames, [encode({"ready": True}), encode({"outcome": "failed"})])
+
+    def test_sandbox_synthetic_etc_and_fsize_and_ipv6_relay_and_askpass(self):
+        with TemporaryDirectory() as directory:
+            etc_dir = Path(directory) / "etc"
+            etc_dir.mkdir()
+            (etc_dir / "passwd").write_text("keeper:x:1000:1000:Keeper:/tmp:/usr/bin/sh\n")
+            arguments = sandbox_arguments(("/usr/bin/ssh",), 7, "fixture.scope",
+                                          relay_path=Path("/tmp/relay"), prompt_variable="SSH_ASKPASS",
+                                          etc_dir=etc_dir)
+            self.assertIn("--fsize=16777216:16777216", arguments)
+            triples = list(zip(arguments, arguments[1:], arguments[2:]))
+            self.assertIn(("--ro-bind", str(etc_dir / "passwd"), "/etc/passwd"), triples)
+
+        # ATYP=3 IPv6 literals are normalized so Relay accepts ::1 and [::1].
+        pair_a, pair_b = socket.socketpair()
+        with pair_a, pair_b:
+            pair_b.sendall(b"\x05\x01\x00" + b"\x05\x01\x00\x03\x08[0:0::1]\x00\x16")
+            self.assertEqual(connection_target(pair_a), ("::1", 22))
+            self.assertEqual(pair_b.recv(2), b"\x05\x00")
+
+        # Multi-line generic password prompts are allowed, while username prompts remain blocked.
+        with patch.dict(os.environ, {"KEEPER_GENERIC_PROMPT": "1", "KEEPER_PROMPT_CONTAINS": "password"}, clear=False):
+            with patch("keepassxc_agent_access.command_prompt.socket.socket") as connect:
+                self.assertEqual(askpass("Host notice\nEnter username: "), 1)
+                connect.assert_not_called()
+                connect.return_value.__enter__.return_value.makefile.return_value.__enter__.return_value.read.side_effect = [
+                    b"\x00\x03", b"xyz",
+                ]
+                self.assertEqual(askpass("Host notice\nEnter password: "), 0)
+                connect.assert_called_once()

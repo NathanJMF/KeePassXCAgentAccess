@@ -35,7 +35,11 @@ def connection_target(sock):
         raise ValueError("Unsupported relay operation")
     if family == 3:
         length = receive_exact(sock, 1)[0]
-        host = receive_exact(sock, length).decode("ascii").lower()
+        raw_host = receive_exact(sock, length).decode("ascii").lower()
+        try:
+            host = str(ipaddress.ip_address(raw_host.strip("[]")))
+        except ValueError:
+            host = raw_host
     elif family in (1, 4):
         host = str(ipaddress.ip_address(receive_exact(sock, 4 if family == 1 else 16)))
     else:

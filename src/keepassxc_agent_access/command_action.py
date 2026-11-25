@@ -12,7 +12,7 @@ from pathlib import Path
 from select import select
 import stat
 import subprocess
-from tempfile import TemporaryFile
+from tempfile import TemporaryDirectory, TemporaryFile
 from time import monotonic
 from uuid import uuid4
 
@@ -122,16 +122,40 @@ def syscall_filter(unix_sockets=False, *, unix_socket_pairs=False):
         seccomp.seccomp_release(context)
 
 
+def _prepare_synthetic_etc(directory):
+    directory.chmod(0o755)
+    uid, gid = os.getuid(), os.getgid()
+    files = {
+        "passwd": f"keeper:x:{uid}:{gid}:Keeper:/tmp:/usr/bin/sh\n",
+        "group": f"keeper:x:{gid}:\n",
+        "nsswitch.conf": "passwd: files\ngroup: files\n",
+    }
+    services_path = Path("/etc/services")
+    try:
+        data = services_path.read_bytes()
+        files["services"] = data if len(data) <= 1048576 else b"ssh 22/tcp\nhttp 80/tcp\nhttps 443/tcp\n"
+    except OSError:
+        files["services"] = b"ssh 22/tcp\nhttp 80/tcp\nhttps 443/tcp\n"
+    for name, content in files.items():
+        target = directory / name
+        if isinstance(content, bytes):
+            target.write_bytes(content)
+        else:
+            target.write_text(content, encoding="ascii")
+        target.chmod(0o644)
+
+
 def sandbox_arguments(command, seccomp, scope, *, relay_path=None, prompt_variable="", input_path=None, ca_file=_CA,
-                      generic_prompt=False, environment=(), prompt_contains=""):
+                      generic_prompt=False, environment=(), prompt_contains="", etc_dir=None):
     lifetime = _NETWORK_SCOPE_TIMEOUT if relay_path is not None else _SCOPE_TIMEOUT
+    fsize = 16777216 if relay_path is not None else 4194304
     arguments = [
         "/usr/bin/systemd-run", "--user", "--scope", "--collect", "--quiet", "--expand-environment=no",
         f"--unit={scope}", f"--property=RuntimeMaxSec={lifetime}s", "--property=TimeoutStopSec=1s",
         "--property=KillMode=control-group", "--property=SendSIGKILL=yes",
         f"--property=MemoryMax={_MEMORY_LIMIT}", "--property=MemorySwapMax=0",
         f"--property=TasksMax={_TASK_LIMIT}", "--property=CPUQuota=100%",
-        "--", "/usr/bin/prlimit", "--core=0:0", "--fsize=4194304:4194304", "--",
+        "--", "/usr/bin/prlimit", "--core=0:0", f"--fsize={fsize}:{fsize}", "--",
         "/usr/bin/setpriv", "--no-new-privs", "--",
         "/usr/bin/bwrap", "--unshare-all", "--unshare-user", "--disable-userns",
         "--new-session", "--die-with-parent", "--clearenv", "--cap-drop", "ALL",
@@ -142,6 +166,11 @@ def sandbox_arguments(command, seccomp, scope, *, relay_path=None, prompt_variab
         "--tmpfs", "/tmp", "--setenv", "HOME", "/tmp", "--chdir", "/tmp",
         "--seccomp", str(seccomp),
     ]
+    if etc_dir is not None:
+        for name in ("passwd", "group", "nsswitch.conf", "services"):
+            candidate = Path(etc_dir) / name
+            if candidate.is_file():
+                arguments += ["--ro-bind", str(candidate), f"/etc/{name}"]
     if relay_path is None:
         return [*arguments, "--", "/usr/bin/python3", "-I", "-c", _SANDBOX_BOOTSTRAP, *command]
     arguments += [
@@ -204,19 +233,24 @@ def prepare_command(command, digest, *, destination=None, prompt_variable="", in
                     generic_prompt=False, environment=(), prompt_contains=""):
     if executable_digest(command) != digest:
         raise ValueError("The configured command executable changed.")
+    resolved = str(Path(command[0]).resolve(strict=True))
+    resolved_command = (resolved, *command[1:])
     scope = f"keeper-command-{uuid4().hex}.scope"
     relay_context = network_relay(destination) if destination is not None else nullcontext((None, None))
     with syscall_filter(unix_sockets=destination is not None, unix_socket_pairs=True) as seccomp, \
-            relay_context as (relay_path, relay):
+            relay_context as (relay_path, relay), \
+            TemporaryDirectory(prefix="keeper-etc-") as etc_dir:
+        _prepare_synthetic_etc(Path(etc_dir))
         # The session address is needed only by systemd-run. Bubblewrap drops
         # that environment before the trusted startup code runs.
         launcher_environment = {name: os.environ[name] for name in ("DBUS_SESSION_BUS_ADDRESS", "XDG_RUNTIME_DIR")
                        if name in os.environ}
         # A custom CA comes only from trusted owner startup, as for HTTPS actions.
         trust = Path(ca_file or os.environ.get("SSL_CERT_FILE") or _CA)
-        arguments = sandbox_arguments(command, seccomp, scope, relay_path=relay_path,
+        arguments = sandbox_arguments(resolved_command, seccomp, scope, relay_path=relay_path,
                                       prompt_variable=prompt_variable, input_path=input_path, ca_file=trust,
-                                      generic_prompt=generic_prompt, environment=environment, prompt_contains=prompt_contains)
+                                      generic_prompt=generic_prompt, environment=environment, prompt_contains=prompt_contains,
+                                      etc_dir=etc_dir)
         with TemporaryFile("w+b") as startup_stderr:
             process = subprocess.Popen(arguments,
                                        stdin=subprocess.PIPE, stdout=subprocess.PIPE,

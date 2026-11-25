@@ -237,7 +237,7 @@ class TokenLifespanTests(unittest.TestCase):
         self.assertNotIn(pending.id, self.grants.records)
         self.assertNotIn(pending.verifier, self.grants.credentials)
 
-    def test_owner_extend_preserves_generation_and_respects_cap(self):
+    def test_owner_extend_preserves_generation_and_resets_lifespan(self):
         t0 = 1_800_000_000.0
         with patch("keepassxc_agent_access.grants.time", return_value=t0):
             grant = self.enroll_and_approve(index=0)
@@ -247,9 +247,15 @@ class TokenLifespanTests(unittest.TestCase):
             gen_before = grant.generation
             extended = self.grants.extend(grant.id, 10, decision="Extended in Access")
             self.assertEqual(extended.generation, gen_before)
-            self.assertAlmostEqual(extended.expires_at, t0 + (DEFAULT_TOKEN_LIFESPAN_DAYS + 10) * 86400)
+            self.assertAlmostEqual(extended.expires_at, t0 + 10 * 86400)
             self.assertEqual(extended.extension.status, "active")
             self.assertIsNone(extended.pending_extension)
+
+            # Clicking Extend with days=None resets timer to token_lifespan_days (does not stack +3d).
+            reset_once = self.grants.extend(grant.id)
+            self.assertAlmostEqual(reset_once.expires_at, t0 + DEFAULT_TOKEN_LIFESPAN_DAYS * 86400)
+            reset_twice = self.grants.extend(grant.id)
+            self.assertAlmostEqual(reset_twice.expires_at, t0 + DEFAULT_TOKEN_LIFESPAN_DAYS * 86400)
 
             # Cap at now + MAX_TOKEN_LIFESPAN_DAYS * 86400.
             capped = self.grants.extend(grant.id, MAX_TOKEN_LIFESPAN_DAYS)
@@ -259,6 +265,7 @@ class TokenLifespanTests(unittest.TestCase):
             self.grants.transition(grant.id, "disabled")
             disabled_ext = self.grants.extend(grant.id, 2)
             self.assertEqual(disabled_ext.status, "disabled")
+            self.assertAlmostEqual(disabled_ext.expires_at, t0 + 2 * 86400)
 
         # Expired tokens cannot be extended.
         with patch("keepassxc_agent_access.grants.time", return_value=t0 + 400 * 86400):
@@ -266,6 +273,43 @@ class TokenLifespanTests(unittest.TestCase):
                 self.grants.extend(grant.id, 5)
             self.assertEqual(err.exception.code, "revoked")
             self.assertEqual(self.grants.records[grant.id].status, "expired")
+
+    def test_extend_button_renderer_draws_visible_text(self):
+        import gi
+        gi.require_version("Gtk", "3.0")
+        from gi.repository import Gdk, Gtk
+        import cairo
+        from keepassxc_agent_access.workspace_style import install_style
+        from keepassxc_agent_access.workspace_views import ExtendButtonRenderer
+
+        win = Gtk.Window()
+        win.set_name("keeper-workspace")
+        install_style(win)
+        tv = Gtk.TreeView()
+        tv.get_style_context().add_class("keeper-table")
+        win.add(tv)
+        win.realize()
+
+        renderer = ExtendButtonRenderer()
+        renderer.set_property("visible-button", True)
+        renderer.set_property("sensitive-button", True)
+        area = Gdk.Rectangle()
+        area.x, area.y, area.width, area.height = 0, 0, 96, 36
+        for flags in (0, Gtk.CellRendererState.PRELIT):
+            surface = cairo.ImageSurface(cairo.FORMAT_ARGB32, 96, 36)
+            cr = cairo.Context(surface)
+            cr.set_source_rgb(0.15, 0.15, 0.15)
+            cr.paint()
+            renderer.do_render(cr, tv, area, area, flags)
+            data = bytes(surface.get_data())
+            # Center horizontal strip should contain bright label text pixels.
+            text_pixels = sum(
+                1 for y in range(10, 26) for x in range(20, 76)
+                for offset in ((y * 96 + x) * 4,)
+                if max(data[offset], data[offset + 1], data[offset + 2]) > 180
+            )
+            self.assertGreater(text_pixels, 80)
+        win.destroy()
 
     def test_agent_extension_manual_review_idempotency_denial_and_auto_approval(self):
         t0 = 1_800_000_000.0

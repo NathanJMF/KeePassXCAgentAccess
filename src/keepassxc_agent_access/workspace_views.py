@@ -6,7 +6,12 @@ from math import ceil, pi
 from shlex import join, split
 from time import monotonic, time
 
-from gi.repository import Gdk, GLib, GObject, Gtk, Pango
+import gi
+try:
+    gi.require_version("PangoCairo", "1.0")
+except ValueError:
+    pass
+from gi.repository import Gdk, GLib, GObject, Gtk, Pango, PangoCairo
 
 from .access_settings import Action, ActionType, BrowserForm, HTTPS_METHODS, HTTPS_WRITE_METHODS
 from .activity import ActivityError
@@ -612,8 +617,8 @@ class ExtendButtonRenderer(Gtk.CellRenderer):
         layout = self._layout(widget)
         text_w, text_h = layout.get_pixel_size()
         xpad, ypad = self.get_padding()
-        btn_w = min(max(1, cell_area.width - 6), text_w + 2 * xpad)
-        btn_h = min(max(1, cell_area.height - 4), text_h + 2 * ypad)
+        btn_w = min(max(1, cell_area.width - 8), text_w + 2 * xpad)
+        btn_h = min(max(1, cell_area.height - 6), text_h + 2 * ypad)
         bx = cell_area.x + (cell_area.width - btn_w) / 2.0
         by = cell_area.y + (cell_area.height - btn_h) / 2.0
         radius = min(6.0, btn_w / 2.0, btn_h / 2.0)
@@ -623,7 +628,7 @@ class ExtendButtonRenderer(Gtk.CellRenderer):
         found_s, surface = context.lookup_color("keeper_surface")
         found_c, cobalt = context.lookup_color("keeper_cobalt")
         found_a, accent = context.lookup_color("keeper_accent")
-        found_l, line = context.lookup_color("keeper_line")
+        found_fg, fg = context.lookup_color("theme_fg_color")
 
         cr.save()
         cr.new_sub_path()
@@ -633,8 +638,9 @@ class ExtendButtonRenderer(Gtk.CellRenderer):
         cr.arc(bx + radius, by + radius, radius, pi, 3 * pi / 2)
         cr.close_path()
 
+        prelit = bool(flags & Gtk.CellRendererState.PRELIT)
         if found_s and found_c:
-            mix = 0.14 if (flags & Gtk.CellRendererState.PRELIGHT) else 0.08
+            mix = 0.22 if prelit else 0.13
             cr.set_source_rgba(
                 surface.red * (1 - mix) + cobalt.red * mix,
                 surface.green * (1 - mix) + cobalt.green * mix,
@@ -642,32 +648,25 @@ class ExtendButtonRenderer(Gtk.CellRenderer):
                 alpha,
             )
         else:
-            cr.set_source_rgba(0.95, 0.96, 0.98, alpha)
+            cr.set_source_rgba(0.24, 0.30, 0.44, alpha)
         cr.fill_preserve()
 
         if found_a:
-            cr.set_source_rgba(accent.red, accent.green, accent.blue, 0.35 * alpha)
-        elif found_l:
-            cr.set_source_rgba(line.red, line.green, line.blue, line.alpha * alpha)
+            cr.set_source_rgba(accent.red, accent.green, accent.blue, (0.65 if prelit else 0.42) * alpha)
         else:
-            cr.set_source_rgba(0.5, 0.55, 0.65, 0.5 * alpha)
+            cr.set_source_rgba(0.5, 0.58, 0.78, 0.55 * alpha)
         cr.set_line_width(1.0)
         cr.stroke()
 
         tx = bx + (btn_w - text_w) / 2.0
         ty = by + (btn_h - text_h) / 2.0
-        if alpha < 1.0:
-            cr.push_group()
-        context.save()
-        state = widget.get_state_flags()
-        if not self.sensitive_button:
-            state |= Gtk.StateFlags.INSENSITIVE
-        context.set_state(state)
-        Gtk.render_layout(context, cr, tx, ty, layout)
-        context.restore()
-        if alpha < 1.0:
-            cr.pop_group_to_source()
-            cr.paint_with_alpha(alpha)
+        if found_fg:
+            cr.set_source_rgba(fg.red, fg.green, fg.blue, fg.alpha * alpha)
+        else:
+            text_color = context.get_color(widget.get_state_flags())
+            cr.set_source_rgba(text_color.red, text_color.green, text_color.blue, text_color.alpha * alpha)
+        cr.move_to(tx, ty)
+        PangoCairo.show_layout(cr, layout)
         cr.restore()
 
 

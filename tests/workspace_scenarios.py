@@ -1855,8 +1855,12 @@ def main(root):
                 click_event.set_device(access_table.get_display().get_default_seat().get_pointer())
                 assert access_table.emit("button-press-event", click_event)
                 after_extend = app.grants.records[token].expires_at
-                assert after_extend > before_extend and after_extend >= time() + 6 * 86400
+                assert after_extend > before_extend and time() + 6.9 * 86400 <= after_extend <= time() + 7 * 86400 + 5
                 assert access_root("auto-token")[access_view.LIFESPAN] == format_lifespan(after_extend)
+                # Clicking Extend again resets the timer to 7 days from now rather than stacking.
+                assert access_table.emit("button-press-event", click_event)
+                second_extend = app.grants.records[token].expires_at
+                assert abs(second_extend - after_extend) < 5
 
                 ext_id = str(uuid4())
                 extension = ExtensionRequest(
