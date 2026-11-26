@@ -1306,15 +1306,15 @@ class WorkspaceApplication(Gtk.Application):
                 "Allow an agent to reuse a connection you approved for a limited time."))
         scoped = self._settings_card(approvals)
         scoped.pack_start(styled(_label("Use Approved Access"), "keeper-settings-caption"), False, False, 0)
-        scoped.pack_start(styled(_label("Requires Auto Approve, HTTPS Requests and Results - Read to be enabled."),
+        scoped.pack_start(styled(_label("Requires Auto Approve and each switch’s matching transport policy above."),
                                  "keeper-settings-description"), False, False, 0)
         scoped_switches = []
         for operation, (caption, description) in SCOPED_AUTO_APPROVAL_OPTIONS.items():
             scoped.pack_start(Gtk.Separator(), False, False, 0)
-            scoped_switches.append(self._settings_switch(
+            scoped_switches.append((operation, self._settings_switch(
                 scoped, caption, operation in self.workspace.auto_approve_scoped_actions,
                 lambda control, operation=operation: self._set_scoped_auto_approval(control, operation),
-                operation, description))
+                operation, description)))
         lifespan_card = self._settings_card(approvals)
         lifespan_card.pack_start(styled(_label("Token Life Span"), "keeper-settings-caption"), False, False, 0)
         lifespan_card.pack_start(styled(_label(
@@ -1334,12 +1334,11 @@ class WorkspaceApplication(Gtk.Application):
 
         def sync_sensitivity():
             master = not self.workspace.review_usage
-            scoped_ready = (master and not self.workspace.requires_review("use_https")
-                            and not self.workspace.requires_review("read_results"))
             token_ready = master and self.workspace.token_auto_approval_acknowledged
             for switch, active in (
                 *((switch, master) for switch in (*action_switches, *guest_switches)),
-                *((switch, scoped_ready) for switch in scoped_switches),
+                *((switch, self.workspace.scoped_auto_approval_available(operation))
+                  for operation, switch in scoped_switches),
                 *((switch, token_ready) for switch in token_switches.values()),
             ):
                 style = switch.get_style_context()

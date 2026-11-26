@@ -1811,6 +1811,30 @@ def main(root):
                 assert settings_switch("auto-approve", "auto_approve_token_changes", True)
                 assert not settings_switch("auto-approve", "auto_approve_tokens", False)
                 assert old_access.read().auto_approve_token_changes
+                for key, label in (
+                    ("auto_approve_extended_lifespans", "Access Tokens - Extensions Beyond Default Life Span"),
+                    ("auto_approve_released_entry_restores", "Access Tokens - Restore Released Entries"),
+                    ("auto_approve_expanded_scoped_actions", "Access Tokens - Expand Scoped Actions"),
+                    ("auto_approve_unscoped_edits", "Vault Edits - Outside Token Permissions"),
+                ):
+                    assert settings_switch("auto-approve", key, True, label=label)
+                    assert not settings_switch("auto-approve", key, False)
+                assert settings_switch("auto-approve", "ssh_reuse", True)
+                assert app.workspace.scoped_auto_approval_enabled("ssh_reuse")
+                assert not settings_switch("auto-approve", "ssh_reuse", False)
+
+                def check_scoped_sensitivity(dialog):
+                    pages = next(widget for widget in descendants(dialog) if widget.get_name() == "keeper-settings-pages")
+                    pages.set_visible_child_name("auto-approve")
+                    toggles = {w.get_name(): w for w in descendants(pages.get_visible_child()) if isinstance(w, Gtk.Switch)}
+                    assert not toggles["read_results"].get_active()
+                    assert not toggles["ssh_reuse"].get_style_context().has_class("keeper-settings-inactive")
+                    assert not toggles["ssh_first_pin"].get_style_context().has_class("keeper-settings-inactive")
+                    assert not toggles["tls_first_pin"].get_style_context().has_class("keeper-settings-inactive")
+                    assert toggles["https_write_once"].get_style_context().has_class("keeper-settings-inactive")
+                    dialog.close()
+
+                drive_dialog(app.settings_button.clicked, check_scoped_sensitivity)
                 change = {**change, "items": [initial_item], "change_id": str(uuid4())}
                 assert invoke("auto-token", "access", "request", request=change) == {"status": "active"}
                 assert ("grant-change", f"{token}/{change['change_id']}") not in app._review_requests()

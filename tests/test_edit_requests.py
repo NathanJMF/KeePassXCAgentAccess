@@ -433,6 +433,18 @@ class EditRequestsTests(unittest.TestCase):
         self.assertEqual(altered_replay.exception.code, "invalid_request")
         self.assertEqual(self.path.read_bytes(), before)
 
+    def test_auto_approve_unscoped_edits_allows_unscoped_without_owner_password(self):
+        unscoped_req = self._request("update_entry", entry=self.unscoped, fields={"title": "Unscoped auto update"})
+        self.assertEqual(self._wire("request_edit", request=unscoped_req)["status"], "pending")
+
+        self.workspace.acknowledge_token_auto_approval(True)
+        self.workspace.set_token_auto_approval("auto_approve_unscoped_edits", True)
+        unscoped_req2 = self._request("update_entry", entry=self.unscoped, fields={"title": "Unscoped auto applied"})
+        self.assertEqual(self._wire("request_edit", request=unscoped_req2)["status"], "applied")
+
+        owner_req = self._request("replace_password", entry=self.unscoped, password_source="owner")
+        self.assertEqual(self._wire("request_edit", request=owner_req)["status"], "pending")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -954,3 +954,120 @@ class ScopedBrokerTests(unittest.TestCase):
                 result = self.invoke("use_password", vault=vault, entry=self.entry, receipt=str(uuid4()),
                                      usage=usage, provision=provision)
         self.assertEqual(result["outcome"], "succeeded")
+
+    def _reviewed(self, operation, *, approve=True, inspect=lambda ticket: None):
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            future = pool.submit(operation)
+            deadline = monotonic() + 3
+            while monotonic() < deadline and not self.engine.approvals.pending():
+                sleep(0.01)
+            ticket, = self.engine.approvals.pending()
+            inspect(ticket)
+            self.engine.approvals.resolve(ticket.id, approve)
+            return future.result(3)
+
+    def test_direct_https_pin_persists_and_honors_tls_switches_without_read_results(self):
+        vault = self.vaults[0]
+        item = {"vault": vault, "entry": self.entry, "uses": ["https"], "origins": ["https://api.example.test/"]}
+        identifier = self.approve([item])
+        worker = self.workspace.session(vault).worker
+        self.assertTrue(self.workspace.requires_review("read_results"))
+        req_a = {"type": "https", "url": "https://api.example.test/status", "auth": "bearer",
+                 "certificate_sha256": "a" * 64}
+        req_b = {**req_a, "certificate_sha256": "b" * 64}
+
+        with patch.object(worker, "use", side_effect=lambda _a, g: (g(lambda: None), {"outcome": "succeeded", "http_status": 200})[1]):
+            def inspect(ticket):
+                self.assertTrue(ticket.trusts_certificate)
+
+            self._reviewed(lambda: self.invoke("use_password", vault=vault, entry=self.entry, usage=req_a),
+                           inspect=inspect)
+            self.assertEqual(self.grants.records[identifier].scope[0].result_certificates,
+                             (("https://api.example.test:443/", "a" * 64),))
+            # Subsequent request uses pinned cert automatically even with read_results requiring review.
+            self.assertEqual(self.invoke("use_password", vault=vault, entry=self.entry, usage=req_a)["outcome"],
+                             "succeeded")
+            # Changed cert prompts while tls_cert_repin is off, then auto-repins when on.
+            with self.assertRaises(ListingError) as denied:
+                self._reviewed(lambda: self.invoke("use_password", vault=vault, entry=self.entry, usage=req_b),
+                               approve=False)
+            self.assertEqual(denied.exception.code, "declined")
+            self.workspace.set_scoped_auto_approval("tls_cert_repin", True)
+            self.assertEqual(self.invoke("use_password", vault=vault, entry=self.entry, usage=req_b)["outcome"],
+                             "succeeded")
+            self.assertEqual(self.grants.records[identifier].scope[0].result_certificates,
+                             (("https://api.example.test:443/", "b" * 64),))
+
+        # Fresh token with tls_first_pin ON auto-pins direct HTTPS even while read_results requires review.
+        identifier2 = self.approve([item], index=1)
+        self.workspace.set_scoped_auto_approval("tls_first_pin", True)
+        with patch.object(worker, "use", side_effect=lambda _a, g: (g(lambda: None), {"outcome": "succeeded", "http_status": 200})[1]):
+            self.assertEqual(self.invoke("use_password", index=1, vault=vault, entry=self.entry, usage=req_a)["outcome"],
+                             "succeeded")
+            self.assertEqual(self.grants.records[identifier2].scope[0].result_certificates,
+                             (("https://api.example.test:443/", "a" * 64),))
+
+    def test_released_entry_restore_and_expanded_scoped_actions_settings(self):
+        vault, other = self.vaults
+        item = {"vault": vault, "entry": self.entry, "uses": ["https_results"],
+                "origins": ["https://api.example.test/"]}
+        other_item = {"vault": other, "entry": self.entry, "metadata": True}
+        self.approve([item, other_item])
+        self.assertEqual(self.invoke("release_entry", vault=vault, entry=self.entry)["status"], "released")
+
+        self.workspace.acknowledge_token_auto_approval(True)
+        self.workspace.set_token_auto_approval("auto_approve_token_changes", True)
+        self.workspace.set_token_auto_approval("auto_approve_token_credential_uses", True)
+        restore = {"change_id": str(uuid4()), "mode": "add", "items": [item]}
+        self.assertEqual(self.invoke("request_access", request=restore), {"status": "pending"})
+        token_record = self.grants.authenticate(self.secrets[0], 1500)
+        self.grants.decide(token_record.id, None, change_id=restore["change_id"])
+
+        self.workspace.set_token_auto_approval("auto_approve_released_entry_restores", True)
+        restore2 = {"change_id": str(uuid4()), "mode": "add", "items": [item]}
+        self.assertEqual(self.invoke("request_access", request=restore2), {"status": "active"})
+
+        # Expanded scoped actions: write-once and provision_account without standing https / account body scope.
+        account_entry = str(uuid4())
+        session = self.workspace.session(vault)
+        account_row = {**session.entries[0], "id": account_entry, "title": "Account Entry"}
+        session.worker.rows.append(account_row)
+        self.workspace.sessions[vault] = Unlocked(session.worker, (), (*session.entries, account_row))
+        self.workspace.set_review_action("read_results", False)
+        self.workspace.set_review_action("use_https", False)
+        self.workspace.set_scoped_auto_approval("https_write_once", True)
+        self.workspace.set_scoped_auto_approval("provision_account", True)
+
+        write_usage = {
+            "type": "https_results",
+            "origin": "https://api.example.test/",
+            "approve_write_once": True,
+            "request": {"path": "/jobs", "method": "POST", "auth": "bearer", "json": {"task": "run"}},
+            "result": {"path": "/data", "columns": ["id"]},
+        }
+        provision = {"entry": account_entry, "body_type": "json", "fields": {"password": "initial_password"}}
+        worker = session.worker
+        with patch.object(worker, "use",
+                          return_value={"outcome": "succeeded", "http_status": 200, "data": [{"id": 1}]}):
+            with self.assertRaises(ListingError) as denied:
+                self._reviewed(lambda: self.invoke("use_password", vault=vault, entry=self.entry,
+                                                   receipt=str(uuid4()), usage=write_usage), approve=False)
+            self.assertEqual(denied.exception.code, "declined")
+            with self.assertRaises(ListingError) as denied_prov:
+                self._reviewed(lambda: self.invoke("use_password", vault=vault, entry=self.entry,
+                                                   receipt=str(uuid4()), usage=write_usage, provision=provision),
+                               approve=False)
+            self.assertEqual(denied_prov.exception.code, "declined")
+
+            self.workspace.set_token_auto_approval("auto_approve_expanded_scoped_actions", True)
+            with patch.object(self.engine.approvals, "wait", side_effect=AssertionError("Should auto-approve")):
+                self.assertEqual(
+                    self.invoke("use_password", vault=vault, entry=self.entry,
+                                receipt=str(uuid4()), usage=write_usage)["outcome"],
+                    "succeeded",
+                )
+                self.assertEqual(
+                    self.invoke("use_password", vault=vault, entry=self.entry,
+                                receipt=str(uuid4()), usage=write_usage, provision=provision)["outcome"],
+                    "succeeded",
+                )

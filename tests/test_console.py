@@ -570,6 +570,25 @@ class ConsoleReuseTests(TestCase):
             self.open()
         self.assertEqual(err.exception.code, "credential_changed")
 
+    def test_console_auto_approves_without_https_scope_when_expanded_actions_enabled(self):
+        vault = self.vaults[0]
+        self.setup_token()
+        self.workspace.set_review_action("read_results", False)
+        self.workspace.set_guest_auto_approval("console_open", True)
+        self.workspace.set_scoped_auto_approval("guest_first_use", True)
+        self.workspace.set_scoped_auto_approval("tls_first_pin", True)
+        worker = self.workspace.session(vault).worker
+        with patch.object(worker, "console", side_effect=self.worker_exchange, create=True):
+            with self.assertRaises(ListingError) as denied:
+                self.reviewed(self.open, approve=False)
+            self.assertEqual(denied.exception.code, "declined")
+
+            self.workspace.acknowledge_token_auto_approval(True)
+            self.workspace.set_token_auto_approval("auto_approve_expanded_scoped_actions", True)
+            with patch.object(self.engine.approvals, "wait", side_effect=AssertionError("Should auto-approve")):
+                opened = self.open()
+                self.close(opened)
+
 
 if __name__ == "__main__":
     with TemporaryDirectory(prefix="keeper-console-trial-") as temporary:

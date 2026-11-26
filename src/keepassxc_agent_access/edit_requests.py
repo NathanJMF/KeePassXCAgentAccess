@@ -274,8 +274,10 @@ class EditRequests:
         return allowed
 
     def _automatic(self, token, request):
+        permitted = (self._permitted(token, request)
+                     or self.workspace.token_auto_approval_enabled("auto_approve_unscoped_edits"))
         return (not self.workspace.requires_review(request.operation) and not self.workspace.paused
-                and request.password_source != "owner" and self._permitted(token, request))
+                and request.password_source != "owner" and permitted)
 
     def submit(self, token, payload, context=None, *, live=lambda: True):
         request = EditRequest.parse(payload)

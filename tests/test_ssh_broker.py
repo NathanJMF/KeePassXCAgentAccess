@@ -683,3 +683,48 @@ class SshBrokerTests(TestCase):
             dumped = json.dumps(self.activity.rows()) + self.grants.path.read_text()
             self.assertNotIn(SECRET_SENTINEL, dumped)
             self.assertNotIn(SUDO_SENTINEL, dumped)
+
+    def test_ssh_scoped_options_decoupled_from_https_and_ssh_reuse_switch_governs_permits(self):
+        # SSH host-key pinning & reuse must not require use_https or read_results auto-approval.
+        self.workspace.set_review_action("use_https", True)
+        self.workspace.set_review_action("read_results", True)
+        self.assertTrue(self.workspace.requires_review("use_https"))
+        self.assertTrue(self.workspace.requires_review("read_results"))
+        self.workspace.set_scoped_auto_approval("ssh_first_pin", True)
+        self.workspace.set_scoped_auto_approval("ssh_key_repin", True)
+        self._enroll_and_approve([{
+            "vault": self.vault, "entry": self.entry,
+            "uses": ["ssh_exec"], "origins": ["ssh://bastion.example.test"],
+        }])
+
+        # First pin and changed pin both auto-approve with only SSH enabled.
+        self._call("ssh_exec", approve=None, vault=self.vault, entry=self.entry,
+                   origin="ssh://bastion.example.test:22", command="hostname")
+        self.transport.probed_hex = HOST_KEY_B
+        self._call("ssh_exec", approve=None, vault=self.vault, entry=self.entry,
+                   origin="ssh://bastion.example.test:22", command="hostname")
+
+        # Require manual SSH command review: when ssh_reuse is OFF, reuse_minutes=5 is not offered or stored.
+        self.workspace.set_review_action("use_ssh", True)
+        with patch.object(self.broker.approvals, "wait",
+                          side_effect=lambda ticket, _live: (self.assertEqual(ticket.reuse_minutes, 0), "approved")[1]):
+            res_no_reuse = self._call("ssh_exec", approve=None, vault=self.vault, entry=self.entry,
+                                      origin="ssh://bastion.example.test:22", command="date", reuse_minutes=5)
+        self.assertEqual(res_no_reuse["reuse_expires_in"], 0)
+        with self.assertRaises(ListingError) as declined:
+            self._call("ssh_exec", approve=False, vault=self.vault, entry=self.entry,
+                       origin="ssh://bastion.example.test:22", command="uptime")
+        self.assertEqual(declined.exception.code, "declined")
+
+        # Turn ssh_reuse ON while use_https + read_results + use_ssh still require review.
+        self.workspace.set_scoped_auto_approval("ssh_reuse", True)
+        with patch.object(self.broker.approvals, "wait",
+                          side_effect=lambda ticket, _live: (self.assertEqual(ticket.reuse_minutes, 5), "approved")[1]):
+            res_reuse = self._call("ssh_exec", approve=None, vault=self.vault, entry=self.entry,
+                                   origin="ssh://bastion.example.test:22", command="date", reuse_minutes=5)
+        self.assertGreater(res_reuse["reuse_expires_in"], 0)
+        self.assertEqual(
+            self._call("ssh_exec", approve=None, vault=self.vault, entry=self.entry,
+                       origin="ssh://bastion.example.test:22", command="uptime")["outcome"],
+            "succeeded",
+        )

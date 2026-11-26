@@ -107,13 +107,10 @@ class Workspace:
         self.review_actions = preferences.review_actions - {"read_results"}
         if preferences.review_results:
             self.review_actions |= {"read_results"}
-        self.auto_approve_tokens = preferences.auto_approve_tokens
         self.auto_approve_guest_actions = preferences.auto_approve_guest_actions
         self.auto_approve_scoped_actions = preferences.auto_approve_scoped_actions
-        self.auto_approve_token_changes = preferences.auto_approve_token_changes
-        self.auto_approve_token_extensions = preferences.auto_approve_token_extensions
-        self.auto_approve_token_credential_uses = preferences.auto_approve_token_credential_uses
-        self.auto_approve_token_rotations = preferences.auto_approve_token_rotations
+        for key in TOKEN_AUTO_APPROVAL_OPTIONS:
+            setattr(self, key, getattr(preferences, key))
         self.token_lifespan_days = preferences.token_lifespan_days
         self.unlock_on_desktop_unlock = preferences.unlock_on_desktop_unlock
         self.resume_on_desktop_unlock = preferences.resume_on_desktop_unlock
@@ -448,9 +445,20 @@ class Workspace:
     def guest_auto_approval_enabled(self, operation):
         return not self.review_usage and operation in self.auto_approve_guest_actions
 
+    def scoped_auto_approval_available(self, operation):
+        """Return whether a Use Approved Access option's transport prerequisites are met."""
+        if self.review_usage:
+            return False
+        if operation in ("tls_first_pin", "tls_cert_repin"):
+            return not self.requires_review("use_https")
+        if operation in ("ssh_first_pin", "ssh_key_repin"):
+            return not self.requires_review("use_ssh") or not self.requires_review("use_ssh_sftp")
+        if operation == "ssh_reuse":
+            return True
+        return not self.requires_review("use_https") and not self.requires_review("read_results")
+
     def scoped_auto_approval_enabled(self, operation):
-        return (not self.requires_review("use_https") and not self.requires_review("read_results")
-                and operation in self.auto_approve_scoped_actions)
+        return self.scoped_auto_approval_available(operation) and operation in self.auto_approve_scoped_actions
 
     def set_scoped_auto_approval(self, operation, enabled):
         if operation not in SCOPED_AUTO_APPROVAL_OPTIONS:
@@ -487,6 +495,8 @@ class Workspace:
             self.token_auto_approval_acknowledged = acknowledged
             for key in TOKEN_AUTO_APPROVAL_OPTIONS:
                 setattr(self, key, False)
+            if not acknowledged and any(getattr(settings, key) for key in TOKEN_AUTO_APPROVAL_OPTIONS):
+                self.generation += 1
 
     def set_desktop_unlock_policy(self, setting, enabled):
         if setting not in ("unlock_on_desktop_unlock", "resume_on_desktop_unlock"):
@@ -503,8 +513,12 @@ class Workspace:
                 raise ValueError("Choose a token auto-approval setting.")
             if enabled and not self.token_auto_approval_acknowledged:
                 raise ValueError("Accept the warning before enabling token auto-approval.")
-            self.legacy_access.write(replace(self.legacy_access.read(), **{setting: enabled}))
-            setattr(self, setting, enabled)
+            previous = getattr(self, setting)
+            if previous != enabled:
+                self.legacy_access.write(replace(self.legacy_access.read(), **{setting: enabled}))
+                setattr(self, setting, enabled)
+                if not enabled:
+                    self.generation += 1
 
     def set_token_lifespan_days(self, days):
         """Set the default life span in days for new and auto-extended tokens."""

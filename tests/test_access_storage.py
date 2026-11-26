@@ -70,6 +70,10 @@ class AccessStorageTests(TestCase):
 
         for field, bad_values in (
             ("auto_approve_token_extensions", (1, 0, "true", None, [])),
+            ("auto_approve_extended_lifespans", (1, 0, "true", None, [])),
+            ("auto_approve_released_entry_restores", (1, 0, "true", None, [])),
+            ("auto_approve_expanded_scoped_actions", (1, 0, "true", None, [])),
+            ("auto_approve_unscoped_edits", (1, 0, "true", None, [])),
             ("token_lifespan_days", (MIN_TOKEN_LIFESPAN_DAYS - 1, MAX_TOKEN_LIFESPAN_DAYS + 1,
                                      True, False, "3", 3.5, None)),
         ):
@@ -80,6 +84,33 @@ class AccessStorageTests(TestCase):
                         store.read()
                     with self.assertRaises(ValueError):
                         store.write(replace(migrated, **{field: bad}))
+
+        expanded = replace(
+            migrated,
+            auto_approve_extended_lifespans=True,
+            auto_approve_released_entry_restores=True,
+            auto_approve_expanded_scoped_actions=True,
+            auto_approve_unscoped_edits=True,
+        )
+        store.write(expanded)
+        self.assertEqual(AccessStore(store.path).read(), expanded)
+        raw = json.loads(store.path.read_text())
+        for key in (
+            "auto_approve_extended_lifespans",
+            "auto_approve_released_entry_restores",
+            "auto_approve_expanded_scoped_actions",
+            "auto_approve_unscoped_edits",
+        ):
+            del raw[key]
+        store.path.write_text(json.dumps(raw))
+        fallback_read = store.read()
+        for key in (
+            "auto_approve_extended_lifespans",
+            "auto_approve_released_entry_restores",
+            "auto_approve_expanded_scoped_actions",
+            "auto_approve_unscoped_edits",
+        ):
+            self.assertFalse(getattr(fallback_read, key))
 
     def test_legacy_password_review_expands_to_all_transports(self):
         store = AccessStore(self.root / "access.json")

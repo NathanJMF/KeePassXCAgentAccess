@@ -368,7 +368,8 @@ class SshAccess:
                 needs_pin = not pin_trusted
                 if pin_trusted:
                     committed_pin = probed_hex
-                permit = self.permits.get(permit_key)
+                reuse_enabled = self.workspace.scoped_auto_approval_enabled("ssh_reuse")
+                permit = self.permits.get(permit_key) if reuse_enabled else None
                 permit_valid = (
                     permit is not None
                     and permit.sudo_entry == sudo_entry
@@ -377,6 +378,11 @@ class SshAccess:
                 )
                 review_policy = self.workspace.requires_review(review_action)
                 reused = permit_valid
+                effective_reuse_minutes = (
+                    requested_minutes
+                    if reuse_enabled and not reused and len(self.permits) < MAX_SSH_PERMITS
+                    else 0
+                )
                 review_needed = False if reused else (review_policy or (needs_pin and not auto_pin))
                 if needs_pin:
                     key = (token.id, token_generation, vault, entry, credential_revision, origin, probed_hex)
@@ -409,13 +415,13 @@ class SshAccess:
                     details.append("First-use host key verification. Approving trusts this host key for this token, entry, and destination.")
                 else:
                     details.append("Host key status: Trusted")
-                if requested_minutes:
-                    details.append(f"Reuse window: Allow {op_kind} to {origin} for {requested_minutes} minutes.")
+                if effective_reuse_minutes:
+                    details.append(f"Reuse window: Allow {op_kind} to {origin} for {effective_reuse_minutes} minutes.")
                 ticket = Approval(
                     event, uid, context, action_title, tuple(details), origin,
                     monotonic() + self.broker.approvals.timeout,
                     identity=token.identity, project=token.project, requested=time(),
-                    trusts_certificate=needs_pin, reuse_minutes=requested_minutes, ssh_operation=True,
+                    trusts_certificate=needs_pin, reuse_minutes=effective_reuse_minutes, ssh_operation=True,
                 )
                 answer = self.broker.approvals.wait(ticket, lambda: guard(live))
                 if answer != "approved":
@@ -424,8 +430,8 @@ class SshAccess:
             if reused:
                 decision = "Used approved SSH reuse window"
             elif review_needed:
-                if requested_minutes:
-                    decision = f"Owner approved SSH for {requested_minutes} min"
+                if effective_reuse_minutes:
+                    decision = f"Owner approved SSH for {effective_reuse_minutes} min"
                 elif needs_pin:
                     decision = "Owner approved SSH once and trusted host key"
                 else:
@@ -543,9 +549,8 @@ class SshAccess:
                     result["truncated"] = bool(raw["truncated"])
 
             grant_reuse = (
-                requested_minutes > 0
+                effective_reuse_minutes > 0
                 and not reused
-                and (review_needed or self.workspace.scoped_auto_approval_enabled("ssh_reuse"))
                 and (pin_trusted or committed_pin == probed_hex)
                 and verified_connect
             )
@@ -556,7 +561,7 @@ class SshAccess:
                         self.permits[permit_key] = SshPermit(
                             token.id, revocation_generation, generation, vault, entry,
                             credential_revision, sudo_revision, sudo_entry, session,
-                            probed_hex, monotonic() + requested_minutes * 60,
+                            probed_hex, monotonic() + effective_reuse_minutes * 60,
                         )
                     return True
                 guard(store_permit)

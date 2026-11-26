@@ -387,6 +387,13 @@ class TokenLifespanTests(unittest.TestCase):
             auto3 = self.invoke("extend_access", index=0, days=5, extension_id=str(uuid4()))
             self.assertEqual(auto3["expires_at"], int(t2 + 5 * 86400))
 
+            # Enabling auto_approve_extended_lifespans auto-approves requests beyond default life span.
+            self.workspace.set_token_auto_approval("auto_approve_extended_lifespans", True)
+            over_auto = self.invoke("extend_access", index=0, days=10, extension_id=str(uuid4()))
+            self.assertEqual(over_auto["status"], "active")
+            self.assertEqual(over_auto["expires_at"], int(t2 + 10 * 86400))
+            self.workspace.set_token_auto_approval("auto_approve_extended_lifespans", False)
+
     def test_pending_extension_respects_capacity_disabled_transition_and_workflow_ineligibility(self):
         grant = self.enroll_and_approve(index=0, identity="Capacity Holder")
         # Fill MAX_PENDING slots with pending tokens, so a pending extension hits MAX_PENDING.

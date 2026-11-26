@@ -414,15 +414,18 @@ class ScopedBroker:
                     certificate_expected, certificate_trusted, auto_pin_initial = self.grants.result_certificate_auto_pin(
                         token, chosen, entry, credential_revision, origin, certificate_pin)
                     certificate_committed = certificate_trusted
-                standing_write = (write_once and write_required and any(
-                    "https" in s.uses and s.use_revision == credential_revision for s in matching))
+                expand_scope = self.workspace.token_auto_approval_enabled("auto_approve_expanded_scoped_actions")
+                standing_write = (write_once and write_required and (
+                    expand_scope or any("https" in s.uses and s.use_revision == credential_revision for s in matching)))
                 if standing_write:
                     if provision:
+                        account_permitted = expand_scope or any(
+                            (s.vault, s.entry, s.use_revision) == (chosen, account, account_revision)
+                            and "https_body" in s.uses and origin in s.origins for s in token.scope)
                         automatic_provision = (
                             (not certificate_pin or certificate_trusted or auto_pin_initial)
                             and self.workspace.scoped_auto_approval_enabled("provision_account")
-                            and any((s.vault, s.entry, s.use_revision) == (chosen, account, account_revision)
-                                    and "https_body" in s.uses and origin in s.origins for s in token.scope)
+                            and account_permitted
                         )
                     else:
                         automatic_write = self.workspace.scoped_auto_approval_enabled("https_write_once")

@@ -463,7 +463,7 @@ class ValidationAndBrokerUpgradeTests(TestCase):
             ticket = wait_mock.call_args.args[0]
             self.assertIn(pin, ticket.scope[1])
             self.assertTrue(any("Verify this certificate fingerprint" in line for line in ticket.scope))
-            self.assertFalse(ticket.trusts_certificate)
+            self.assertTrue(ticket.trusts_certificate)
             self.assertIn(f"Certificate SHA-256: {pin}", activity.rows(action="Use password")[0]["scope"])
             self.assertEqual(seen_actions[0].certificate_sha256, pin)
             self.assertEqual(result, {
@@ -472,6 +472,9 @@ class ValidationAndBrokerUpgradeTests(TestCase):
                 "error_detail": "Denied by upstream [REDACTED]",
                 "headers": {"X-Request-Id": "req-1"},
             })
+            # Subsequent request with an https-only grant reuses the persisted TLS pin too.
+            with patch.object(engine.approvals, "wait", side_effect=AssertionError("Should reuse trusted pin")):
+                invoke({"type": "https", "url": "https://self.example.test/v1/ping", "auth": "bearer", "certificate_sha256": pin})
 
             # When the grant also includes https_results, certificate pin trust is persisted and reused.
             secret2 = "0b" * 32

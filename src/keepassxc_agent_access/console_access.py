@@ -181,8 +181,11 @@ class ConsoleAccess:
                     else:
                         if len(self.reusable) + len(self.sessions) < MAX_REUSABLE_CONSOLES:
                             reuse_minutes = requested_minutes
-                        first_eligible = (self.workspace.scoped_auto_approval_enabled("guest_first_use")
-                                          and any("https" in scope.uses for scope in matching))
+                        first_eligible = (
+                            self.workspace.scoped_auto_approval_enabled("guest_first_use")
+                            and (any("https" in scope.uses for scope in matching)
+                                 or self.workspace.token_auto_approval_enabled("auto_approve_expanded_scoped_actions"))
+                        )
                         if "certificate_sha256" in descriptor:
                             pin = descriptor["certificate_sha256"]
                             expected_pins, cert_trusted, auto_pin = self.broker.grants.result_certificate_auto_pin(

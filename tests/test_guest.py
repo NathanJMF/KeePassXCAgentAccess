@@ -295,3 +295,26 @@ class GuestTests(TestCase):
         with self.assertRaises(ListingError) as err:
             self.run_guest(workflow=descriptor)
         self.assertEqual(err.exception.code, "credential_changed")
+
+    def test_guest_auto_approves_on_results_only_scope_when_expanded_actions_enabled(self):
+        descriptor = workflow()
+        vault = self.vaults[0]
+        self.approve([{"vault": vault, "entry": self.entry, "uses": ["https_results"],
+                       "origins": [descriptor["origin"]]}])
+        self.workspace.set_review_action("read_results", False)
+        self.workspace.set_guest_auto_approval("guest_run", True)
+        self.workspace.set_scoped_auto_approval("guest_first_use", True)
+        self.workspace.set_scoped_auto_approval("tls_first_pin", True)
+
+        worker = self.workspace.session(vault).worker
+        with patch.object(worker, "use",
+                          return_value={"outcome": "succeeded", "http_status": 200, "data": [{"job_id": 23}]}):
+            with self.assertRaises(ListingError) as denied:
+                self.reviewed(lambda: self.run_guest(workflow=descriptor), approve=False)
+            self.assertEqual(denied.exception.code, "declined")
+
+            self.workspace.acknowledge_token_auto_approval(True)
+            self.workspace.set_token_auto_approval("auto_approve_expanded_scoped_actions", True)
+            receipt = str(uuid4())
+            with patch.object(self.engine.approvals, "wait", side_effect=AssertionError("Should auto-approve")):
+                self.assertEqual(self.run_guest(workflow=descriptor, receipt=receipt)["id"], receipt)

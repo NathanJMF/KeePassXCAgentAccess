@@ -38,8 +38,12 @@ TOKEN_AUTO_APPROVAL_OPTIONS = {
     "auto_approve_tokens": "Access Tokens - Create",
     "auto_approve_token_changes": "Access Tokens - Update Permissions",
     "auto_approve_token_extensions": "Access Tokens - Extend Life Span",
+    "auto_approve_extended_lifespans": "Access Tokens - Extensions Beyond Default Life Span",
     "auto_approve_token_credential_uses": "Access Tokens - Credential Uses",
     "auto_approve_token_rotations": "Access Tokens - Re-Approve Rotated Passwords",
+    "auto_approve_released_entry_restores": "Access Tokens - Restore Released Entries",
+    "auto_approve_expanded_scoped_actions": "Access Tokens - Expand Scoped Actions",
+    "auto_approve_unscoped_edits": "Vault Edits - Outside Token Permissions",
 }
 
 GUEST_AUTO_APPROVAL_OPTIONS = {
@@ -557,6 +561,10 @@ class AccessSettings:
     token_lifespan_days: int = DEFAULT_TOKEN_LIFESPAN_DAYS
     unlock_on_desktop_unlock: bool = False
     resume_on_desktop_unlock: bool = False
+    auto_approve_extended_lifespans: bool = False
+    auto_approve_released_entry_restores: bool = False
+    auto_approve_expanded_scoped_actions: bool = False
+    auto_approve_unscoped_edits: bool = False
 
     def for_vault(self, identity):
         return dict(self.vaults).get(identity, VaultPolicy())
@@ -598,12 +606,22 @@ class AccessStore:
             token_lifespan_days = data.get("token_lifespan_days", DEFAULT_TOKEN_LIFESPAN_DAYS)
             unlock_on_desktop_unlock = data.get("unlock_on_desktop_unlock", False)
             resume_on_desktop_unlock = data.get("resume_on_desktop_unlock", False)
+            token_extras = {
+                key: data.get(key, False)
+                for key in (
+                    "auto_approve_extended_lifespans",
+                    "auto_approve_released_entry_restores",
+                    "auto_approve_expanded_scoped_actions",
+                    "auto_approve_unscoped_edits",
+                )
+            }
             if (type(retention) is not int or not 1 <= retention <= 365 or type(review_usage) is not bool or type(review_results) is not bool
                     or type(start_unlocked) is not bool or type(auto_approve_tokens) is not bool
                     or type(auto_approve_token_changes) is not bool or type(token_auto_approval_acknowledged) is not bool
                     or type(agent_paused) is not bool
                     or type(auto_approve_token_credential_uses) is not bool or type(auto_approve_token_rotations) is not bool
                     or type(auto_approve_token_extensions) is not bool
+                    or any(type(value) is not bool for value in token_extras.values())
                     or type(token_lifespan_days) is not int
                     or not MIN_TOKEN_LIFESPAN_DAYS <= token_lifespan_days <= MAX_TOKEN_LIFESPAN_DAYS
                     or type(unlock_on_desktop_unlock) is not bool or type(resume_on_desktop_unlock) is not bool
@@ -628,7 +646,7 @@ class AccessStore:
                                   review_results, frozenset(guest_actions), frozenset(scoped_actions),
                                   agent_paused, auto_approve_token_credential_uses, auto_approve_token_rotations,
                                   auto_approve_token_extensions, token_lifespan_days,
-                                  unlock_on_desktop_unlock, resume_on_desktop_unlock)
+                                  unlock_on_desktop_unlock, resume_on_desktop_unlock, **token_extras)
         except FileNotFoundError:
             return AccessSettings()
         except (OSError, AttributeError, ValueError, TypeError, KeyError):
@@ -649,8 +667,8 @@ class AccessStore:
             raise ValueError("Choose a retention period between 1 and 365 days.")
         if type(settings.agent_paused) is not bool:
             raise ValueError("Choose whether agent access is paused.")
-        if type(settings.auto_approve_token_extensions) is not bool:
-            raise ValueError("Choose whether token life span extensions may be auto approved.")
+        if any(type(getattr(settings, key)) is not bool for key in TOKEN_AUTO_APPROVAL_OPTIONS):
+            raise ValueError("Choose whether token auto-approval options are enabled.")
         if (type(settings.token_lifespan_days) is not int
                 or not MIN_TOKEN_LIFESPAN_DAYS <= settings.token_lifespan_days <= MAX_TOKEN_LIFESPAN_DAYS):
             raise ValueError(f"Choose a token life span between {MIN_TOKEN_LIFESPAN_DAYS} and {MAX_TOKEN_LIFESPAN_DAYS} days.")
@@ -666,8 +684,12 @@ class AccessStore:
             "auto_approve_tokens": settings.auto_approve_tokens,
             "auto_approve_token_changes": settings.auto_approve_token_changes,
             "auto_approve_token_extensions": settings.auto_approve_token_extensions,
+            "auto_approve_extended_lifespans": settings.auto_approve_extended_lifespans,
             "auto_approve_token_credential_uses": settings.auto_approve_token_credential_uses,
             "auto_approve_token_rotations": settings.auto_approve_token_rotations,
+            "auto_approve_released_entry_restores": settings.auto_approve_released_entry_restores,
+            "auto_approve_expanded_scoped_actions": settings.auto_approve_expanded_scoped_actions,
+            "auto_approve_unscoped_edits": settings.auto_approve_unscoped_edits,
             "token_auto_approval_acknowledged": settings.token_auto_approval_acknowledged,
             "token_lifespan_days": settings.token_lifespan_days,
             "unlock_on_desktop_unlock": settings.unlock_on_desktop_unlock,

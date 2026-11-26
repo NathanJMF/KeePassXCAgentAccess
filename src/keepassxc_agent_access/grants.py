@@ -214,7 +214,7 @@ class Scope:
         object.__setattr__(self, "origins", origins)
         object.__setattr__(self, "result_certificates", _validate_origin_pins(
             self.result_certificates, origins=origins, uses=uses, use_revision=self.use_revision,
-            required_uses={"https_results"}, error_message="Invalid owner-approved result certificates.",
+            required_uses={"https", "https_results"}, error_message="Invalid owner-approved result certificates.",
         ))
         object.__setattr__(self, "ssh_host_keys", _validate_origin_pins(
             self.ssh_host_keys, origins=origins, uses=uses, use_revision=self.use_revision,
@@ -464,6 +464,8 @@ class Grants:
         self.can_issue_workflow(draft)
         self._put(draft)
 
+    _HTTPS_CERT_USES = frozenset({"https", "https_results"})
+
     @staticmethod
     def _origin_pins(record, vault, entry, revision, origin, *, field, required_uses):
         return tuple(dict(getattr(scope, field)).get(origin) for scope in record.scope
@@ -515,15 +517,15 @@ class Grants:
     @classmethod
     def result_certificate_pins(cls, record, vault, entry, revision, origin):
         return cls._origin_pins(record, vault, entry, revision, origin,
-                                field="result_certificates", required_uses=frozenset({"https_results"}))
+                                field="result_certificates", required_uses=cls._HTTPS_CERT_USES)
 
     def result_certificate_status(self, record, vault, entry, revision, origin, fingerprint):
         return self._pin_status(record, vault, entry, revision, origin, fingerprint,
-                                field="result_certificates", required_uses=frozenset({"https_results"}))
+                                field="result_certificates", required_uses=self._HTTPS_CERT_USES)
 
     def result_certificate_auto_pin(self, record, vault, entry, revision, origin, fingerprint):
         return self._pin_auto_pin(record, vault, entry, revision, origin, fingerprint,
-                                  field="result_certificates", required_uses=frozenset({"https_results"}),
+                                  field="result_certificates", required_uses=self._HTTPS_CERT_USES,
                                   first_option="tls_first_pin", repin_option="tls_cert_repin")
 
     @classmethod
@@ -566,7 +568,7 @@ class Grants:
             return new_scopes
         preserved = []
         for scope in new_scopes:
-            if "https_results" in scope.uses and scope.use_revision is not None and not scope.result_certificates:
+            if (Grants._HTTPS_CERT_USES & set(scope.uses)) and scope.use_revision is not None and not scope.result_certificates:
                 certs = tuple((origin, known_certs[(scope.vault, scope.entry, origin)])
                               for origin in scope.origins if (scope.vault, scope.entry, origin) in known_certs)
                 if certs:
@@ -656,7 +658,7 @@ class Grants:
         """
         return self._trust_origin_pin(
             identifier, generation, vault, entry, revision, origin, fingerprint, expected,
-            field="result_certificates", required_uses=frozenset({"https_results"}),
+            field="result_certificates", required_uses=self._HTTPS_CERT_USES,
         )
 
     def enroll(self, credential, uid, payload, attribution):
@@ -810,7 +812,9 @@ class Grants:
             if candidate and (Counter(self._scope_without_revision(s) for s in record.scope)
                               == Counter(self._scope_without_revision(c.scope) for c in candidate)):
                 choices = candidate
-        if choices and self._restores_released_entry(record, (choice.scope for choice in choices)):
+        if (choices
+                and not self.workspace.token_auto_approval_enabled("auto_approve_released_entry_restores")
+                and self._restores_released_entry(record, (choice.scope for choice in choices))):
             choices = None
         self._change(row, "Request token permissions", "Pending approval", context=attribution,
                      target_scope=tuple(choice.scope for choice in choices) if choices else ())
@@ -933,7 +937,9 @@ class Grants:
         ):
             raise ValueError("The requested scope changed. Reopen the request and review it again.")
         scope = tuple(choice.scope for choice in choices)
-        if automatic and self._restores_released_entry(record, scope):
+        if (automatic
+                and not self.workspace.token_auto_approval_enabled("auto_approve_released_entry_restores")
+                and self._restores_released_entry(record, scope)):
             raise ListingError("revoked")
         granted = {(item.vault, item.entry) for item in scope}
         released = tuple(entry for entry in record.released_entries if entry not in granted)
@@ -1071,7 +1077,8 @@ class Grants:
             ext_id = extension_id or new_id()
             auto = (not self.workspace.paused
                     and self.workspace.token_auto_approval_enabled("auto_approve_token_extensions")
-                    and requested_days <= self.workspace.token_lifespan_days)
+                    and (requested_days <= self.workspace.token_lifespan_days
+                         or self.workspace.token_auto_approval_enabled("auto_approve_extended_lifespans")))
             if auto:
                 new_exp = self.extension_target(record, requested_days, now)
                 ext = ExtensionRequest(ext_id, now, attribution, requested_days, status="active")

@@ -450,3 +450,20 @@ class WorkflowTests(TestCase):
         with self.assertRaises(ListingError) as changed:
             self.invoke("workflow_request", request={**manifest, "id": str(uuid4())})
         self.assertEqual(changed.exception.code, "credential_changed")
+
+    def test_workflow_auto_approves_on_results_only_scope_when_expanded_actions_enabled(self):
+        manifest = self.manifest()
+        del manifest["certificate_sha256"]
+        self.approve([{"vault": manifest["vault"], "entry": manifest["entry"],
+                       "uses": ["https_results"], "origins": [manifest["origin"]]}])
+        self.workspace.set_review_action("read_results", False)
+        self.workspace.set_scoped_auto_approval("workflow", True)
+        with self.assertRaises(ListingError) as denied:
+            self.reviewed(lambda: self.invoke("workflow_request", request=manifest), approve=False)
+        self.assertEqual(denied.exception.code, "declined")
+
+        self.workspace.acknowledge_token_auto_approval(True)
+        self.workspace.set_token_auto_approval("auto_approve_expanded_scoped_actions", True)
+        with patch.object(self.engine.approvals, "wait", side_effect=AssertionError("Should auto-approve")):
+            details = self.invoke("workflow_request", request={**manifest, "id": str(uuid4())})
+        self.assertIn("receipts", details)

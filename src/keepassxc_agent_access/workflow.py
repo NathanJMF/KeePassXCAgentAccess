@@ -269,7 +269,8 @@ class WorkflowAccess:
                              for step in steps.values())
             if draft is None and token.workflow is None:
                 automatic = (
-                    any("https" in scope.uses for scope in matching)
+                    (any("https" in scope.uses for scope in matching)
+                     or self.workspace.token_auto_approval_enabled("auto_approve_expanded_scoped_actions"))
                     and self.workspace.scoped_auto_approval_enabled("workflow")
                     and (cert_trusted or auto_pin)
                     and steps_auto

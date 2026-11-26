@@ -127,11 +127,13 @@ class GuestAccess:
                                              revision, session, monotonic() + self.broker.approvals.timeout + 30)
                 pending_pin = None
                 if automatic and not reused and self.workspace.scoped_auto_approval_enabled("guest_first_use"):
+                    has_https = (any("https" in scope.uses for scope in matching)
+                                 or self.workspace.token_auto_approval_enabled("auto_approve_expanded_scoped_actions"))
                     if "certificate_sha256" in request.data:
                         endpoint = (request.origin, request.data["certificate_sha256"])
                         expected_pins, cert_trusted, auto_pin = self.broker.grants.result_certificate_auto_pin(
                             token, vault, entry, revision, *endpoint)
-                        auto_start = any("https" in scope.uses for scope in matching) and (cert_trusted or auto_pin)
+                        auto_start = has_https and (cert_trusted or auto_pin)
                         if auto_start:
                             expires = monotonic() + (reuse_minutes * 60 if reuse_minutes else JOB_SECONDS)
                             grant = replace(grant, expires=expires,
@@ -139,7 +141,7 @@ class GuestAccess:
                             if not cert_trusted:
                                 pending_pin = (*endpoint, expected_pins)
                     else:
-                        auto_start = any("https" in scope.uses for scope in matching)
+                        auto_start = has_https
                         if auto_start:
                             expires = monotonic() + (reuse_minutes * 60 if reuse_minutes else JOB_SECONDS)
                             grant = replace(grant, expires=expires, trusted_endpoint=None)
